@@ -76,9 +76,31 @@ final class RepoState: ObservableObject, Identifiable {
 
     private var hasLoaded = false
     private var autoFetchTask: Task<Void, Never>?
+    private var watcher: FSWatcher?
+    private var pendingRefresh: Task<Void, Never>?
 
     deinit {
         autoFetchTask?.cancel()
+        pendingRefresh?.cancel()
+    }
+
+    /// Watch the repo (working tree + .git) and refresh quietly, debounced.
+    /// Editing .gitignore, saving files, or committing from a terminal all
+    /// show up within a second — no ⌘R needed.
+    private func startWatching() {
+        guard watcher == nil else { return }
+        watcher = FSWatcher(path: path) { [weak self] in
+            Task { @MainActor [weak self] in self?.scheduleQuietRefresh() }
+        }
+    }
+
+    private func scheduleQuietRefresh() {
+        pendingRefresh?.cancel()
+        pendingRefresh = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard let self, !Task.isCancelled else { return }
+            await self.refresh(quiet: true)
+        }
     }
 
     /// Built-in sensible default (no settings UI): quiet auto-fetch with
@@ -101,6 +123,7 @@ final class RepoState: ObservableObject, Identifiable {
     /// many-times-a-day action and must never flash a spinner.
     func appeared() async {
         startAutoFetch()
+        startWatching()
         if hasLoaded {
             await refresh(quiet: true)
         } else {
