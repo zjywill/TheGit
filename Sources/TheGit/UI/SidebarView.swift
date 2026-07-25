@@ -7,18 +7,12 @@ struct SidebarView: View {
     var body: some View {
         List {
             Section("Local") {
-                OutlineGroup(
-                    BranchTree.build(repo.snapshot.localBranches, path: \.name),
-                    children: \.children
-                ) { node in
+                ForEach(BranchTree.build(repo.snapshot.localBranches, path: \.name)) { node in
                     BranchNodeRow(node: node, repo: repo)
                 }
             }
             Section("Remote") {
-                OutlineGroup(
-                    BranchTree.remoteTree(repo.snapshot.remoteBranches),
-                    children: \.children
-                ) { node in
+                ForEach(BranchTree.remoteTree(repo.snapshot.remoteBranches)) { node in
                     BranchNodeRow(node: node, repo: repo)
                 }
             }
@@ -90,8 +84,26 @@ struct BranchNodeRow: View {
         if let branch = node.branch {
             BranchRow(branch: branch, label: node.name, repo: repo)
         } else {
+            FolderDisclosure(node: node, repo: repo)
+        }
+    }
+}
+
+/// Folder row where clicking ANYWHERE on the row toggles expansion,
+/// not just the chevron.
+struct FolderDisclosure: View {
+    let node: BranchNode
+    @ObservedObject var repo: RepoState
+    @State private var expanded = false
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            ForEach(node.children ?? []) { child in
+                BranchNodeRow(node: child, repo: repo)
+            }
+        } label: {
             HStack(spacing: 6) {
-                Image(systemName: node.id.hasPrefix("remote:") && !node.id.contains("/")
+                Image(systemName: node.id.hasPrefix("remote:") && !node.id.dropFirst(7).contains("/")
                     ? "cloud" : "folder")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
@@ -99,6 +111,11 @@ struct BranchNodeRow: View {
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                withAnimation(.easeOut(duration: 0.15)) { expanded.toggle() }
             }
         }
     }

@@ -367,6 +367,7 @@ struct LaneCanvas: View {
 /// carries several refs. Hover the "+N" for the full list.
 struct BadgeColumn: View {
     let refs: [String]
+    @State private var showOverflow = false
 
     var body: some View {
         let infos = RefBadge.infos(for: refs)
@@ -376,13 +377,26 @@ struct BadgeColumn: View {
                 RefBadge(info: first)
             }
             if infos.count > 1 {
-                Text("+\(infos.count - 1)")
-                    .font(.system(size: 10, weight: .medium))
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(Color.primary.opacity(0.1)))
-                    .foregroundStyle(.secondary)
-                    .help(infos.dropFirst().map(\.label).joined(separator: "\n"))
+                Button {
+                    showOverflow.toggle()
+                } label: {
+                    Text("+\(infos.count - 1)")
+                        .font(.system(size: 10, weight: .medium))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.primary.opacity(0.1)))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.pressEffect)
+                .help("Show all refs on this commit")
+                .popover(isPresented: $showOverflow, arrowEdge: .bottom) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(infos) { info in
+                            RefBadge(info: info)
+                        }
+                    }
+                    .padding(10)
+                }
             }
         }
     }
@@ -393,7 +407,11 @@ struct RefBadge: View {
         let label: String
         let isHead: Bool
         let isTag: Bool
-        let isRemote: Bool
+        /// A local branch ref points at this commit.
+        let hasLocal: Bool
+        /// A remote-tracking ref points at this commit. Both flags true on
+        /// one badge = local and remote are in sync (GitKraken's 💻+☁️).
+        let hasRemote: Bool
         var id: String { label }
     }
 
@@ -413,17 +431,24 @@ struct RefBadge: View {
             let isRemote = !isTag && label.contains("/") // heuristic: origin/x
             // "origin/main" collapses into an existing "main" badge (and vice versa).
             let short = isRemote ? label.split(separator: "/").dropFirst().joined(separator: "/") : label
-            if let i = result.firstIndex(where: { $0.label == short || ($0.isRemote && $0.label.hasSuffix("/" + label)) }) {
+            if let i = result.firstIndex(where: { $0.label == short || ($0.hasRemote && !$0.hasLocal && $0.label.hasSuffix("/" + label)) }) {
                 let old = result[i]
                 result[i] = Info(
-                    label: old.isRemote ? short : old.label,
+                    label: old.hasRemote && !old.hasLocal ? short : old.label,
                     isHead: old.isHead || isHead,
                     isTag: old.isTag,
-                    isRemote: true
+                    hasLocal: old.hasLocal || !isRemote,
+                    hasRemote: old.hasRemote || isRemote
                 )
                 continue
             }
-            result.append(Info(label: label, isHead: isHead, isTag: isTag, isRemote: isRemote))
+            result.append(Info(
+                label: label,
+                isHead: isHead,
+                isTag: isTag,
+                hasLocal: !isTag && !isRemote,
+                hasRemote: isRemote
+            ))
         }
         return result.sorted { $0.isHead && !$1.isHead }
     }
@@ -431,19 +456,39 @@ struct RefBadge: View {
     var color: Color {
         if info.isHead { return .accentColor }
         if info.isTag { return .orange }
-        if info.isRemote { return .purple }
+        if info.hasRemote && !info.hasLocal { return .purple }
         return .teal
     }
 
     var body: some View {
-        Text(info.label)
-            .font(.system(size: 10, weight: .medium))
-            .lineLimit(1)
-            .truncationMode(.tail)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(Capsule().fill(color.opacity(0.18)))
-            .foregroundStyle(color)
-            .help(info.label)
+        HStack(spacing: 3) {
+            Text(info.label)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            if info.isTag {
+                Image(systemName: "tag").font(.system(size: 8))
+            }
+            if info.hasLocal && !info.isTag {
+                Image(systemName: "laptopcomputer").font(.system(size: 8))
+            }
+            if info.hasRemote {
+                Image(systemName: "cloud").font(.system(size: 8))
+            }
+        }
+        .font(.system(size: 10, weight: .medium))
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(Capsule().fill(color.opacity(0.18)))
+        .foregroundStyle(color)
+        .help(helpText)
+    }
+
+    private var helpText: String {
+        if info.isTag { return "Tag \(info.label)" }
+        switch (info.hasLocal, info.hasRemote) {
+        case (true, true): return "\(info.label) — local and remote in sync here"
+        case (true, false): return "\(info.label) — local branch only"
+        default: return "\(info.label) — remote branch"
+        }
     }
 }
