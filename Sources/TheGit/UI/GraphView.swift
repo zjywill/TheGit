@@ -23,9 +23,10 @@ struct GraphView: View {
         // filtered gaps, so rows collapse to a single node column.
         let rows = searching
             ? allRows.filter {
-                $0.commit.subject.localizedCaseInsensitiveContains(query)
-                    || $0.commit.author.localizedCaseInsensitiveContains(query)
-                    || $0.commit.hash.hasPrefix(query.lowercased())
+                !$0.commit.isWip
+                    && ($0.commit.subject.localizedCaseInsensitiveContains(query)
+                        || $0.commit.author.localizedCaseInsensitiveContains(query)
+                        || $0.commit.hash.hasPrefix(query.lowercased()))
             }
             : allRows
         let totalLanes = GraphLayout.maxLanes(of: rows)
@@ -46,40 +47,35 @@ struct GraphView: View {
 
         let changeCount = repo.snapshot.staged.count + repo.snapshot.unstaged.count
             + repo.snapshot.conflicted.count
-        // The dashed WIP node sits on the checked-out branch's lane.
-        let headRow = rows.first { $0.commit.refs.contains { $0.hasPrefix("HEAD") } }
 
         List(selection: $repo.selectedCommit) {
-            if changeCount > 0 && !searching {
-                WipRowView(
-                    column: headRow?.column ?? 0,
-                    color: headRow?.columnColor ?? 0,
-                    changeCount: changeCount,
-                    graphWidth: graphWidth,
-                    badgeWidth: badgeWidth
-                )
-                .contentShape(Rectangle())
-                // Clicking WIP returns the right panel to the commit box.
-                .onTapGesture { repo.selectedCommit = nil }
-                .frame(height: Self.rowHeight)
-                .listRowInsets(EdgeInsets(top: 0, leading: Self.leadingInset, bottom: 0, trailing: 8))
-                .listRowSeparator(.hidden)
-            }
             ForEach(rows) { row in
-                GraphRowView(
-                    row: row,
-                    graphWidth: graphWidth,
-                    badgeWidth: badgeWidth,
-                    faded: faded,
-                    searchMode: searching,
-                    repo: repo
-                )
+                if row.commit.isWip {
+                    // WIP is a synthetic commit laid out like any other, so
+                    // its dashed node sits exactly on HEAD's lane.
+                    WipGraphRow(row: row, changeCount: changeCount, graphWidth: graphWidth, badgeWidth: badgeWidth)
+                        .contentShape(Rectangle())
+                        // Clicking WIP returns the right panel to the commit box.
+                        .onTapGesture { repo.selectedCommit = nil }
+                        .frame(height: Self.rowHeight)
+                        .listRowInsets(EdgeInsets(top: 0, leading: Self.leadingInset, bottom: 0, trailing: 8))
+                        .listRowSeparator(.hidden)
+                } else {
+                    GraphRowView(
+                        row: row,
+                        graphWidth: graphWidth,
+                        badgeWidth: badgeWidth,
+                        faded: faded,
+                        searchMode: searching,
+                        repo: repo
+                    )
                     .frame(height: Self.rowHeight)
                     .listRowInsets(EdgeInsets(top: 0, leading: Self.leadingInset, bottom: 0, trailing: 8))
                     .listRowSeparator(.hidden)
                     .tag(row.commit.hash)
                     // Infinite scroll: reaching the last row loads 500 more.
                     .onAppear { repo.loadMoreIfNeeded(row) }
+                }
             }
         }
         .listStyle(.plain)
@@ -114,11 +110,10 @@ struct GraphView: View {
     }
 }
 
-/// GitKraken's "// WIP" row: uncommitted changes shown as a dashed node
-/// on the checked-out branch's lane, above the graph.
-struct WipRowView: View {
-    let column: Int
-    let color: Int
+/// GitKraken's "// WIP" row: the synthetic WIP commit rendered by the
+/// regular lane canvas (dashed), so it always connects to HEAD's line.
+struct WipGraphRow: View {
+    let row: GraphRow
     let changeCount: Int
     let graphWidth: CGFloat
     let badgeWidth: CGFloat
@@ -129,31 +124,8 @@ struct WipRowView: View {
                 Spacer().frame(width: badgeWidth)
             }
 
-            Canvas { context, size in
-                let laneW = GraphView.laneWidth
-                let x = CGFloat(column) * laneW + laneW / 2
-                let midY = size.height / 2
-                guard x < size.width else { return }
-                let tint = LaneCanvas.color(color)
-                let r: CGFloat = 7
-
-                var stub = Path()
-                stub.move(to: CGPoint(x: x, y: midY + r))
-                stub.addLine(to: CGPoint(x: x, y: size.height))
-                context.stroke(
-                    stub,
-                    with: .color(tint.opacity(0.7)),
-                    style: StrokeStyle(lineWidth: 2, dash: [3, 3])
-                )
-
-                let rect = CGRect(x: x - r, y: midY - r, width: r * 2, height: r * 2)
-                context.stroke(
-                    Path(ellipseIn: rect),
-                    with: .color(tint.opacity(0.9)),
-                    style: StrokeStyle(lineWidth: 1.5, dash: [3, 2.5])
-                )
-            }
-            .frame(width: graphWidth, height: GraphView.rowHeight)
+            LaneCanvas(row: row)
+                .frame(width: graphWidth, height: GraphView.rowHeight)
 
             RoundedRectangle(cornerRadius: 1)
                 .fill(Color.secondary.opacity(0.5))
@@ -345,9 +317,16 @@ struct LaneCanvas: View {
             let laneW = GraphView.laneWidth
             let midY = size.height / 2
             let dotX = x(row.column, laneW)
+            let isWip = row.commit.isWip
 
             func stroke(_ path: Path, color: Int) {
-                context.stroke(path, with: .color(Self.color(color)), lineWidth: 2)
+                context.stroke(
+                    path,
+                    with: .color(Self.color(color)),
+                    style: isWip
+                        ? StrokeStyle(lineWidth: 2, dash: [3, 3])
+                        : StrokeStyle(lineWidth: 2)
+                )
             }
 
             // Straight pass-through lanes.
@@ -400,6 +379,15 @@ struct LaneCanvas: View {
                 Path(ellipseIn: nodeRect),
                 with: .color(Color(nsColor: .textBackgroundColor))
             )
+            if isWip {
+                // Empty dashed circle, GitKraken-style uncommitted node.
+                context.stroke(
+                    Path(ellipseIn: nodeRect.insetBy(dx: 1, dy: 1)),
+                    with: .color(Self.color(row.columnColor).opacity(0.9)),
+                    style: StrokeStyle(lineWidth: 1.5, dash: [3, 2.5])
+                )
+                return
+            }
             context.fill(
                 Path(ellipseIn: nodeRect.insetBy(dx: 1.5, dy: 1.5)),
                 with: .color(Self.color(row.columnColor).opacity(0.22))

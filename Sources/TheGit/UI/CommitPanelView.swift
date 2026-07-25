@@ -114,6 +114,18 @@ struct CommitPanelView: View {
         }
         .background(.background)
         .alert(
+            "Discard changes in \(repo.fileToDiscard?.fileName ?? "")?",
+            isPresented: Binding(
+                get: { repo.fileToDiscard != nil },
+                set: { if !$0 { repo.fileToDiscard = nil } }
+            )
+        ) {
+            Button("Discard", role: .destructive) { repo.confirmDiscardFile() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The file will be restored to its last committed state. Unstaged edits are permanently lost.")
+        }
+        .alert(
             "Delete \(repo.fileToDelete?.fileName ?? "")?",
             isPresented: Binding(
                 get: { repo.fileToDelete != nil },
@@ -322,6 +334,10 @@ struct FileMenu: View {
             Button("Unstage and delete file…") { repo.fileToDelete = file }
         } else {
             Button("Stage") { repo.stage(file) }
+            if file.status != "?" {
+                // Untracked files have nothing to restore — Delete covers them.
+                Button("Discard changes…", role: .destructive) { repo.fileToDiscard = file }
+            }
         }
         Menu("Ignore") {
             Button("Ignore \"\(file.fileName)\"") { repo.ignore(pattern: "/" + file.path) }

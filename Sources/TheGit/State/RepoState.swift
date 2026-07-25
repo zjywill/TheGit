@@ -88,6 +88,7 @@ final class RepoState: ObservableObject, Identifiable {
     @Published var diffCommit: String?
     @Published var commitFiles: [FileChange] = []
     @Published var fileToDelete: FileChange?
+    @Published var fileToDiscard: FileChange?
     @Published var showAddRemote = false
     @Published var newRemoteName = "origin"
     @Published var newRemoteURL = ""
@@ -177,18 +178,36 @@ final class RepoState: ObservableObject, Identifiable {
 
             var snap = RepoSnapshot()
             snap.commits = try await commits
-            snap.graphRows = GraphLayout.layout(commits: snap.commits)
+            let s0 = try await status
+            // WIP is a synthetic commit whose parent is HEAD: the lane
+            // algorithm then routes its line to HEAD's lane correctly,
+            // wherever HEAD sits in date-order.
+            var layoutCommits = snap.commits
+            if !(s0.staged.isEmpty && s0.unstaged.isEmpty && s0.conflicted.isEmpty) {
+                let headHash = snap.commits.first { c in
+                    c.refs.contains { $0.hasPrefix("HEAD") }
+                }?.hash
+                let wip = Commit(
+                    hash: Commit.wipHash,
+                    parents: headHash.map { [$0] } ?? [],
+                    author: "",
+                    date: Date.distantFuture,
+                    refs: [],
+                    subject: "// WIP"
+                )
+                layoutCommits = [wip] + snap.commits
+            }
+            snap.graphRows = GraphLayout.layout(commits: layoutCommits)
             let b = try await branches
             snap.localBranches = b.local
             snap.remoteBranches = b.remote
             snap.worktrees = try await worktrees
             snap.submodules = try await submodules
             snap.stashes = try await stashes
-            let s = try await status
-            snap.staged = s.staged
-            snap.unstaged = s.unstaged
-            snap.conflicted = s.conflicted
-            snap.currentBranch = s.branch
+            snap.staged = s0.staged
+            snap.unstaged = s0.unstaged
+            snap.conflicted = s0.conflicted
+            snap.currentBranch = s0.branch
             snap.operation = try await operation
             snapshot = snap
             // Close the diff if its file no longer has changes.
@@ -476,6 +495,14 @@ final class RepoState: ObservableObject, Identifiable {
                 errorMessage = error.localizedDescription
             }
         }
+    }
+
+    /// Confirmed from the discard dialog: restore the file to its HEAD
+    /// state, dropping unstaged edits (git restore).
+    func confirmDiscardFile() {
+        guard let file = fileToDiscard else { return }
+        fileToDiscard = nil
+        perform { try await $0.run(["restore", "--", file.path]) }
     }
 
     /// Confirmed from the delete dialog: unstage if needed, then remove

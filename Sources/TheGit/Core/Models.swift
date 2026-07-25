@@ -10,6 +10,10 @@ struct Commit: Identifiable, Hashable {
 
     var id: String { hash }
     var shortHash: String { String(hash.prefix(7)) }
+
+    /// Synthetic hash for the uncommitted-changes row in the graph.
+    static let wipHash = "WIP"
+    var isWip: Bool { hash == Self.wipHash }
 }
 
 enum BranchKind: Hashable {
