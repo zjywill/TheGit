@@ -331,6 +331,14 @@ struct BranchRow: View {
                 .font(.system(size: 12, weight: branch.isCurrent ? .semibold : .regular))
                 .lineLimit(1)
                 .truncationMode(.middle)
+            if repo.soloRev == branch.name {
+                Text("SOLO")
+                    .font(.system(size: 8, weight: .bold))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.accentColor.opacity(0.2)))
+                    .foregroundStyle(Color.accentColor)
+            }
             Spacer()
             if branch.upstreamGone {
                 Text("gone")
@@ -359,6 +367,7 @@ struct BranchRow: View {
             if !branch.isCurrent { repo.checkout(branch) }
         }
         .help(branch.isCurrent ? "Current branch" : "Double-click to checkout")
+        .opacity(repo.hiddenRefs.contains(branch.refPath) ? 0.45 : 1)
     }
 
     /// GitKraken-style menus: three variants — current branch,
@@ -393,6 +402,11 @@ struct BranchRow: View {
             } else {
                 Button("Delete…", role: .destructive) { repo.branchToDelete = branch }
             }
+        }
+        Divider()
+        Button(repo.soloRev == branch.name ? "Unsolo" : "Solo") { repo.toggleSolo(branch) }
+        Button(repo.hiddenRefs.contains(branch.refPath) ? "Show in graph" : "Hide from graph") {
+            repo.toggleHidden(branch)
         }
         Divider()
         Button("Copy branch name") { RepoState.copyToPasteboard(branch.name) }

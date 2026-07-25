@@ -334,6 +334,8 @@ struct FileMenu: View {
         }
         Button("Stash file") { repo.stashFile(file) }
         Divider()
+        Button("File History") { repo.showFileHistory(file.path) }
+        Divider()
         Button("Open file in default program") { repo.openFile(file) }
         Button("Show in Finder") { repo.showInFinder(file) }
         Divider()

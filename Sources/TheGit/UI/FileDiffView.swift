@@ -15,10 +15,21 @@ struct FileDiffView: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
+                // Hunk staging only applies to working-tree diffs of
+                // tracked files (untracked = stage the whole file).
+                let hunksStageable = repo.diffCommit == nil
+                    && repo.selectedFile?.status != "?"
+                let staged = repo.selectedFile?.area == .staged
                 ScrollView([.vertical]) {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(repo.diffLines) { line in
-                            DiffLineRow(line: line)
+                            DiffLineRow(
+                                line: line,
+                                hunkAction: hunksStageable && line.hunkIndex != nil
+                                    ? (title: staged ? "Unstage Hunk" : "Stage Hunk",
+                                       run: { repo.stageHunk(line.hunkIndex!) })
+                                    : nil
+                            )
                         }
                     }
                     .padding(.vertical, 4)
@@ -79,6 +90,7 @@ struct FileDiffView: View {
 
 struct DiffLineRow: View {
     let line: DiffLine
+    var hunkAction: (title: String, run: () -> Void)?
 
     private var background: Color {
         switch line.kind {
@@ -104,6 +116,14 @@ struct DiffLineRow: View {
                     .foregroundStyle(.blue)
                     .padding(.leading, 8)
                     .padding(.vertical, 3)
+                Spacer(minLength: 8)
+                if let hunkAction {
+                    Button(hunkAction.title, action: hunkAction.run)
+                        .buttonStyle(.plain)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.trailing, 10)
+                }
             } else {
                 Text(line.oldNum.map(String.init) ?? "")
                     .foregroundStyle(.tertiary)

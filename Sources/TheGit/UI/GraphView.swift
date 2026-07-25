@@ -78,6 +78,8 @@ struct GraphView: View {
                     .listRowInsets(EdgeInsets(top: 0, leading: Self.leadingInset, bottom: 0, trailing: 8))
                     .listRowSeparator(.hidden)
                     .tag(row.commit.hash)
+                    // Infinite scroll: reaching the last row loads 500 more.
+                    .onAppear { repo.loadMoreIfNeeded(row) }
             }
         }
         .listStyle(.plain)

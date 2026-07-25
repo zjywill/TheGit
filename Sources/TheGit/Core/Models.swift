@@ -37,6 +37,14 @@ struct Branch: Identifiable, Hashable {
         }
         return name
     }
+
+    /// Full ref path, e.g. "refs/heads/main" / "refs/remotes/origin/main".
+    var refPath: String {
+        switch kind {
+        case .local: return "refs/heads/\(name)"
+        case .remote: return "refs/remotes/\(name)"
+        }
+    }
 }
 
 struct Worktree: Identifiable, Hashable {

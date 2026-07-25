@@ -62,16 +62,44 @@ actor GitClient {
 
     // MARK: - Queries
 
-    func log(limit: Int = 500) async throws -> [Commit] {
-        // hash, parents, author, unix-date, refs, subject — tab separated, subject last.
-        let format = "%H%x09%P%x09%an%x09%at%x09%D%x09%s"
+    // hash, parents, author, unix-date, refs, subject — tab separated, subject last.
+    private static let logFormat = "%H%x09%P%x09%an%x09%at%x09%D%x09%s"
+
+    /// - solo: show only history reachable from this rev (GitKraken Solo).
+    /// - hiddenPatterns: full ref paths to exclude (GitKraken Hide).
+    func log(limit: Int = 500, solo: String? = nil, hiddenPatterns: [String] = []) async throws -> [Commit] {
+        // --date-order interleaves parallel branches chronologically
+        // (GitKraken-style) while still keeping children before parents.
+        var args = ["log", "--date-order"]
+        if let solo {
+            args += [solo, "HEAD"]
+        } else {
+            for pattern in hiddenPatterns { args.append("--exclude=\(pattern)") }
+            args += ["--branches", "--remotes", "--tags", "HEAD"]
+        }
+        args += ["--format=\(Self.logFormat)", "-n", String(limit)]
+        let out = try await run(args)
+        return GitParsers.parseLog(out)
+    }
+
+    /// Commits that touched one file, following renames.
+    func fileHistory(_ path: String, limit: Int = 200) async throws -> [Commit] {
         let out = try await run([
-            // --date-order interleaves parallel branches chronologically
-            // (GitKraken-style) while still keeping children before parents.
-            "log", "--date-order", "--branches", "--remotes", "--tags", "HEAD",
-            "--format=\(format)", "-n", String(limit),
+            "log", "--follow", "--format=\(Self.logFormat)", "-n", String(limit), "--", path,
         ])
         return GitParsers.parseLog(out)
+    }
+
+    /// Apply a patch to the index only (hunk-level stage/unstage).
+    func applyPatch(_ patch: String, reverse: Bool) async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("thegit-hunk-\(UUID().uuidString).patch")
+        try patch.write(to: tmp, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        var args = ["apply", "--cached"]
+        if reverse { args.append("--reverse") }
+        args.append(tmp.path)
+        try await run(args)
     }
 
     func branches() async throws -> (local: [Branch], remote: [Branch]) {

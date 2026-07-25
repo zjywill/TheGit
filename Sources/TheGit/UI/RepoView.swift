@@ -14,6 +14,9 @@ struct RepoView: View {
             // (the right panel visibly changed width on every file click).
             ZStack {
                 GraphView(repo: repo)
+                if let history = repo.fileHistory {
+                    FileHistoryView(repo: repo, path: history.path, commits: history.commits)
+                }
                 if repo.selectedFile != nil {
                     FileDiffView(repo: repo)
                         // Fast fade-in masks the abrupt full-panel swap;

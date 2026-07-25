@@ -73,6 +73,16 @@ final class RepoState: ObservableObject, Identifiable {
     @Published var commitToHardReset: Commit?
     @Published var selectedFile: FileChange?
     @Published var diffLines: [DiffLine] = []
+    /// Raw structure of the current diff, for hunk-level staging.
+    private var parsedDiff = ParsedDiff()
+    /// Graph visibility filters (GitKraken Solo / Hide). Session-only.
+    @Published var soloRev: String?
+    @Published var hiddenRefs: Set<String> = []
+    /// History of one file, shown over the graph.
+    @Published var fileHistory: (path: String, commits: [Commit])?
+    /// Commits loaded so far; grows when the list scrolls to the bottom.
+    private var logLimit = 500
+    private var loadingMore = false
     /// When non-nil, the diff shown belongs to this commit, not the
     /// working tree (hides stage/unstage in the diff header).
     @Published var diffCommit: String?
@@ -153,7 +163,11 @@ final class RepoState: ObservableObject, Identifiable {
         if !quiet { isBusy = true }
         defer { if !quiet { isBusy = false } }
         do {
-            async let commits = git.log()
+            async let commits = git.log(
+                limit: logLimit,
+                solo: soloRev,
+                hiddenPatterns: Array(hiddenRefs)
+            )
             async let branches = git.branches()
             async let worktrees = git.worktrees()
             async let status = git.status()
@@ -507,7 +521,75 @@ final class RepoState: ObservableObject, Identifiable {
         Task {
             do {
                 let text = try await git.commitFileDiff(hash, path: file.path)
-                diffLines = DiffParser.parse(text)
+                let parsed = DiffParser.parse(text)
+                parsedDiff = parsed
+                diffLines = parsed.lines
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    // MARK: - Lazy loading
+
+    /// Called when the last graph row appears; extends the log window.
+    func loadMoreIfNeeded(_ row: GraphRow) {
+        guard row.id == snapshot.graphRows.last?.id,
+              snapshot.commits.count >= logLimit,
+              !loadingMore
+        else { return }
+        loadingMore = true
+        logLimit += 500
+        Task {
+            await refresh(quiet: true)
+            loadingMore = false
+        }
+    }
+
+    // MARK: - Solo / Hide
+
+    func toggleSolo(_ branch: Branch) {
+        soloRev = soloRev == branch.name ? nil : branch.name
+        Task { await refresh(quiet: true) }
+    }
+
+    func toggleHidden(_ branch: Branch) {
+        if hiddenRefs.contains(branch.refPath) {
+            hiddenRefs.remove(branch.refPath)
+        } else {
+            hiddenRefs.insert(branch.refPath)
+        }
+        Task { await refresh(quiet: true) }
+    }
+
+    // MARK: - File history
+
+    func showFileHistory(_ path: String) {
+        Task {
+            do {
+                fileHistory = (path, try await git.fileHistory(path))
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func closeFileHistory() {
+        fileHistory = nil
+    }
+
+    /// From the history list: show this file's diff within that commit.
+    func selectHistoryEntry(_ commit: Commit, path filePath: String) {
+        selectedCommit = commit.hash
+        selectedFile = FileChange(path: filePath, status: "M", area: .unstaged)
+        diffCommit = commit.hash
+        diffLines = []
+        Task {
+            do {
+                let text = try await git.commitFileDiff(commit.hash, path: filePath)
+                let parsed = DiffParser.parse(text)
+                parsedDiff = parsed
+                diffLines = parsed.lines
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -522,16 +604,44 @@ final class RepoState: ObservableObject, Identifiable {
         diffLines = []
         Task {
             do {
+                let parsed: ParsedDiff
                 if file.status == "?" {
                     let content = (try? String(contentsOfFile: path + "/" + file.path, encoding: .utf8)) ?? ""
-                    diffLines = DiffParser.synthesizeAdded(content)
+                    parsed = DiffParser.synthesizeAdded(content)
                 } else {
                     let text = try await git.diff(path: file.path, staged: file.area == .staged)
-                    diffLines = DiffParser.parse(text)
+                    parsed = DiffParser.parse(text)
                 }
+                parsedDiff = parsed
+                diffLines = parsed.lines
             } catch {
                 errorMessage = error.localizedDescription
             }
+        }
+    }
+
+    /// Stage (or unstage, from the staged view) a single hunk.
+    func stageHunk(_ index: Int) {
+        guard let file = selectedFile, diffCommit == nil,
+              let patch = parsedDiff.patch(forHunk: index)
+        else { return }
+        let reverse = file.area == .staged
+        Task {
+            isBusy = true
+            do {
+                try await git.applyPatch(patch, reverse: reverse)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            await refresh(quiet: true)
+            // Reload what's left of this file's diff; close when nothing remains.
+            let all = snapshot.staged + snapshot.unstaged + snapshot.conflicted
+            if all.contains(where: { $0.id == file.id }) {
+                selectFile(file)
+            } else {
+                closeDiff()
+            }
+            isBusy = false
         }
     }
 
