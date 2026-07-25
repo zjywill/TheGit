@@ -3,6 +3,7 @@ import SwiftUI
 /// Left panel: local branches, remote branches, worktrees.
 struct SidebarView: View {
     @ObservedObject var repo: RepoState
+    @EnvironmentObject var appState: AppState
 
     var body: some View {
         List {
@@ -35,6 +36,38 @@ struct SidebarView: View {
                         }
                     }
                     .help(wt.path)
+                }
+            }
+            if !repo.snapshot.submodules.isEmpty {
+                Section("Submodules") {
+                    ForEach(repo.snapshot.submodules) { sub in
+                        HStack(spacing: 6) {
+                            Image(systemName: "shippingbox")
+                                .font(.system(size: 11))
+                                .foregroundStyle(sub.state == " " ? Color.secondary : .orange)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(sub.displayName)
+                                    .font(.system(size: 12))
+                                    .lineLimit(1)
+                                if sub.state != " " {
+                                    Text(sub.stateDescription)
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.orange)
+                                        .lineLimit(1)
+                                }
+                            }
+                        }
+                        .help("\(sub.path) @ \(String(sub.sha.prefix(7))) — \(sub.stateDescription)")
+                        .contextMenu {
+                            Button("Open as Tab") {
+                                appState.open(path: repo.path + "/" + sub.path)
+                            }
+                            Button("Update (init, recursive)") { repo.updateSubmodules() }
+                        }
+                        .onTapGesture(count: 2) {
+                            appState.open(path: repo.path + "/" + sub.path)
+                        }
+                    }
                 }
             }
         }
@@ -154,7 +187,7 @@ struct BranchRow: View {
         if branch.isCurrent {
             Button("Pull (fast-forward if possible)") { repo.pull() }
             Button("Push") { repo.push() }
-            Button("Set Upstream to origin/\(branch.name)") { repo.setUpstream(branch) }
+            Button("Set Upstream to \(repo.snapshot.defaultRemote)/\(branch.name)") { repo.setUpstream(branch) }
             Divider()
             Button("Create branch here…") { promptCreate() }
             Button("Rename…") { promptRename() }

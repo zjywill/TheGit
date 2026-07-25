@@ -167,14 +167,39 @@ actor GitClient {
         try await run(["checkout", branch])
     }
 
-    /// Checkout a remote branch as a new local tracking branch (or switch if it exists).
-    func checkoutRemote(_ branch: Branch) async throws {
+    /// Checkout a remote branch as a new local tracking branch (or switch
+    /// if a local with the same name exists). `--track <remote>/<branch>`
+    /// is explicit, so it stays unambiguous with multiple remotes —
+    /// DWIM `checkout <name>` errors when two remotes have the branch.
+    func checkoutRemote(_ branch: Branch, localExists: Bool) async throws {
         guard case .remote = branch.kind else {
             try await checkout(branch: branch.name)
             return
         }
-        // `git checkout <shortName>` DWIMs a tracking branch when unambiguous.
-        try await run(["checkout", branch.shortName])
+        if localExists {
+            try await run(["checkout", branch.shortName])
+        } else {
+            try await run(["checkout", "--track", branch.name])
+        }
+    }
+
+    // MARK: - Submodules
+
+    func submodules() async throws -> [Submodule] {
+        // Fast path: no .gitmodules, no submodules.
+        guard FileManager.default.fileExists(atPath: repoPath + "/.gitmodules") else { return [] }
+        let out = try await run(["submodule", "status"])
+        // Format: "<flag><sha> <path> (<ref>)", flag ∈ {' ', '+', '-', 'U'}.
+        return out.split(separator: "\n").compactMap { line in
+            guard let flag = line.first else { return nil }
+            let fields = line.dropFirst().split(separator: " ", omittingEmptySubsequences: true)
+            guard fields.count >= 2 else { return nil }
+            return Submodule(path: String(fields[1]), sha: String(fields[0]), state: flag)
+        }
+    }
+
+    func updateSubmodules() async throws {
+        try await run(["submodule", "update", "--init", "--recursive"])
     }
 
     func merge(_ branch: String) async throws {

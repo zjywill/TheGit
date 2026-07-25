@@ -85,15 +85,54 @@ enum OngoingOperation: String {
     }
 }
 
+struct Submodule: Identifiable, Hashable {
+    let path: String
+    let sha: String
+    /// From `git submodule status`: " " in sync, "+" checked-out commit
+    /// differs, "-" not initialized, "U" merge conflicts.
+    let state: Character
+
+    var id: String { path }
+    var displayName: String { (path as NSString).lastPathComponent }
+
+    var stateDescription: String {
+        switch state {
+        case "+": return "Checked-out commit differs from index"
+        case "-": return "Not initialized"
+        case "U": return "Has merge conflicts"
+        default: return "In sync"
+        }
+    }
+}
+
 struct RepoSnapshot {
     var commits: [Commit] = []
     var graphRows: [GraphRow] = []
     var localBranches: [Branch] = []
     var remoteBranches: [Branch] = []
     var worktrees: [Worktree] = []
+    var submodules: [Submodule] = []
     var staged: [FileChange] = []
     var unstaged: [FileChange] = []
     var conflicted: [FileChange] = []
     var currentBranch: String?
     var operation: OngoingOperation?
+
+    /// Remote names in stable order, e.g. ["origin", "upstream"].
+    var remoteNames: [String] {
+        var seen: Set<String> = []
+        var names: [String] = []
+        for branch in remoteBranches {
+            if case .remote(let name) = branch.kind, seen.insert(name).inserted {
+                names.append(name)
+            }
+        }
+        return names
+    }
+
+    /// The remote used when one must be picked without asking: origin
+    /// if present, else the first remote (GitKraken's behaviour).
+    var defaultRemote: String {
+        remoteNames.contains("origin") ? "origin" : (remoteNames.first ?? "origin")
+    }
 }

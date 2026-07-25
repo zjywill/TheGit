@@ -118,6 +118,7 @@ final class RepoState: ObservableObject, Identifiable {
             async let worktrees = git.worktrees()
             async let status = git.status()
             async let operation = git.operationState()
+            async let submodules = git.submodules()
 
             var snap = RepoSnapshot()
             snap.commits = try await commits
@@ -126,6 +127,7 @@ final class RepoState: ObservableObject, Identifiable {
             snap.localBranches = b.local
             snap.remoteBranches = b.remote
             snap.worktrees = try await worktrees
+            snap.submodules = try await submodules
             let s = try await status
             snap.staged = s.staged
             snap.unstaged = s.unstaged
@@ -143,12 +145,17 @@ final class RepoState: ObservableObject, Identifiable {
         }
     }
 
-    /// Run a mutating git action, then refresh everything.
+    /// Run a mutating git action, then refresh everything. When the repo
+    /// has submodules, keep them updated after every action (GitKraken's
+    /// "Keep submodules up to date" default).
     func perform(_ action: @escaping (GitClient) async throws -> Void) {
         Task {
             isBusy = true
             do {
                 try await action(git)
+                if !snapshot.submodules.isEmpty {
+                    try? await git.updateSubmodules()
+                }
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -179,9 +186,10 @@ final class RepoState: ObservableObject, Identifiable {
     }
 
     func checkout(_ branch: Branch) {
+        let localExists = snapshot.localBranches.contains { $0.name == branch.shortName }
         perform { git in
             if case .remote = branch.kind {
-                try await git.checkoutRemote(branch)
+                try await git.checkoutRemote(branch, localExists: localExists)
             } else {
                 try await git.checkout(branch: branch.name)
             }
@@ -238,7 +246,12 @@ final class RepoState: ObservableObject, Identifiable {
     }
 
     func setUpstream(_ branch: Branch) {
-        perform { try await $0.setUpstream(branch.name, to: "origin/\(branch.name)") }
+        let remote = snapshot.defaultRemote
+        perform { try await $0.setUpstream(branch.name, to: "\(remote)/\(branch.name)") }
+    }
+
+    func updateSubmodules() {
+        perform { try await $0.updateSubmodules() }
     }
 
     /// Confirm side of the name-input dialog (create branch / rename).
@@ -402,7 +415,7 @@ final class RepoState: ObservableObject, Identifiable {
     func copyRemoteLink(for commit: Commit) {
         Task {
             do {
-                var url = try await git.remoteURL()
+                var url = try await git.remoteURL(snapshot.defaultRemote)
                 if url.hasPrefix("git@"), let colon = url.firstIndex(of: ":") {
                     let host = url[url.index(url.startIndex, offsetBy: 4)..<colon]
                     let path = url[url.index(after: colon)...]
