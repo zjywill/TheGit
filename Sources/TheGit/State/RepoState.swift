@@ -62,6 +62,7 @@ final class RepoState: ObservableObject, Identifiable {
     @Published var snapshot = RepoSnapshot()
     @Published var commitMessage = ""
     @Published var panelMode: PanelMode = .commit
+    @Published var searchText = ""
     @Published var amend = false
     @Published var isBusy = false
     @Published var errorMessage: String?
@@ -72,6 +73,10 @@ final class RepoState: ObservableObject, Identifiable {
     @Published var commitToHardReset: Commit?
     @Published var selectedFile: FileChange?
     @Published var diffLines: [DiffLine] = []
+    /// When non-nil, the diff shown belongs to this commit, not the
+    /// working tree (hides stage/unstage in the diff header).
+    @Published var diffCommit: String?
+    @Published var commitFiles: [FileChange] = []
     @Published var fileToDelete: FileChange?
     @Published var showAddRemote = false
     @Published var newRemoteName = "origin"
@@ -154,6 +159,7 @@ final class RepoState: ObservableObject, Identifiable {
             async let status = git.status()
             async let operation = git.operationState()
             async let submodules = git.submodules()
+            async let stashes = git.stashes()
 
             var snap = RepoSnapshot()
             snap.commits = try await commits
@@ -163,6 +169,7 @@ final class RepoState: ObservableObject, Identifiable {
             snap.remoteBranches = b.remote
             snap.worktrees = try await worktrees
             snap.submodules = try await submodules
+            snap.stashes = try await stashes
             let s = try await status
             snap.staged = s.staged
             snap.unstaged = s.unstaged
@@ -289,6 +296,17 @@ final class RepoState: ObservableObject, Identifiable {
 
     func stash() { perform { try await $0.stashPush() } }
     func stashPop() { perform { try await $0.stashPop() } }
+
+    @Published var stashToDrop: Stash?
+
+    func applyStash(_ stash: Stash) { perform { try await $0.stashApply(stash.ref) } }
+    func popStash(_ stash: Stash) { perform { try await $0.stashPop(stash.ref) } }
+
+    func confirmDropStash() {
+        guard let stash = stashToDrop else { return }
+        stashToDrop = nil
+        perform { try await $0.stashDrop(stash.ref) }
+    }
 
     func promptNewBranch() {
         guard let current = snapshot.localBranches.first(where: \.isCurrent) else { return }
@@ -459,10 +477,48 @@ final class RepoState: ObservableObject, Identifiable {
         }
     }
 
+    // MARK: - Commit details
+
+    var selectedCommitObject: Commit? {
+        selectedCommit.flatMap { hash in snapshot.commits.first { $0.hash == hash } }
+    }
+
+    /// Called when the graph selection changes.
+    func commitSelectionChanged() {
+        if diffCommit != nil { closeDiff() }
+        commitFiles = []
+        guard let hash = selectedCommit else { return }
+        Task {
+            do {
+                let files = try await git.commitFiles(hash)
+                // Selection may have moved on while we loaded.
+                if selectedCommit == hash { commitFiles = files }
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func selectCommitFile(_ file: FileChange) {
+        guard let hash = selectedCommit else { return }
+        selectedFile = file
+        diffCommit = hash
+        diffLines = []
+        Task {
+            do {
+                let text = try await git.commitFileDiff(hash, path: file.path)
+                diffLines = DiffParser.parse(text)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
     // MARK: - Diff view
 
     func selectFile(_ file: FileChange) {
         selectedFile = file
+        diffCommit = nil
         diffLines = []
         Task {
             do {
@@ -481,6 +537,7 @@ final class RepoState: ObservableObject, Identifiable {
 
     func closeDiff() {
         selectedFile = nil
+        diffCommit = nil
         diffLines = []
     }
 

@@ -16,16 +16,29 @@ struct GraphView: View {
     private static let leadingInset: CGFloat = 8
 
     var body: some View {
-        let rows = repo.snapshot.graphRows
+        let allRows = repo.snapshot.graphRows
+        let query = repo.searchText.trimmingCharacters(in: .whitespaces)
+        let searching = !query.isEmpty
+        // Search filters to a flat list — lane lines are meaningless across
+        // filtered gaps, so rows collapse to a single node column.
+        let rows = searching
+            ? allRows.filter {
+                $0.commit.subject.localizedCaseInsensitiveContains(query)
+                    || $0.commit.author.localizedCaseInsensitiveContains(query)
+                    || $0.commit.hash.hasPrefix(query.lowercased())
+            }
+            : allRows
         let totalLanes = GraphLayout.maxLanes(of: rows)
         let neededWidth = CGFloat(totalLanes) * Self.laneWidth + 8
         let autoWidth = CGFloat(min(totalLanes, Self.defaultVisibleLanes)) * Self.laneWidth + 8
-        let graphWidth = storedWidth > 0
-            ? min(max(CGFloat(storedWidth), Self.laneWidth * 2), neededWidth)
-            : autoWidth
+        let graphWidth = searching
+            ? Self.laneWidth * 2
+            : storedWidth > 0
+                ? min(max(CGFloat(storedWidth), Self.laneWidth * 2), neededWidth)
+                : autoWidth
         // Lanes beyond the column width fade out instead of hard-clipping
         // (VS Code Git Graph style). Drag the column edge to reveal them.
-        let faded = neededWidth > graphWidth + 1
+        let faded = !searching && neededWidth > graphWidth + 1
         // Dedicated BRANCH/TAG column left of the graph (GitKraken layout):
         // zero width when the loaded range has no refs at all.
         let hasBadges = rows.contains { !RefBadge.infos(for: $0.commit.refs).isEmpty }
@@ -37,7 +50,7 @@ struct GraphView: View {
         let headRow = rows.first { $0.commit.refs.contains { $0.hasPrefix("HEAD") } }
 
         List(selection: $repo.selectedCommit) {
-            if changeCount > 0 {
+            if changeCount > 0 && !searching {
                 WipRowView(
                     column: headRow?.column ?? 0,
                     color: headRow?.columnColor ?? 0,
@@ -45,12 +58,22 @@ struct GraphView: View {
                     graphWidth: graphWidth,
                     badgeWidth: badgeWidth
                 )
+                .contentShape(Rectangle())
+                // Clicking WIP returns the right panel to the commit box.
+                .onTapGesture { repo.selectedCommit = nil }
                 .frame(height: Self.rowHeight)
                 .listRowInsets(EdgeInsets(top: 0, leading: Self.leadingInset, bottom: 0, trailing: 8))
                 .listRowSeparator(.hidden)
             }
             ForEach(rows) { row in
-                GraphRowView(row: row, graphWidth: graphWidth, badgeWidth: badgeWidth, faded: faded, repo: repo)
+                GraphRowView(
+                    row: row,
+                    graphWidth: graphWidth,
+                    badgeWidth: badgeWidth,
+                    faded: faded,
+                    searchMode: searching,
+                    repo: repo
+                )
                     .frame(height: Self.rowHeight)
                     .listRowInsets(EdgeInsets(top: 0, leading: Self.leadingInset, bottom: 0, trailing: 8))
                     .listRowSeparator(.hidden)
@@ -159,7 +182,23 @@ struct GraphRowView: View {
     let graphWidth: CGFloat
     let badgeWidth: CGFloat
     let faded: Bool
+    var searchMode: Bool = false
     @ObservedObject var repo: RepoState
+
+    /// In search mode lane lines are meaningless (rows are filtered),
+    /// so each row shows just its node in column 0.
+    private var displayRow: GraphRow {
+        guard searchMode else { return row }
+        return GraphRow(
+            commit: row.commit,
+            column: 0,
+            columnColor: row.columnColor,
+            passThrough: [],
+            mergeSources: [],
+            parentLanes: [],
+            laneCount: 1
+        )
+    }
 
     /// True when this commit is the tip of the checked-out branch.
     private var isHead: Bool {
@@ -169,11 +208,11 @@ struct GraphRowView: View {
     var body: some View {
         HStack(spacing: 8) {
             if badgeWidth > 0 {
-                BadgeColumn(refs: row.commit.refs)
+                BadgeColumn(refs: row.commit.refs, localBranches: repo.snapshot.localBranches)
                     .frame(width: badgeWidth, alignment: .trailing)
             }
 
-            LaneCanvas(row: row)
+            LaneCanvas(row: displayRow)
                 .frame(width: graphWidth, height: GraphView.rowHeight)
                 .mask(
                     LinearGradient(
@@ -371,14 +410,24 @@ struct LaneCanvas: View {
 /// carries several refs. Hover the "+N" for the full list.
 struct BadgeColumn: View {
     let refs: [String]
+    var localBranches: [Branch] = []
     @State private var showOverflow = false
+
+    /// ahead/behind of the local branch a badge represents, if any.
+    private func track(_ info: RefBadge.Info) -> (ahead: Int, behind: Int)? {
+        guard info.hasLocal,
+              let branch = localBranches.first(where: { $0.name == info.label }),
+              branch.ahead > 0 || branch.behind > 0
+        else { return nil }
+        return (branch.ahead, branch.behind)
+    }
 
     var body: some View {
         let infos = RefBadge.infos(for: refs)
         HStack(spacing: 4) {
             Spacer(minLength: 0)
             if let first = infos.first {
-                RefBadge(info: first)
+                RefBadge(info: first, track: track(first))
             }
             if infos.count > 1 {
                 Button {
@@ -420,6 +469,8 @@ struct RefBadge: View {
     }
 
     let info: Info
+    /// ahead/behind vs upstream, shown inside the badge when non-nil.
+    var track: (ahead: Int, behind: Int)?
 
     /// Turn raw %D refs into display badges: drop origin/HEAD, merge the
     /// local + remote refs of the same branch into one badge, HEAD first.
@@ -477,6 +528,10 @@ struct RefBadge: View {
             }
             if info.hasRemote {
                 Image(systemName: "cloud").font(.system(size: 8))
+            }
+            if let track {
+                Text("\(track.ahead > 0 ? "↑\(track.ahead)" : "")\(track.behind > 0 ? "↓\(track.behind)" : "")")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
             }
         }
         .font(.system(size: 10, weight: .medium))

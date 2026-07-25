@@ -77,7 +77,7 @@ actor GitClient {
     func branches() async throws -> (local: [Branch], remote: [Branch]) {
         let out = try await run([
             "for-each-ref",
-            "--format=%(refname)%09%(HEAD)",
+            "--format=%(refname)%09%(HEAD)%09%(upstream:short)%09%(upstream:track)",
             "refs/heads", "refs/remotes",
         ])
         return GitParsers.parseBranches(out)
@@ -116,6 +116,22 @@ actor GitClient {
         if exists(paths[3]) { return .cherryPick }
         if exists(paths[4]) { return .revert }
         return nil
+    }
+
+    /// Files touched by a commit, with their status letters.
+    func commitFiles(_ hash: String) async throws -> [FileChange] {
+        let out = try await run(["show", "--name-status", "--format=", hash])
+        return out.split(separator: "\n").compactMap { line in
+            let fields = line.split(separator: "\t", omittingEmptySubsequences: false)
+            guard fields.count >= 2, let status = fields[0].first else { return nil }
+            // Renames/copies: "R100\told\tnew" — show the new path.
+            return FileChange(path: String(fields.last!), status: status, area: .unstaged)
+        }
+    }
+
+    /// One file's diff within a commit (works for root commits too).
+    func commitFileDiff(_ hash: String, path: String) async throws -> String {
+        try await run(["show", "--format=", hash, "--", path])
     }
 
     func diff(path: String, staged: Bool) async throws -> String {
@@ -307,6 +323,31 @@ actor GitClient {
 
     func stashFile(_ path: String) async throws {
         try await run(["stash", "push", "-u", "--", path])
+    }
+
+    func stashes() async throws -> [Stash] {
+        let out = try await run(["stash", "list", "--format=%gd%x09%at%x09%gs"])
+        return out.split(separator: "\n").compactMap { line in
+            let fields = line.split(separator: "\t", maxSplits: 2, omittingEmptySubsequences: false)
+            guard fields.count >= 3 else { return nil }
+            return Stash(
+                ref: String(fields[0]),
+                date: Date(timeIntervalSince1970: TimeInterval(fields[1]) ?? 0),
+                message: String(fields[2])
+            )
+        }
+    }
+
+    func stashApply(_ ref: String) async throws {
+        try await run(["stash", "apply", ref])
+    }
+
+    func stashPop(_ ref: String) async throws {
+        try await run(["stash", "pop", ref])
+    }
+
+    func stashDrop(_ ref: String) async throws {
+        try await run(["stash", "drop", ref])
     }
 
     func push() async throws {

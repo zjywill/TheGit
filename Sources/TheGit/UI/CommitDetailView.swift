@@ -1,0 +1,130 @@
+import SwiftUI
+
+/// Right panel when a commit is selected in the graph: metadata plus the
+/// files it touched. Clicking a file shows that commit's diff for it.
+struct CommitDetailView: View {
+    @ObservedObject var repo: RepoState
+    let commit: Commit
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Commit Details")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    repo.selectedCommit = nil
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold))
+                }
+                .buttonStyle(.pressEffect)
+                .foregroundStyle(.secondary)
+                .help("Back to commit panel")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(commit.subject)
+                    .font(.system(size: 12, weight: .semibold))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 6) {
+                    Text(commit.author)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Text(commit.date.formatted(date: .abbreviated, time: .shortened))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                }
+
+                HStack(spacing: 6) {
+                    Text(commit.shortHash)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                    Button {
+                        RepoState.copyToPasteboard(commit.hash)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .font(.system(size: 9))
+                    }
+                    .buttonStyle(.pressEffect)
+                    .foregroundStyle(.secondary)
+                    .help("Copy full sha")
+                }
+            }
+            .padding(12)
+
+            Divider()
+
+            HStack {
+                Text("Changed Files (\(repo.commitFiles.count))")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+
+            List(repo.commitFiles) { file in
+                CommitFileRow(
+                    file: file,
+                    isSelected: repo.selectedFile?.id == file.id && repo.diffCommit != nil
+                ) {
+                    repo.selectCommitFile(file)
+                }
+                .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 12))
+            }
+            .listStyle(.plain)
+        }
+        .background(.background)
+    }
+}
+
+struct CommitFileRow: View {
+    let file: FileChange
+    let isSelected: Bool
+    let select: () -> Void
+
+    var statusColor: Color {
+        switch file.status {
+        case "A": return .green
+        case "M": return .yellow
+        case "D": return .red
+        case "R", "C": return .blue
+        default: return .secondary
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(String(file.status))
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundStyle(statusColor)
+                .frame(width: 14)
+
+            HStack(spacing: 0) {
+                if !file.directory.isEmpty {
+                    Text(file.directory).foregroundStyle(.secondary)
+                }
+                Text(file.fileName)
+            }
+            .font(.system(size: 12))
+            .lineLimit(1)
+            .truncationMode(.head)
+
+            Spacer()
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .fill(isSelected ? Color.accentColor.opacity(0.15) : .clear)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture { select() }
+    }
+}

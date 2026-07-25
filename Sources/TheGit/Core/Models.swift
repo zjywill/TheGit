@@ -21,6 +21,13 @@ struct Branch: Identifiable, Hashable {
     let name: String      // e.g. "main" or "origin/main"
     let kind: BranchKind
     let isCurrent: Bool
+    /// Commits ahead/behind the upstream (local branches with an upstream only).
+    var ahead: Int = 0
+    var behind: Int = 0
+    /// Upstream ref short name, nil when none is configured.
+    var upstream: String?
+    /// Upstream is configured but the remote branch no longer exists.
+    var upstreamGone: Bool = false
 
     var id: String { name }
     /// Branch name without the remote prefix, e.g. "origin/feature/x" -> "feature/x"
@@ -85,6 +92,14 @@ enum OngoingOperation: String {
     }
 }
 
+struct Stash: Identifiable, Hashable {
+    let ref: String      // "stash@{0}"
+    let date: Date
+    let message: String  // "WIP on main: abc123 subject" or custom -m text
+
+    var id: String { ref }
+}
+
 struct Submodule: Identifiable, Hashable {
     let path: String
     let sha: String
@@ -112,6 +127,7 @@ struct RepoSnapshot {
     var remoteBranches: [Branch] = []
     var worktrees: [Worktree] = []
     var submodules: [Submodule] = []
+    var stashes: [Stash] = []
     var staged: [FileChange] = []
     var unstaged: [FileChange] = []
     var conflicted: [FileChange] = []

@@ -62,6 +62,38 @@ struct SidebarView: View {
             } header: {
                 SectionHeader(title: "Worktrees", count: repo.snapshot.worktrees.count)
             }
+            if !repo.snapshot.stashes.isEmpty {
+                Section {
+                    ForEach(repo.snapshot.stashes) { stash in
+                        HStack(spacing: 6) {
+                            Image(systemName: "tray.full")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(stash.message)
+                                    .font(.system(size: 12))
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                                Text("\(stash.ref) · \(stash.date.formatted(.relative(presentation: .named)))")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                        .help(stash.message)
+                        .contextMenu {
+                            Button("Apply (keep stash)") { repo.applyStash(stash) }
+                            Button("Pop (apply and remove)") { repo.popStash(stash) }
+                            Divider()
+                            Button("Drop…", role: .destructive) { repo.stashToDrop = stash }
+                        }
+                        .onTapGesture(count: 2) { repo.applyStash(stash) }
+                    }
+                } header: {
+                    SectionHeader(title: "Stashes", count: repo.snapshot.stashes.count)
+                }
+            }
             if !repo.snapshot.submodules.isEmpty {
                 Section {
                     ForEach(repo.snapshot.submodules) { sub in
@@ -142,6 +174,18 @@ struct SidebarView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Removes the remote and its tracking branches from this repo. Nothing is deleted on the server.")
+        }
+        .alert(
+            "Drop \(repo.stashToDrop?.ref ?? "")?",
+            isPresented: Binding(
+                get: { repo.stashToDrop != nil },
+                set: { if !$0 { repo.stashToDrop = nil } }
+            )
+        ) {
+            Button("Drop", role: .destructive) { repo.confirmDropStash() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("\"\(repo.stashToDrop?.message ?? "")\" will be permanently deleted.")
         }
         .alert(
             deleteTitle,
@@ -288,6 +332,26 @@ struct BranchRow: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer()
+            if branch.upstreamGone {
+                Text("gone")
+                    .font(.system(size: 9, weight: .medium))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.orange.opacity(0.18)))
+                    .foregroundStyle(.orange)
+                    .help("Upstream \(branch.upstream ?? "") no longer exists")
+            } else if branch.ahead > 0 || branch.behind > 0 {
+                HStack(spacing: 3) {
+                    if branch.ahead > 0 {
+                        Text("↑\(branch.ahead)").foregroundStyle(.teal)
+                    }
+                    if branch.behind > 0 {
+                        Text("↓\(branch.behind)").foregroundStyle(.orange)
+                    }
+                }
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .help("\(branch.ahead) ahead, \(branch.behind) behind \(branch.upstream ?? "upstream")")
+            }
         }
         .contentShape(Rectangle())
         .contextMenu { menuItems }

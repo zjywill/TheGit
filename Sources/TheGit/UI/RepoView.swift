@@ -27,8 +27,20 @@ struct RepoView: View {
             }
             .frame(minWidth: 400)
             .layoutPriority(1)
-            CommitPanelView(repo: repo)
-                .frame(minWidth: 260, idealWidth: 300, maxWidth: 420)
+            Group {
+                // Selecting a commit swaps the right panel to its details,
+                // GitKraken-style; ZStack keeps the split widths stable.
+                ZStack {
+                    CommitPanelView(repo: repo)
+                    if let commit = repo.selectedCommitObject {
+                        CommitDetailView(repo: repo, commit: commit)
+                    }
+                }
+            }
+            .frame(minWidth: 260, idealWidth: 300, maxWidth: 420)
+            .onChange(of: repo.selectedCommit) { _, _ in
+                repo.commitSelectionChanged()
+            }
         }
         .toolbar { RepoToolbar(repo: repo) }
         .task { await repo.appeared() }
@@ -66,6 +78,7 @@ struct RepoView: View {
 
 struct RepoToolbar: ToolbarContent {
     @ObservedObject var repo: RepoState
+    @FocusState private var searchFocused: Bool
     /// Default action for the Pull button, GitKraken-style; the dropdown
     /// only picks the default, the button itself executes it.
     @AppStorage("pullMode") private var pullModeRaw = RepoState.PullMode.ff.rawValue
@@ -132,6 +145,40 @@ struct RepoToolbar: ToolbarContent {
             }
             .keyboardShortcut("r")
             .help("Refresh (⌘R)")
+        }
+
+        ToolbarItem {
+            HStack(spacing: 4) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                TextField("Search commits", text: $repo.searchText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .frame(width: 150)
+                    .focused($searchFocused)
+                    .onExitCommand {
+                        repo.searchText = ""
+                        searchFocused = false
+                    }
+                if !repo.searchText.isEmpty {
+                    Button {
+                        repo.searchText = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 11))
+                    }
+                    .buttonStyle(.pressEffect)
+                    .foregroundStyle(.secondary)
+                }
+                // Hidden ⌘F target that focuses the field.
+                Button("") { searchFocused = true }
+                    .keyboardShortcut("f")
+                    .frame(width: 0)
+                    .opacity(0)
+            }
+            .padding(.horizontal, 6)
+            .help("Search commits by message, author, or sha (⌘F, esc to clear)")
         }
 
         // Busy indicator AFTER the left-anchored button cluster: it grows

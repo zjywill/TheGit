@@ -43,15 +43,22 @@ struct FileDiffView: View {
 
                 Spacer()
 
-                Button(file.area == .staged ? "Unstage File" : "Stage File") {
-                    if file.area == .staged {
-                        repo.unstage(file)
-                    } else {
-                        repo.stage(file)
+                if let commitHash = repo.diffCommit {
+                    // Diff of a historical commit — nothing to stage.
+                    Text("@ \(String(commitHash.prefix(7)))")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                } else {
+                    Button(file.area == .staged ? "Unstage File" : "Stage File") {
+                        if file.area == .staged {
+                            repo.unstage(file)
+                        } else {
+                            repo.stage(file)
+                        }
+                        repo.closeDiff()
                     }
-                    repo.closeDiff()
+                    .controlSize(.small)
                 }
-                .controlSize(.small)
 
                 Button {
                     repo.closeDiff()

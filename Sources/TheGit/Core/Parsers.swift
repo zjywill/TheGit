@@ -35,7 +35,22 @@ enum GitParsers {
             let isCurrent = fields.count > 1 && fields[1] == "*"
             if refname.hasPrefix("refs/heads/") {
                 let name = String(refname.dropFirst("refs/heads/".count))
-                local.append(Branch(name: name, kind: .local, isCurrent: isCurrent))
+                var branch = Branch(name: name, kind: .local, isCurrent: isCurrent)
+                if fields.count > 2, !fields[2].isEmpty {
+                    branch.upstream = String(fields[2])
+                }
+                if fields.count > 3 {
+                    // "[ahead 2, behind 1]" / "[ahead 2]" / "[gone]" / ""
+                    let track = fields[3]
+                    branch.upstreamGone = track.contains("gone")
+                    if let r = track.range(of: #"ahead (\d+)"#, options: .regularExpression) {
+                        branch.ahead = Int(track[r].dropFirst(6)) ?? 0
+                    }
+                    if let r = track.range(of: #"behind (\d+)"#, options: .regularExpression) {
+                        branch.behind = Int(track[r].dropFirst(7)) ?? 0
+                    }
+                }
+                local.append(branch)
             } else if refname.hasPrefix("refs/remotes/") {
                 let name = String(refname.dropFirst("refs/remotes/".count))
                 guard !name.hasSuffix("/HEAD") else { continue }
