@@ -62,7 +62,7 @@ actor GitClient {
 
     // MARK: - Queries
 
-    func log(limit: Int = 300) async throws -> [Commit] {
+    func log(limit: Int = 500) async throws -> [Commit] {
         // hash, parents, author, unix-date, refs, subject — tab separated, subject last.
         let format = "%H%x09%P%x09%an%x09%at%x09%D%x09%s"
         let out = try await run([

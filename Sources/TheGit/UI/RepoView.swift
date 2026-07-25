@@ -25,6 +25,12 @@ struct RepoView: View {
         }
         .toolbar { RepoToolbar(repo: repo) }
         .task { await repo.appeared() }
+        // Refresh quietly whenever the app regains focus — changes made
+        // in a terminal or editor show up without pressing ⌘R.
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { await repo.refresh(quiet: true) }
+        }
         .alert(
             "Git Error",
             isPresented: Binding(

@@ -75,12 +75,32 @@ final class RepoState: ObservableObject, Identifiable {
     }
 
     private var hasLoaded = false
+    private var autoFetchTask: Task<Void, Never>?
+
+    deinit {
+        autoFetchTask?.cancel()
+    }
+
+    /// Built-in sensible default (no settings UI): quiet auto-fetch with
+    /// prune every 5 minutes, like GitKraken's Auto-Fetch Interval.
+    private func startAutoFetch() {
+        guard autoFetchTask == nil else { return }
+        autoFetchTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(300))
+                guard let self, !Task.isCancelled else { return }
+                try? await self.git.fetch()
+                await self.refresh(quiet: true)
+            }
+        }
+    }
 
     /// Called when the repo tab appears. First time: full load with busy
     /// indicator. Subsequent tab switches show cached data instantly and
     /// only freshen quietly in the background — switching tabs is a
     /// many-times-a-day action and must never flash a spinner.
     func appeared() async {
+        startAutoFetch()
         if hasLoaded {
             await refresh(quiet: true)
         } else {
