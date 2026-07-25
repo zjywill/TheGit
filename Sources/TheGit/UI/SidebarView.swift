@@ -86,7 +86,8 @@ struct SidebarView: View {
                                 .truncationMode(.middle)
                         }
                         .contentShape(Rectangle())
-                        .help("\(tag.name) @ \(String(tag.hash.prefix(7)))")
+                        .onTapGesture { repo.locate(tag.hash) }
+                        .help("\(tag.name) @ \(String(tag.hash.prefix(7))) — click to locate")
                         .contextMenu {
                             Button("Checkout \(tag.name) (detached)") { repo.checkoutTag(tag) }
                             Divider()
@@ -431,7 +432,9 @@ struct BranchRow: View {
         .onTapGesture(count: 2) {
             if !branch.isCurrent { repo.checkout(branch) }
         }
-        .help(branch.isCurrent ? "Current branch" : "Double-click to checkout")
+        // Single click locates the branch tip in the graph (GitKraken).
+        .onTapGesture { repo.locate(branch.tipHash) }
+        .help(branch.isCurrent ? "Current branch — click to locate" : "Click to locate, double-click to checkout")
         .opacity(repo.hiddenRefs.contains(branch.refPath) ? 0.45 : 1)
     }
 

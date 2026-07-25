@@ -105,7 +105,7 @@ actor GitClient {
     func branches() async throws -> (local: [Branch], remote: [Branch]) {
         let out = try await run([
             "for-each-ref",
-            "--format=%(refname)%09%(HEAD)%09%(upstream:short)%09%(upstream:track)",
+            "--format=%(refname)%09%(HEAD)%09%(upstream:short)%09%(upstream:track)%09%(objectname)",
             "refs/heads", "refs/remotes",
         ])
         return GitParsers.parseBranches(out)
@@ -381,13 +381,15 @@ actor GitClient {
     func tags() async throws -> [Tag] {
         let out = try await run([
             "for-each-ref", "--sort=-creatordate",
-            "--format=%(refname:short)%09%(objectname)",
+            // %(*objectname) dereferences annotated tags to their commit.
+            "--format=%(refname:short)%09%(objectname)%09%(*objectname)",
             "refs/tags",
         ])
         return out.split(separator: "\n").compactMap { line in
-            let fields = line.split(separator: "\t")
+            let fields = line.split(separator: "\t", omittingEmptySubsequences: false)
             guard fields.count >= 2 else { return nil }
-            return Tag(name: String(fields[0]), hash: String(fields[1]))
+            let commit = fields.count > 2 && !fields[2].isEmpty ? fields[2] : fields[1]
+            return Tag(name: String(fields[0]), hash: String(commit))
         }
     }
 

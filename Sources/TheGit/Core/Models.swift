@@ -25,6 +25,8 @@ struct Branch: Identifiable, Hashable {
     let name: String      // e.g. "main" or "origin/main"
     let kind: BranchKind
     let isCurrent: Bool
+    /// Commit the branch points at (for locating it in the graph).
+    var tipHash: String = ""
     /// Commits ahead/behind the upstream (local branches with an upstream only).
     var ahead: Int = 0
     var behind: Int = 0
@@ -152,6 +154,12 @@ struct RepoSnapshot: Equatable {
     var conflicted: [FileChange] = []
     var currentBranch: String?
     var operation: OngoingOperation?
+    /// Commits reachable from HEAD within the loaded window — the current
+    /// branch's history, used to spotlight it in the graph.
+    var reachableFromHead: Set<String> = []
+    /// Branch-line color ids that belong to HEAD's history: lines keep
+    /// full brightness along their whole run, others dim entirely.
+    var brightColors: Set<Int> = []
 
     /// Remote names in stable order, e.g. ["origin", "upstream"].
     var remoteNames: [String] {

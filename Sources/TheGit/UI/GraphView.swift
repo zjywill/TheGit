@@ -52,6 +52,7 @@ struct GraphView: View {
         // restores/adjusts its scroll offset on SwiftUI updates (selection,
         // background refreshes), producing large jumps. With fixed-height
         // rows and stable ids, LazyVStack never moves the scroll position.
+        ScrollViewReader { proxy in
         ScrollView {
             LazyVStack(spacing: 0) {
                 ForEach(rows) { row in
@@ -87,10 +88,19 @@ struct GraphView: View {
                     .frame(height: Self.rowHeight)
                     .padding(.leading, Self.leadingInset)
                     .padding(.trailing, 8)
+                    .id(row.id)
                 }
             }
         }
+        // Sidebar tag/branch clicks land here: jump the graph to the commit.
+        .onChange(of: repo.scrollTarget) { _, target in
+            if let target {
+                proxy.scrollTo(target, anchor: .center)
+                repo.scrollTarget = nil
+            }
+        }
         .background(Color(nsColor: .textBackgroundColor))
+        }
         .overlay(alignment: .topLeading) {
             // Column resizer, spreadsheet-style: the graph is one column of a
             // table. Tracks the pointer 1:1 — no animation on direct manipulation.
@@ -190,6 +200,12 @@ struct GraphRowView: View {
         row.commit.refs.contains { $0.hasPrefix("HEAD") }
     }
 
+    /// Full brightness for the checked-out branch's history; everything
+    /// else is dimmed so "what's on my branch" reads at a glance.
+    private var onCurrentBranch: Bool {
+        row.commit.isWip || repo.snapshot.reachableFromHead.contains(row.commit.hash)
+    }
+
     var body: some View {
         HStack(spacing: 8) {
             if badgeWidth > 0 {
@@ -197,7 +213,7 @@ struct GraphRowView: View {
                     .frame(width: badgeWidth, alignment: .trailing)
             }
 
-            LaneCanvas(row: displayRow)
+            LaneCanvas(row: displayRow, dimmed: !onCurrentBranch, brightColors: searchMode ? nil : repo.snapshot.brightColors)
                 .frame(width: graphWidth, height: GraphView.rowHeight)
                 .mask(
                     LinearGradient(
@@ -217,11 +233,13 @@ struct GraphRowView: View {
             RoundedRectangle(cornerRadius: 1)
                 .fill(LaneCanvas.color(row.columnColor))
                 .frame(width: 3, height: 16)
+                .opacity(onCurrentBranch ? 1 : 0.45)
 
             Text(row.commit.subject)
                 .font(.system(size: 12))
                 .lineLimit(1)
                 .truncationMode(.tail)
+                .opacity(onCurrentBranch ? 1 : 0.55)
 
             Spacer(minLength: 12)
 
@@ -234,12 +252,14 @@ struct GraphRowView: View {
                 .truncationMode(.tail)
                 .frame(width: 90, alignment: .trailing)
                 .help(row.commit.author)
+                .opacity(onCurrentBranch ? 1 : 0.55)
 
             Text(row.commit.shortHash)
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
                 .fixedSize()
+                .opacity(onCurrentBranch ? 1 : 0.55)
         }
         .background(
             repo.selectedCommit == row.commit.hash
@@ -319,6 +339,10 @@ struct GraphRowView: View {
 /// Draws one row's slice of the commit graph.
 struct LaneCanvas: View {
     let row: GraphRow
+    /// Dim this commit's node when it isn't on the current branch.
+    var dimmed: Bool = false
+    /// Branch-line color ids on the current branch; nil = everything bright.
+    var brightColors: Set<Int>? = nil
 
     static let palette: [Color] = [
         .blue, .purple, .teal, .orange, .pink, .green, .indigo, .red, .cyan, .yellow,
@@ -335,10 +359,17 @@ struct LaneCanvas: View {
             let dotX = x(row.column, laneW)
             let isWip = row.commit.isWip
 
+            // Whole lines dim together: an edge is bright when its
+            // branch-line color id belongs to the current branch's history.
+            func lineAlpha(_ color: Int) -> Double {
+                guard let brightColors else { return 1 }
+                return brightColors.contains(color) ? 1 : 0.35
+            }
+
             func stroke(_ path: Path, color: Int) {
                 context.stroke(
                     path,
-                    with: .color(Self.color(color)),
+                    with: .color(Self.color(color).opacity(lineAlpha(color))),
                     style: isWip
                         ? StrokeStyle(lineWidth: 2, dash: [3, 3])
                         : StrokeStyle(lineWidth: 2)
@@ -406,17 +437,17 @@ struct LaneCanvas: View {
             }
             context.fill(
                 Path(ellipseIn: nodeRect.insetBy(dx: 1.5, dy: 1.5)),
-                with: .color(Self.color(row.columnColor).opacity(0.22))
+                with: .color(Self.color(row.columnColor).opacity(dimmed ? 0.1 : 0.22))
             )
             context.stroke(
                 Path(ellipseIn: nodeRect),
-                with: .color(Self.color(row.columnColor)),
+                with: .color(Self.color(row.columnColor).opacity(dimmed ? 0.45 : 1)),
                 lineWidth: 2
             )
             context.draw(
                 Text(Self.initials(row.commit.author))
                     .font(.system(size: 7, weight: .bold))
-                    .foregroundColor(Self.color(row.columnColor)),
+                    .foregroundColor(Self.color(row.columnColor).opacity(dimmed ? 0.5 : 1)),
                 at: CGPoint(x: dotX, y: midY)
             )
         }

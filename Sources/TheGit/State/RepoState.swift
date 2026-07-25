@@ -199,6 +199,19 @@ final class RepoState: ObservableObject, Identifiable {
                 layoutCommits = [wip] + snap.commits
             }
             snap.graphRows = GraphLayout.layout(commits: layoutCommits)
+            snap.reachableFromHead = Self.reachableSet(
+                from: snap.commits.first { c in c.refs.contains { $0.hasPrefix("HEAD") } }?.hash,
+                commits: snap.commits
+            )
+            // A line is "on the current branch" when it carries a reachable
+            // commit or leads to its parents (also reachable by definition).
+            var bright: Set<Int> = []
+            for row in snap.graphRows
+            where row.commit.isWip || snap.reachableFromHead.contains(row.commit.hash) {
+                bright.insert(row.columnColor)
+                for edge in row.parentLanes { bright.insert(edge.color) }
+            }
+            snap.brightColors = bright
             let b = try await branches
             snap.localBranches = b.local
             snap.remoteBranches = b.remote
@@ -225,6 +238,22 @@ final class RepoState: ObservableObject, Identifiable {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    /// Parent-closure of HEAD within the loaded commits.
+    nonisolated static func reachableSet(from head: String?, commits: [Commit]) -> Set<String> {
+        guard let head else { return [] }
+        var parents: [String: [String]] = [:]
+        parents.reserveCapacity(commits.count)
+        for commit in commits { parents[commit.hash] = commit.parents }
+        var seen: Set<String> = [head]
+        var queue = [head]
+        while let hash = queue.popLast() {
+            for parent in parents[hash] ?? [] where seen.insert(parent).inserted {
+                queue.append(parent)
+            }
+        }
+        return seen
     }
 
     /// Run a mutating git action, then refresh everything. When the repo
@@ -616,6 +645,31 @@ final class RepoState: ObservableObject, Identifiable {
                 diffLines = parsed.lines
             } catch {
                 errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    /// Graph scroll request (commit hash); consumed by GraphView.
+    @Published var scrollTarget: String?
+
+    /// Select a commit and scroll the graph to it. If it's deeper than the
+    /// loaded window, extend the window far enough first.
+    func locate(_ hash: String) {
+        guard !hash.isEmpty else { return }
+        if snapshot.commits.contains(where: { $0.hash == hash }) {
+            selectedCommit = hash
+            scrollTarget = hash
+            return
+        }
+        Task {
+            // Rough depth: commits (on any ref) newer than the target.
+            let out = try? await git.run(["rev-list", "--count", "--all", "^\(hash)"])
+            let depth = Int(out?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? logLimit
+            logLimit = max(logLimit, depth + 100)
+            await refresh(quiet: true)
+            if snapshot.commits.contains(where: { $0.hash == hash }) {
+                selectedCommit = hash
+                scrollTarget = hash
             }
         }
     }

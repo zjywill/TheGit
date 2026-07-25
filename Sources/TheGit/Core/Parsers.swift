@@ -36,6 +36,7 @@ enum GitParsers {
             if refname.hasPrefix("refs/heads/") {
                 let name = String(refname.dropFirst("refs/heads/".count))
                 var branch = Branch(name: name, kind: .local, isCurrent: isCurrent)
+                if fields.count > 4 { branch.tipHash = String(fields[4]) }
                 if fields.count > 2, !fields[2].isEmpty {
                     branch.upstream = String(fields[2])
                 }
@@ -55,7 +56,9 @@ enum GitParsers {
                 let name = String(refname.dropFirst("refs/remotes/".count))
                 guard !name.hasSuffix("/HEAD") else { continue }
                 let remoteName = String(name.split(separator: "/").first ?? "")
-                remote.append(Branch(name: name, kind: .remote(remoteName), isCurrent: false))
+                var branch = Branch(name: name, kind: .remote(remoteName), isCurrent: false)
+                if fields.count > 4 { branch.tipHash = String(fields[4]) }
+                remote.append(branch)
             }
         }
         return (local, remote)
