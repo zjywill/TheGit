@@ -28,6 +28,18 @@ struct RepoView: View {
         } message: {
             Text(repo.errorMessage ?? "")
         }
+        .alert(
+            "Hard reset to \(repo.commitToHardReset?.shortHash ?? "")?",
+            isPresented: Binding(
+                get: { repo.commitToHardReset != nil },
+                set: { if !$0 { repo.commitToHardReset = nil } }
+            )
+        ) {
+            Button("Hard Reset", role: .destructive) { repo.confirmHardReset() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("All uncommitted changes and commits after this point will be permanently discarded.")
+        }
     }
 }
 

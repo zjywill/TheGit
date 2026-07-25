@@ -39,6 +39,39 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        .alert(
+            repo.branchPrompt?.title ?? "",
+            isPresented: Binding(
+                get: { repo.branchPrompt != nil },
+                set: { if !$0 { repo.branchPrompt = nil; repo.promptText = "" } }
+            )
+        ) {
+            TextField(repo.branchPrompt?.fieldLabel ?? "Name", text: $repo.promptText)
+            Button(repo.branchPrompt?.confirmLabel ?? "OK") { repo.confirmPrompt() }
+            Button("Cancel", role: .cancel) {}
+        }
+        .alert(
+            deleteTitle,
+            isPresented: Binding(
+                get: { repo.branchToDelete != nil },
+                set: { if !$0 { repo.branchToDelete = nil } }
+            )
+        ) {
+            Button("Delete", role: .destructive) { repo.confirmDelete() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            if case .remote(let remote) = repo.branchToDelete?.kind {
+                Text("This deletes the branch on the \"\(remote)\" remote. Others using it will lose it.")
+            } else {
+                Text("The branch will be force-deleted, including unmerged commits.")
+            }
+        }
+    }
+
+    private var deleteTitle: String {
+        guard let branch = repo.branchToDelete else { return "" }
+        if case .remote = branch.kind { return "Delete \(branch.name) on remote?" }
+        return "Delete \(branch.name)?"
     }
 }
 
@@ -58,13 +91,57 @@ struct BranchRow: View {
             Spacer()
         }
         .contentShape(Rectangle())
-        .contextMenu {
-            Button("Checkout") { repo.checkout(branch) }
-                .disabled(branch.isCurrent)
-        }
+        .contextMenu { menuItems }
         .onTapGesture(count: 2) {
             if !branch.isCurrent { repo.checkout(branch) }
         }
         .help(branch.isCurrent ? "Current branch" : "Double-click to checkout")
+    }
+
+    /// GitKraken-style menus: three variants — current branch,
+    /// other local branch, remote branch.
+    @ViewBuilder
+    private var menuItems: some View {
+        let current = repo.snapshot.currentBranch ?? "HEAD"
+
+        if branch.isCurrent {
+            Button("Pull (fast-forward if possible)") { repo.pull() }
+            Button("Push") { repo.push() }
+            Button("Set Upstream to origin/\(branch.name)") { repo.setUpstream(branch) }
+            Divider()
+            Button("Create branch here…") { promptCreate() }
+            Button("Rename…") { promptRename() }
+        } else {
+            Button("Checkout \(branch.shortName)") { repo.checkout(branch) }
+            Divider()
+            Button("Merge \(branch.name) into \(current)") { repo.merge(branch) }
+            Button("Rebase \(current) onto \(branch.name)") { repo.rebaseOnto(branch) }
+            Divider()
+            Button("Create branch here…") { promptCreate() }
+            if case .local = branch.kind {
+                Button("Rename…") { promptRename() }
+            }
+            if case .remote = branch.kind {
+                Button("Create worktree from \(branch.shortName)…") { repo.addWorktree(for: branch) }
+            }
+            Divider()
+            if case .remote = branch.kind {
+                Button("Delete on remote…", role: .destructive) { repo.branchToDelete = branch }
+            } else {
+                Button("Delete…", role: .destructive) { repo.branchToDelete = branch }
+            }
+        }
+        Divider()
+        Button("Copy branch name") { RepoState.copyToPasteboard(branch.name) }
+    }
+
+    private func promptCreate() {
+        repo.promptText = ""
+        repo.branchPrompt = .createBranch(from: branch)
+    }
+
+    private func promptRename() {
+        repo.promptText = branch.name
+        repo.branchPrompt = .rename(branch)
     }
 }

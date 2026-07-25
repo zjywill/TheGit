@@ -59,6 +59,32 @@ struct FileChange: Identifiable, Hashable {
     }
 }
 
+/// A multi-step git operation that is paused mid-flight (usually on conflicts).
+enum OngoingOperation: String {
+    case merge = "Merge"
+    case rebase = "Rebase"
+    case cherryPick = "Cherry-pick"
+    case revert = "Revert"
+
+    var continueArgs: [String] {
+        switch self {
+        case .merge: return ["merge", "--continue"]
+        case .rebase: return ["rebase", "--continue"]
+        case .cherryPick: return ["cherry-pick", "--continue"]
+        case .revert: return ["revert", "--continue"]
+        }
+    }
+
+    var abortArgs: [String] {
+        switch self {
+        case .merge: return ["merge", "--abort"]
+        case .rebase: return ["rebase", "--abort"]
+        case .cherryPick: return ["cherry-pick", "--abort"]
+        case .revert: return ["revert", "--abort"]
+        }
+    }
+}
+
 struct RepoSnapshot {
     var commits: [Commit] = []
     var graphRows: [GraphRow] = []
@@ -67,5 +93,7 @@ struct RepoSnapshot {
     var worktrees: [Worktree] = []
     var staged: [FileChange] = []
     var unstaged: [FileChange] = []
+    var conflicted: [FileChange] = []
     var currentBranch: String?
+    var operation: OngoingOperation?
 }

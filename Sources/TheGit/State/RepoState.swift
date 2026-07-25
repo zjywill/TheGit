@@ -1,5 +1,52 @@
+import AppKit
 import Foundation
 import SwiftUI
+
+/// An action that needs text typed into a dialog first.
+enum BranchPrompt: Identifiable {
+    case createBranch(from: Branch)
+    case rename(Branch)
+    case createBranchAtCommit(Commit)
+    case tagCommit(Commit)
+    case amendMessage(Commit)
+
+    var id: String {
+        switch self {
+        case .createBranch(let b): return "create-\(b.name)"
+        case .rename(let b): return "rename-\(b.name)"
+        case .createBranchAtCommit(let c): return "create-at-\(c.hash)"
+        case .tagCommit(let c): return "tag-\(c.hash)"
+        case .amendMessage(let c): return "amend-\(c.hash)"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .createBranch(let b): return "New branch at \(b.name)"
+        case .rename(let b): return "Rename \(b.name)"
+        case .createBranchAtCommit(let c): return "New branch at \(c.shortHash)"
+        case .tagCommit(let c): return "New tag at \(c.shortHash)"
+        case .amendMessage: return "Edit commit message"
+        }
+    }
+
+    var confirmLabel: String {
+        switch self {
+        case .createBranch, .createBranchAtCommit: return "Create"
+        case .rename: return "Rename"
+        case .tagCommit: return "Tag"
+        case .amendMessage: return "Amend"
+        }
+    }
+
+    var fieldLabel: String {
+        switch self {
+        case .tagCommit: return "Tag name"
+        case .amendMessage: return "Commit message"
+        default: return "Branch name"
+        }
+    }
+}
 
 /// Observable state for one open repository (one tab).
 @MainActor
@@ -12,6 +59,10 @@ final class RepoState: ObservableObject, Identifiable {
     @Published var isBusy = false
     @Published var errorMessage: String?
     @Published var selectedCommit: String?
+    @Published var branchPrompt: BranchPrompt?
+    @Published var promptText = ""
+    @Published var branchToDelete: Branch?
+    @Published var commitToHardReset: Commit?
 
     nonisolated var id: String { path }
     var displayName: String { (path as NSString).lastPathComponent }
@@ -44,6 +95,7 @@ final class RepoState: ObservableObject, Identifiable {
             async let branches = git.branches()
             async let worktrees = git.worktrees()
             async let status = git.status()
+            async let operation = git.operationState()
 
             var snap = RepoSnapshot()
             snap.commits = try await commits
@@ -55,7 +107,9 @@ final class RepoState: ObservableObject, Identifiable {
             let s = try await status
             snap.staged = s.staged
             snap.unstaged = s.unstaged
+            snap.conflicted = s.conflicted
             snap.currentBranch = s.branch
+            snap.operation = try await operation
             snapshot = snap
         } catch {
             errorMessage = error.localizedDescription
@@ -110,4 +164,168 @@ final class RepoState: ObservableObject, Identifiable {
     func fetch() { perform { try await $0.fetch() } }
     func pull() { perform { try await $0.pull() } }
     func push() { perform { try await $0.push() } }
+
+    // MARK: - Branch context-menu actions
+
+    func merge(_ branch: Branch) {
+        perform { try await $0.merge(branch.name) }
+    }
+
+    func rebaseOnto(_ branch: Branch) {
+        perform { try await $0.rebase(onto: branch.name) }
+    }
+
+    func setUpstream(_ branch: Branch) {
+        perform { try await $0.setUpstream(branch.name, to: "origin/\(branch.name)") }
+    }
+
+    /// Confirm side of the name-input dialog (create branch / rename).
+    func confirmPrompt() {
+        guard let prompt = branchPrompt else { return }
+        let name = promptText.trimmingCharacters(in: .whitespaces)
+        branchPrompt = nil
+        promptText = ""
+        guard !name.isEmpty else { return }
+        switch prompt {
+        case .createBranch(let from):
+            perform { try await $0.createBranch(name, at: from.name, checkout: true) }
+        case .rename(let branch):
+            perform { try await $0.renameBranch(branch.name, to: name) }
+        case .createBranchAtCommit(let commit):
+            perform { try await $0.createBranch(name, at: commit.hash, checkout: true) }
+        case .tagCommit(let commit):
+            perform { try await $0.tag(name, at: commit.hash) }
+        case .amendMessage:
+            perform { try await $0.amendMessage(name) }
+        }
+    }
+
+    /// Confirm side of the delete dialog. Local: force delete.
+    /// Remote: push --delete on the branch's remote.
+    func confirmDelete() {
+        guard let branch = branchToDelete else { return }
+        branchToDelete = nil
+        switch branch.kind {
+        case .local:
+            perform { try await $0.deleteLocalBranch(branch.name) }
+        case .remote(let remote):
+            perform { try await $0.deleteRemoteBranch(remote: remote, branch: branch.shortName) }
+        }
+    }
+
+    /// Pick a folder with NSOpenPanel, then `git worktree add` there.
+    func addWorktree(for branch: Branch) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose an empty folder for the \(branch.shortName) worktree"
+        panel.prompt = "Create Worktree"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        perform { try await $0.addWorktree(at: url.path, branch: branch.shortName) }
+    }
+
+    nonisolated static func copyToPasteboard(_ string: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(string, forType: .string)
+    }
+
+    // MARK: - Conflict resolution
+
+    func acceptOurs(_ file: FileChange) {
+        perform { try await $0.acceptSide(file.path, ours: true) }
+    }
+
+    func acceptTheirs(_ file: FileChange) {
+        perform { try await $0.acceptSide(file.path, ours: false) }
+    }
+
+    func markResolved(_ file: FileChange) {
+        perform { try await $0.stage(file.path) }
+    }
+
+    func continueOperation() {
+        guard let op = snapshot.operation else { return }
+        perform { try await $0.continueOperation(op) }
+    }
+
+    func abortOperation() {
+        guard let op = snapshot.operation else { return }
+        perform { try await $0.abortOperation(op) }
+    }
+
+    // MARK: - Commit context-menu actions
+
+    func checkoutCommit(_ commit: Commit) {
+        perform { try await $0.checkout(branch: commit.hash) }
+    }
+
+    func cherryPick(_ commit: Commit) {
+        perform { try await $0.cherryPick(commit.hash) }
+    }
+
+    func revert(_ commit: Commit) {
+        perform { try await $0.revert(commit.hash) }
+    }
+
+    func rebaseOntoCommit(_ commit: Commit) {
+        perform { try await $0.rebase(onto: commit.hash) }
+    }
+
+    func reset(to commit: Commit, mode: GitClient.ResetMode) {
+        perform { try await $0.reset(to: commit.hash, mode: mode) }
+    }
+
+    func confirmHardReset() {
+        guard let commit = commitToHardReset else { return }
+        commitToHardReset = nil
+        reset(to: commit, mode: .hard)
+    }
+
+    func addWorktree(atCommit commit: Commit) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose an empty folder for the worktree at \(commit.shortHash)"
+        panel.prompt = "Create Worktree"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        perform { try await $0.addWorktree(at: url.path, branch: commit.hash) }
+    }
+
+    /// git format-patch → NSSavePanel.
+    func savePatch(for commit: Commit) {
+        Task {
+            do {
+                let patch = try await git.formatPatch(commit.hash)
+                let panel = NSSavePanel()
+                panel.nameFieldStringValue = "\(commit.shortHash).patch"
+                guard panel.runModal() == .OK, let url = panel.url else { return }
+                try patch.write(to: url, atomically: true, encoding: .utf8)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    /// Build a web URL for the commit from origin's URL and copy it.
+    /// Handles both https:// and git@host: remote formats.
+    func copyRemoteLink(for commit: Commit) {
+        Task {
+            do {
+                var url = try await git.remoteURL()
+                if url.hasPrefix("git@"), let colon = url.firstIndex(of: ":") {
+                    let host = url[url.index(url.startIndex, offsetBy: 4)..<colon]
+                    let path = url[url.index(after: colon)...]
+                    url = "https://\(host)/\(path)"
+                }
+                if url.hasSuffix(".git") { url = String(url.dropLast(4)) }
+                Self.copyToPasteboard("\(url)/commit/\(commit.hash)")
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
 }

@@ -79,9 +79,17 @@ enum GitParsers {
 
     // MARK: - status (porcelain v2)
 
-    static func parseStatus(_ output: String) -> (staged: [FileChange], unstaged: [FileChange], branch: String?) {
+    struct StatusResult {
         var staged: [FileChange] = []
         var unstaged: [FileChange] = []
+        var conflicted: [FileChange] = []
+        var branch: String?
+    }
+
+    static func parseStatus(_ output: String) -> StatusResult {
+        var staged: [FileChange] = []
+        var unstaged: [FileChange] = []
+        var conflicted: [FileChange] = []
         var branch: String?
 
         for line in output.split(separator: "\n") {
@@ -111,9 +119,9 @@ enum GitParsers {
             } else if line.hasPrefix("u ") {
                 let fields = line.split(separator: " ", maxSplits: 10, omittingEmptySubsequences: false)
                 guard fields.count >= 11 else { continue }
-                unstaged.append(FileChange(path: String(fields[10]), status: "U", area: .unstaged))
+                conflicted.append(FileChange(path: String(fields[10]), status: "U", area: .unstaged))
             }
         }
-        return (staged, unstaged, branch)
+        return StatusResult(staged: staged, unstaged: unstaged, conflicted: conflicted, branch: branch)
     }
 }

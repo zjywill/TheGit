@@ -23,6 +23,13 @@ actor GitClient {
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
                 process.arguments = ["git", "-C", path] + args
+                // Never let git open an editor or prompt on the terminal —
+                // continue/amend flows must complete non-interactively.
+                process.environment = ProcessInfo.processInfo.environment.merging([
+                    "GIT_EDITOR": "true",
+                    "GIT_PAGER": "cat",
+                    "GIT_TERMINAL_PROMPT": "0",
+                ]) { _, new in new }
                 let stdout = Pipe()
                 let stderr = Pipe()
                 process.standardOutput = stdout
@@ -81,9 +88,50 @@ actor GitClient {
         return GitParsers.parseWorktrees(out)
     }
 
-    func status() async throws -> (staged: [FileChange], unstaged: [FileChange], branch: String?) {
+    func status() async throws -> GitParsers.StatusResult {
         let out = try await run(["status", "--porcelain=v2", "--branch"])
         return GitParsers.parseStatus(out)
+    }
+
+    /// Detect a paused merge/rebase/cherry-pick/revert by checking the
+    /// state files inside the git dir (worktree-safe via --git-path).
+    func operationState() async throws -> OngoingOperation? {
+        let out = try await run([
+            "rev-parse",
+            "--git-path", "rebase-merge",
+            "--git-path", "rebase-apply",
+            "--git-path", "MERGE_HEAD",
+            "--git-path", "CHERRY_PICK_HEAD",
+            "--git-path", "REVERT_HEAD",
+        ])
+        let paths = out.split(separator: "\n").map(String.init)
+        guard paths.count >= 5 else { return nil }
+        let base = repoPath
+        func exists(_ p: String) -> Bool {
+            FileManager.default.fileExists(atPath: p.hasPrefix("/") ? p : base + "/" + p)
+        }
+        // Rebase first: a paused rebase can also leave CHERRY_PICK_HEAD around.
+        if exists(paths[0]) || exists(paths[1]) { return .rebase }
+        if exists(paths[2]) { return .merge }
+        if exists(paths[3]) { return .cherryPick }
+        if exists(paths[4]) { return .revert }
+        return nil
+    }
+
+    // MARK: - Conflict resolution
+
+    /// Take one side of a conflicted file wholesale, then mark it resolved.
+    func acceptSide(_ path: String, ours: Bool) async throws {
+        try await run(["checkout", ours ? "--ours" : "--theirs", "--", path])
+        try await run(["add", "--", path])
+    }
+
+    func continueOperation(_ op: OngoingOperation) async throws {
+        try await run(op.continueArgs)
+    }
+
+    func abortOperation(_ op: OngoingOperation) async throws {
+        try await run(op.abortArgs)
     }
 
     // MARK: - Mutations
@@ -120,6 +168,79 @@ actor GitClient {
         }
         // `git checkout <shortName>` DWIMs a tracking branch when unambiguous.
         try await run(["checkout", branch.shortName])
+    }
+
+    func merge(_ branch: String) async throws {
+        try await run(["merge", "--no-edit", branch])
+    }
+
+    func rebase(onto branch: String) async throws {
+        try await run(["rebase", branch])
+    }
+
+    func createBranch(_ name: String, at startPoint: String, checkout: Bool) async throws {
+        if checkout {
+            try await run(["checkout", "-b", name, startPoint])
+        } else {
+            try await run(["branch", name, startPoint])
+        }
+    }
+
+    func renameBranch(_ old: String, to new: String) async throws {
+        try await run(["branch", "-m", old, new])
+    }
+
+    func deleteLocalBranch(_ name: String) async throws {
+        try await run(["branch", "-D", name])
+    }
+
+    func deleteRemoteBranch(remote: String, branch: String) async throws {
+        try await run(["push", remote, "--delete", branch])
+    }
+
+    func setUpstream(_ branch: String, to upstream: String) async throws {
+        try await run(["branch", "--set-upstream-to=\(upstream)", branch])
+    }
+
+    func addWorktree(at path: String, branch: String) async throws {
+        try await run(["worktree", "add", path, branch])
+    }
+
+    // MARK: - Commit operations
+
+    func cherryPick(_ hash: String) async throws {
+        try await run(["cherry-pick", hash])
+    }
+
+    func revert(_ hash: String) async throws {
+        try await run(["revert", "--no-edit", hash])
+    }
+
+    enum ResetMode: String {
+        case soft = "--soft"
+        case mixed = "--mixed"
+        case hard = "--hard"
+    }
+
+    func reset(to hash: String, mode: ResetMode) async throws {
+        try await run(["reset", mode.rawValue, hash])
+    }
+
+    func tag(_ name: String, at hash: String) async throws {
+        try await run(["tag", name, hash])
+    }
+
+    func amendMessage(_ message: String) async throws {
+        try await run(["commit", "--amend", "-m", message])
+    }
+
+    func formatPatch(_ hash: String) async throws -> String {
+        try await run(["format-patch", "-1", hash, "--stdout"])
+    }
+
+    func remoteURL(_ remote: String = "origin") async throws -> String {
+        try await run(["remote", "get-url", remote])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     func fetch() async throws {

@@ -28,7 +28,7 @@ struct GraphView: View {
         let faded = neededWidth > graphWidth + 1
 
         List(rows, selection: $repo.selectedCommit) { row in
-            GraphRowView(row: row, graphWidth: graphWidth, faded: faded)
+            GraphRowView(row: row, graphWidth: graphWidth, faded: faded, repo: repo)
                 .frame(height: Self.rowHeight)
                 .listRowInsets(EdgeInsets(top: 0, leading: Self.leadingInset, bottom: 0, trailing: 8))
                 .listRowSeparator(.hidden)
@@ -68,6 +68,12 @@ struct GraphRowView: View {
     let row: GraphRow
     let graphWidth: CGFloat
     let faded: Bool
+    @ObservedObject var repo: RepoState
+
+    /// True when this commit is the tip of the checked-out branch.
+    private var isHead: Bool {
+        row.commit.refs.contains { $0.hasPrefix("HEAD") }
+    }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -112,6 +118,48 @@ struct GraphRowView: View {
             // Subtle branch-color tint per row, GitKraken-style.
             LaneCanvas.color(row.columnColor).opacity(0.055)
         )
+        .contextMenu { menuItems }
+    }
+
+    /// GitKraken-style commit context menu.
+    @ViewBuilder
+    private var menuItems: some View {
+        let commit = row.commit
+        let current = repo.snapshot.currentBranch ?? "HEAD"
+
+        Button("Checkout this commit (detached)") { repo.checkoutCommit(commit) }
+        Button("Create worktree from this commit…") { repo.addWorktree(atCommit: commit) }
+        Divider()
+        Button("Create branch here…") {
+            repo.promptText = ""
+            repo.branchPrompt = .createBranchAtCommit(commit)
+        }
+        Button("Cherry pick commit") { repo.cherryPick(commit) }
+        Button("Rebase \(current) onto this commit") { repo.rebaseOntoCommit(commit) }
+        Menu("Reset \(current) to this commit") {
+            Button("Soft — keep all changes staged") { repo.reset(to: commit, mode: .soft) }
+            Button("Mixed — keep changes, unstaged") { repo.reset(to: commit, mode: .mixed) }
+            Button("Hard — discard all changes…", role: .destructive) {
+                repo.commitToHardReset = commit
+            }
+        }
+        Button("Revert commit") { repo.revert(commit) }
+        if isHead {
+            Divider()
+            Button("Edit commit message…") {
+                repo.promptText = commit.subject
+                repo.branchPrompt = .amendMessage(commit)
+            }
+        }
+        Divider()
+        Button("Copy commit sha") { RepoState.copyToPasteboard(commit.hash) }
+        Button("Copy link to this commit on origin") { repo.copyRemoteLink(for: commit) }
+        Button("Create patch from commit…") { repo.savePatch(for: commit) }
+        Divider()
+        Button("Create tag here…") {
+            repo.promptText = ""
+            repo.branchPrompt = .tagCommit(commit)
+        }
     }
 }
 
