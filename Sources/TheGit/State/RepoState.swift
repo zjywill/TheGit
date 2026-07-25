@@ -54,8 +54,15 @@ final class RepoState: ObservableObject, Identifiable {
     let path: String
     let git: GitClient
 
+    enum PanelMode: String, CaseIterable {
+        case commit = "Commit"
+        case stash = "Stash"
+    }
+
     @Published var snapshot = RepoSnapshot()
     @Published var commitMessage = ""
+    @Published var panelMode: PanelMode = .commit
+    @Published var amend = false
     @Published var isBusy = false
     @Published var errorMessage: String?
     @Published var selectedCommit: String?
@@ -65,6 +72,7 @@ final class RepoState: ObservableObject, Identifiable {
     @Published var commitToHardReset: Commit?
     @Published var selectedFile: FileChange?
     @Published var diffLines: [DiffLine] = []
+    @Published var fileToDelete: FileChange?
 
     nonisolated var id: String { path }
     var displayName: String { (path as NSString).lastPathComponent }
@@ -195,12 +203,38 @@ final class RepoState: ObservableObject, Identifiable {
 
     func commit() {
         let message = commitMessage.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !message.isEmpty, !snapshot.staged.isEmpty else { return }
+        let amending = amend
+        guard !message.isEmpty, amending || !snapshot.staged.isEmpty else { return }
         Task {
             isBusy = true
             do {
-                try await git.commit(message: message)
+                if amending {
+                    try await git.commitAmend(message: message)
+                    amend = false
+                } else {
+                    try await git.commit(message: message)
+                }
                 commitMessage = "" // only clear once the commit actually succeeded
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            await refresh()
+        }
+    }
+
+    /// HEAD commit's subject, used to prefill the amend message.
+    var headSubject: String? {
+        snapshot.commits.first { $0.refs.contains { $0.hasPrefix("HEAD") } }?.subject
+    }
+
+    func stashChanges() {
+        let message = commitMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        Task {
+            isBusy = true
+            do {
+                try await git.stashPush(message: message.isEmpty ? nil : message)
+                commitMessage = ""
+                panelMode = .commit
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -327,6 +361,72 @@ final class RepoState: ObservableObject, Identifiable {
     nonisolated static func copyToPasteboard(_ string: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(string, forType: .string)
+    }
+
+    // MARK: - File context-menu actions
+
+    func stashFile(_ file: FileChange) {
+        perform { try await $0.stashFile(file.path) }
+    }
+
+    /// Append a pattern to the repo's root .gitignore.
+    func ignore(pattern: String) {
+        Task {
+            let url = URL(fileURLWithPath: path + "/.gitignore")
+            var content = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            if !content.isEmpty && !content.hasSuffix("\n") { content += "\n" }
+            content += pattern + "\n"
+            do {
+                try content.write(to: url, atomically: true, encoding: .utf8)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            await refresh(quiet: true)
+        }
+    }
+
+    func openFile(_ file: FileChange) {
+        NSWorkspace.shared.open(URL(fileURLWithPath: path + "/" + file.path))
+    }
+
+    func showInFinder(_ file: FileChange) {
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path + "/" + file.path)])
+    }
+
+    func copyFilePath(_ file: FileChange) {
+        Self.copyToPasteboard(path + "/" + file.path)
+    }
+
+    /// git diff for one file → .patch via save panel.
+    func savePatch(forFile file: FileChange) {
+        Task {
+            do {
+                let patch = try await git.diff(path: file.path, staged: file.area == .staged)
+                guard !patch.isEmpty else {
+                    errorMessage = "No textual changes to export for \(file.fileName)."
+                    return
+                }
+                let panel = NSSavePanel()
+                panel.nameFieldStringValue = file.fileName + ".patch"
+                guard panel.runModal() == .OK, let url = panel.url else { return }
+                try patch.write(to: url, atomically: true, encoding: .utf8)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    /// Confirmed from the delete dialog: unstage if needed, then remove
+    /// the file from disk.
+    func confirmDeleteFile() {
+        guard let file = fileToDelete else { return }
+        fileToDelete = nil
+        perform { [path] git in
+            if file.area == .staged {
+                try await git.unstage(file.path)
+            }
+            try FileManager.default.removeItem(atPath: path + "/" + file.path)
+        }
     }
 
     // MARK: - Diff view

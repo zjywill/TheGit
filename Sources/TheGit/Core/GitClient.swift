@@ -283,12 +283,22 @@ actor GitClient {
         try await run(["pull"] + extraArgs)
     }
 
-    func stashPush() async throws {
-        try await run(["stash", "push", "-u"])
+    func stashPush(message: String? = nil) async throws {
+        var args = ["stash", "push", "-u"]
+        if let message, !message.isEmpty { args += ["-m", message] }
+        try await run(args)
+    }
+
+    func commitAmend(message: String) async throws {
+        try await run(["commit", "--amend", "-m", message])
     }
 
     func stashPop() async throws {
         try await run(["stash", "pop"])
+    }
+
+    func stashFile(_ path: String) async throws {
+        try await run(["stash", "push", "-u", "--", path])
     }
 
     func push() async throws {

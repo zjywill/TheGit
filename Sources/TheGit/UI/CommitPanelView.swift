@@ -45,9 +45,29 @@ struct CommitPanelView: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 8) {
-                Text("Commit Message")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                // GitKraken's Commit / Stash mode tabs: same message box,
+                // different action.
+                Picker("", selection: $repo.panelMode) {
+                    ForEach(RepoState.PanelMode.allCases, id: \.self) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                // Always in the layout — hidden in stash mode instead of
+                // removed, so switching tabs never changes the panel height.
+                Toggle("Amend previous commit", isOn: $repo.amend)
+                    .font(.system(size: 11))
+                    .toggleStyle(.checkbox)
+                    .opacity(repo.panelMode == .commit ? 1 : 0)
+                    .disabled(repo.panelMode != .commit)
+                    .onChange(of: repo.amend) { _, amending in
+                        if amending, repo.commitMessage.isEmpty,
+                           let subject = repo.headSubject {
+                            repo.commitMessage = subject
+                        }
+                    }
 
                 TextEditor(text: $repo.commitMessage)
                     .font(.system(size: 12))
@@ -63,28 +83,57 @@ struct CommitPanelView: View {
                             .stroke(Color.primary.opacity(0.1))
                     )
 
-                Button {
-                    repo.commit()
-                } label: {
-                    Text(commitButtonTitle)
-                        .frame(maxWidth: .infinity)
+                if repo.panelMode == .commit {
+                    Button {
+                        repo.commit()
+                    } label: {
+                        Text(commitButtonTitle)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .controlSize(.large)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!canCommit)
+                } else {
+                    Button {
+                        repo.stashChanges()
+                    } label: {
+                        Text("Stash All Changes")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .controlSize(.large)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!hasAnyChanges || repo.isBusy)
                 }
-                .controlSize(.large)
-                .buttonStyle(.borderedProminent)
-                .disabled(!canCommit)
             }
             .padding(12)
         }
         .background(.background)
+        .alert(
+            "Delete \(repo.fileToDelete?.fileName ?? "")?",
+            isPresented: Binding(
+                get: { repo.fileToDelete != nil },
+                set: { if !$0 { repo.fileToDelete = nil } }
+            )
+        ) {
+            Button("Delete", role: .destructive) { repo.confirmDeleteFile() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The file will be removed from disk. Uncommitted changes in it are lost.")
+        }
     }
 
     private var canCommit: Bool {
-        !repo.snapshot.staged.isEmpty
+        (repo.amend || !repo.snapshot.staged.isEmpty)
             && !repo.commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !repo.isBusy
     }
 
+    private var hasAnyChanges: Bool {
+        !repo.snapshot.staged.isEmpty || !repo.snapshot.unstaged.isEmpty
+    }
+
     private var commitButtonTitle: String {
+        if repo.amend { return "Amend Previous Commit" }
         let count = repo.snapshot.staged.count
         return count > 0 ? "Commit Changes to \(count) File\(count == 1 ? "" : "s")" : "Commit"
     }
@@ -242,12 +291,49 @@ struct FileSection: View {
                         action: { action(file) },
                         select: { repo.selectFile(file) }
                     )
+                    .contextMenu { FileMenu(file: file, repo: repo) }
                     .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 12))
                 }
                 .listStyle(.plain)
             }
         }
         .frame(maxHeight: .infinity)
+    }
+}
+
+/// GitKraken-style right-click menu for a changed file. Staged and
+/// unstaged variants differ only in the first block.
+struct FileMenu: View {
+    let file: FileChange
+    @ObservedObject var repo: RepoState
+
+    private var ext: String { (file.fileName as NSString).pathExtension }
+
+    var body: some View {
+        if file.area == .staged {
+            Button("Unstage") { repo.unstage(file) }
+            Button("Unstage and delete file…") { repo.fileToDelete = file }
+        } else {
+            Button("Stage") { repo.stage(file) }
+        }
+        Menu("Ignore") {
+            Button("Ignore \"\(file.fileName)\"") { repo.ignore(pattern: "/" + file.path) }
+            if !ext.isEmpty {
+                Button("Ignore all \"*.\(ext)\" files") { repo.ignore(pattern: "*.\(ext)") }
+            }
+            if !file.directory.isEmpty {
+                Button("Ignore everything in \"\(file.directory)\"") { repo.ignore(pattern: "/" + file.directory) }
+            }
+        }
+        Button("Stash file") { repo.stashFile(file) }
+        Divider()
+        Button("Open file in default program") { repo.openFile(file) }
+        Button("Show in Finder") { repo.showInFinder(file) }
+        Divider()
+        Button("Copy file path") { repo.copyFilePath(file) }
+        Button("Create patch from file changes…") { repo.savePatch(forFile: file) }
+        Divider()
+        Button("Delete file…", role: .destructive) { repo.fileToDelete = file }
     }
 }
 
