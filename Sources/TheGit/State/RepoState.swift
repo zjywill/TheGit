@@ -175,6 +175,7 @@ final class RepoState: ObservableObject, Identifiable {
             async let operation = git.operationState()
             async let submodules = git.submodules()
             async let stashes = git.stashes()
+            async let tags = git.tags()
 
             var snap = RepoSnapshot()
             snap.commits = try await commits
@@ -204,6 +205,7 @@ final class RepoState: ObservableObject, Identifiable {
             snap.worktrees = try await worktrees
             snap.submodules = try await submodules
             snap.stashes = try await stashes
+            snap.tags = try await tags
             snap.staged = s0.staged
             snap.unstaged = s0.unstaged
             snap.conflicted = s0.conflicted
@@ -419,6 +421,62 @@ final class RepoState: ObservableObject, Identifiable {
     nonisolated static func copyToPasteboard(_ string: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(string, forType: .string)
+    }
+
+    // MARK: - Tags / worktrees / bulk WIP actions
+
+    @Published var tagToDelete: Tag?
+    @Published var worktreeToRemove: Worktree?
+    @Published var confirmDiscardAll = false
+
+    func checkoutTag(_ tag: Tag) {
+        perform { try await $0.checkout(branch: tag.name) }
+    }
+
+    func confirmDeleteTag() {
+        guard let tag = tagToDelete else { return }
+        tagToDelete = nil
+        perform { try await $0.deleteTag(tag.name) }
+    }
+
+    func pushTag(_ tag: Tag) {
+        let remote = snapshot.defaultRemote
+        perform { try await $0.pushTag(tag.name, remote: remote) }
+    }
+
+    func confirmRemoveWorktree() {
+        guard let wt = worktreeToRemove else { return }
+        worktreeToRemove = nil
+        perform { try await $0.removeWorktree(wt.path) }
+    }
+
+    func fetchRemoteOnly(_ name: String) {
+        perform { try await $0.fetchRemote(name) }
+    }
+
+    func copyRemoteURL(_ name: String) {
+        Task {
+            do {
+                Self.copyToPasteboard(try await git.remoteURL(name))
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func copyCommitMessage(_ commit: Commit) {
+        Task {
+            do {
+                Self.copyToPasteboard(try await git.commitMessage(commit.hash))
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func discardAllChanges() {
+        confirmDiscardAll = false
+        perform { try await $0.discardAll() }
     }
 
     // MARK: - Remote management

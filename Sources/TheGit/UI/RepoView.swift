@@ -65,6 +65,15 @@ struct RepoView: View {
             Text(repo.errorMessage ?? "")
         }
         .alert(
+            "Discard ALL changes?",
+            isPresented: $repo.confirmDiscardAll
+        ) {
+            Button("Discard Everything", role: .destructive) { repo.discardAllChanges() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("All staged and unstaged changes are restored to HEAD and untracked files are deleted. This cannot be undone.")
+        }
+        .alert(
             "Hard reset to \(repo.commitToHardReset?.shortHash ?? "")?",
             isPresented: Binding(
                 get: { repo.commitToHardReset != nil },

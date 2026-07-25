@@ -378,6 +378,48 @@ actor GitClient {
         try await run(["stash", "drop", ref])
     }
 
+    func tags() async throws -> [Tag] {
+        let out = try await run([
+            "for-each-ref", "--sort=-creatordate",
+            "--format=%(refname:short)%09%(objectname)",
+            "refs/tags",
+        ])
+        return out.split(separator: "\n").compactMap { line in
+            let fields = line.split(separator: "\t")
+            guard fields.count >= 2 else { return nil }
+            return Tag(name: String(fields[0]), hash: String(fields[1]))
+        }
+    }
+
+    func deleteTag(_ name: String) async throws {
+        try await run(["tag", "-d", name])
+    }
+
+    func pushTag(_ name: String, remote: String) async throws {
+        try await run(["push", remote, "tag", name])
+    }
+
+    func fetchRemote(_ name: String) async throws {
+        try await run(["fetch", "--prune", name])
+    }
+
+    func removeWorktree(_ path: String) async throws {
+        try await run(["worktree", "remove", "--force", path])
+    }
+
+    /// Full commit message (subject + body).
+    func commitMessage(_ hash: String) async throws -> String {
+        try await run(["show", "-s", "--format=%B", hash])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Discard every working-tree change: restore tracked, clean untracked.
+    func discardAll() async throws {
+        try await run(["reset", "-q", "HEAD"])
+        try await run(["restore", "--", "."])
+        try await run(["clean", "-fd"])
+    }
+
     func push() async throws {
         try await run(["push"])
     }

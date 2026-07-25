@@ -58,9 +58,47 @@ struct SidebarView: View {
                         }
                     }
                     .help(wt.path)
+                    .contextMenu {
+                        Button("Open as Tab") { appState.open(path: wt.path) }
+                        Button("Show in Finder") {
+                            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: wt.path)])
+                        }
+                        Divider()
+                        Button("Remove Worktree…", role: .destructive) {
+                            repo.worktreeToRemove = wt
+                        }
+                    }
+                    .onTapGesture(count: 2) { appState.open(path: wt.path) }
                 }
             } header: {
                 SectionHeader(title: "Worktrees", count: repo.snapshot.worktrees.count)
+            }
+            if !repo.snapshot.tags.isEmpty {
+                Section {
+                    ForEach(repo.snapshot.tags) { tag in
+                        HStack(spacing: 6) {
+                            Image(systemName: "tag")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.orange)
+                            Text(tag.name)
+                                .font(.system(size: 12))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        .contentShape(Rectangle())
+                        .help("\(tag.name) @ \(String(tag.hash.prefix(7)))")
+                        .contextMenu {
+                            Button("Checkout \(tag.name) (detached)") { repo.checkoutTag(tag) }
+                            Divider()
+                            Button("Push tag to \(repo.snapshot.defaultRemote)") { repo.pushTag(tag) }
+                            Button("Copy tag name") { RepoState.copyToPasteboard(tag.name) }
+                            Divider()
+                            Button("Delete tag…", role: .destructive) { repo.tagToDelete = tag }
+                        }
+                    }
+                } header: {
+                    SectionHeader(title: "Tags", count: repo.snapshot.tags.count)
+                }
             }
             if !repo.snapshot.stashes.isEmpty {
                 Section {
@@ -174,6 +212,30 @@ struct SidebarView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Removes the remote and its tracking branches from this repo. Nothing is deleted on the server.")
+        }
+        .alert(
+            "Delete tag \(repo.tagToDelete?.name ?? "")?",
+            isPresented: Binding(
+                get: { repo.tagToDelete != nil },
+                set: { if !$0 { repo.tagToDelete = nil } }
+            )
+        ) {
+            Button("Delete", role: .destructive) { repo.confirmDeleteTag() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Deletes the local tag only. If it was pushed, it remains on the remote.")
+        }
+        .alert(
+            "Remove worktree \(repo.worktreeToRemove?.displayName ?? "")?",
+            isPresented: Binding(
+                get: { repo.worktreeToRemove != nil },
+                set: { if !$0 { repo.worktreeToRemove = nil } }
+            )
+        ) {
+            Button("Remove", role: .destructive) { repo.confirmRemoveWorktree() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The worktree folder and any uncommitted changes in it will be removed.")
         }
         .alert(
             "Drop \(repo.stashToDrop?.ref ?? "")?",
@@ -303,6 +365,9 @@ struct FolderDisclosure: View {
             }
             .contextMenu {
                 if isRemoteRoot {
+                    Button("Fetch \(node.name) only") { repo.fetchRemoteOnly(node.name) }
+                    Button("Copy URL") { repo.copyRemoteURL(node.name) }
+                    Divider()
                     Button("Remove Remote…", role: .destructive) {
                         repo.remoteToRemove = node.name
                     }

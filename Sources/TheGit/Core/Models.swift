@@ -104,6 +104,12 @@ enum OngoingOperation: String {
     }
 }
 
+struct Tag: Identifiable, Hashable {
+    let name: String
+    let hash: String
+    var id: String { name }
+}
+
 struct Stash: Identifiable, Hashable {
     let ref: String      // "stash@{0}"
     let date: Date
@@ -140,6 +146,7 @@ struct RepoSnapshot: Equatable {
     var worktrees: [Worktree] = []
     var submodules: [Submodule] = []
     var stashes: [Stash] = []
+    var tags: [Tag] = []
     var staged: [FileChange] = []
     var unstaged: [FileChange] = []
     var conflicted: [FileChange] = []

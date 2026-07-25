@@ -57,6 +57,14 @@ struct GraphView: View {
                         .contentShape(Rectangle())
                         // Clicking WIP returns the right panel to the commit box.
                         .onTapGesture { repo.selectedCommit = nil }
+                        .contextMenu {
+                            Button("Stage All Changes") { repo.stageAll() }
+                            Button("Stash All Changes") { repo.stash() }
+                            Divider()
+                            Button("Discard All Changes…", role: .destructive) {
+                                repo.confirmDiscardAll = true
+                            }
+                        }
                         .frame(height: Self.rowHeight)
                         .listRowInsets(EdgeInsets(top: 0, leading: Self.leadingInset, bottom: 0, trailing: 8))
                         .listRowSeparator(.hidden)
@@ -290,6 +298,7 @@ struct GraphRowView: View {
         }
         Divider()
         Button("Copy commit sha") { RepoState.copyToPasteboard(commit.hash) }
+        Button("Copy commit message") { repo.copyCommitMessage(commit) }
         Button("Copy link to this commit on origin") { repo.copyRemoteLink(for: commit) }
         Button("Create patch from commit…") { repo.savePatch(for: commit) }
         Divider()

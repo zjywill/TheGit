@@ -147,6 +147,27 @@ struct RepoTab: View {
         .contentShape(Rectangle())
         // Tab switching is a many-times-a-day action: no animation, instant.
         .onTapGesture { appState.activeRepoID = repo.id }
+        .contextMenu {
+            Button("Close Tab") { appState.close(repo: repo) }
+            Button("Close Other Tabs") {
+                for other in appState.repos where other.id != repo.id {
+                    appState.close(repo: other)
+                }
+            }
+            Divider()
+            Button("Copy Repository Path") { RepoState.copyToPasteboard(repo.path) }
+            Button("Show in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: repo.path)])
+            }
+            Button("Open in Terminal") {
+                let url = URL(fileURLWithPath: repo.path)
+                NSWorkspace.shared.open(
+                    [url],
+                    withApplicationAt: URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app"),
+                    configuration: NSWorkspace.OpenConfiguration()
+                )
+            }
+        }
         .onHover {
             hovering = $0
             AppState.pointerOverTopControl = $0
