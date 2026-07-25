@@ -7,10 +7,16 @@ struct SidebarView: View {
 
     var body: some View {
         List {
-            Section("Local") {
+            Section {
                 ForEach(BranchTree.build(repo.snapshot.localBranches, path: \.name)) { node in
                     BranchNodeRow(node: node, repo: repo)
                 }
+            } header: {
+                SectionHeader(
+                    title: "Local",
+                    count: repo.snapshot.localBranches.count,
+                    actionHelp: "Create branch at HEAD"
+                ) { repo.promptNewBranch() }
             }
             Section {
                 ForEach(BranchTree.remoteTree(repo.snapshot.remoteBranches)) { node in
@@ -27,21 +33,13 @@ struct SidebarView: View {
                     .foregroundStyle(Color.accentColor)
                 }
             } header: {
-                HStack {
-                    Text("Remote")
-                    Spacer()
-                    Button {
-                        repo.promptAddRemote()
-                    } label: {
-                        Image(systemName: "plus")
-                            .font(.system(size: 10, weight: .semibold))
-                    }
-                    .buttonStyle(.pressEffect)
-                    .foregroundStyle(.secondary)
-                    .help("Add remote")
-                }
+                SectionHeader(
+                    title: "Remote",
+                    count: repo.snapshot.remoteNames.count,
+                    actionHelp: "Add remote"
+                ) { repo.promptAddRemote() }
             }
-            Section("Worktrees") {
+            Section {
                 ForEach(repo.snapshot.worktrees) { wt in
                     HStack(spacing: 6) {
                         Image(systemName: "folder")
@@ -61,9 +59,11 @@ struct SidebarView: View {
                     }
                     .help(wt.path)
                 }
+            } header: {
+                SectionHeader(title: "Worktrees", count: repo.snapshot.worktrees.count)
             }
             if !repo.snapshot.submodules.isEmpty {
-                Section("Submodules") {
+                Section {
                     ForEach(repo.snapshot.submodules) { sub in
                         HStack(spacing: 6) {
                             Image(systemName: "shippingbox")
@@ -92,6 +92,8 @@ struct SidebarView: View {
                             appState.open(path: repo.path + "/" + sub.path)
                         }
                     }
+                } header: {
+                    SectionHeader(title: "Submodules", count: repo.snapshot.submodules.count)
                 }
             }
         }
@@ -163,6 +165,53 @@ struct SidebarView: View {
         guard let branch = repo.branchToDelete else { return "" }
         if case .remote = branch.kind { return "Delete \(branch.name) on remote?" }
         return "Delete \(branch.name)?"
+    }
+}
+
+/// GitKraken-style section header: count on the right, and (when the
+/// section has an action) a large bordered + button that appears on hover.
+struct SectionHeader: View {
+    let title: String
+    let count: Int
+    var actionHelp: String?
+    var action: (() -> Void)?
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(title)
+            Spacer()
+            // Count and + button share one centered slot, so the swap on
+            // hover never shifts anything.
+            ZStack {
+                Text("\(count)")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.accentColor.opacity(0.8))
+                    .opacity(action != nil && hovering ? 0 : 1)
+                if let action {
+                    Button(action: action) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 11, weight: .semibold))
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.pressEffect)
+                    .foregroundStyle(Color.accentColor)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(Color.accentColor.opacity(0.6), lineWidth: 1)
+                    )
+                    .help(actionHelp ?? "")
+                    .opacity(hovering ? 1 : 0)
+                    .allowsHitTesting(hovering)
+                }
+            }
+            .frame(minWidth: 22, minHeight: 22, maxHeight: 22, alignment: .center)
+        }
+        .padding(.trailing, 10)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
     }
 }
 
