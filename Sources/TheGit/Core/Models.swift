@@ -132,7 +132,7 @@ struct Submodule: Identifiable, Hashable {
     }
 }
 
-struct RepoSnapshot {
+struct RepoSnapshot: Equatable {
     var commits: [Commit] = []
     var graphRows: [GraphRow] = []
     var localBranches: [Branch] = []

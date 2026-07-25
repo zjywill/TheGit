@@ -209,7 +209,10 @@ final class RepoState: ObservableObject, Identifiable {
             snap.conflicted = s0.conflicted
             snap.currentBranch = s0.branch
             snap.operation = try await operation
-            snapshot = snap
+            // Publish only real changes: replacing an identical snapshot
+            // still makes List re-diff and visibly nudges the scroll
+            // position right after scrolling stops.
+            if snap != snapshot { snapshot = snap }
             // Close the diff if its file no longer has changes.
             if let file = selectedFile {
                 let all = snap.staged + snap.unstaged + snap.conflicted

@@ -16,7 +16,7 @@ struct GraphEdge: Hashable {
 ///   - `mergeSources`: lanes at the TOP edge that terminate into this commit's dot
 ///     (children lines arriving here; EMPTY for branch tips — nothing above connects)
 ///   - `parentLanes`: lanes at the BOTTOM edge leaving this commit's dot toward parents
-struct GraphRow: Identifiable {
+struct GraphRow: Identifiable, Equatable {
     let commit: Commit
     let column: Int
     let columnColor: Int
