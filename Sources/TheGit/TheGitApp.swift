@@ -103,6 +103,7 @@ struct RepoTabsBar: View {
             .buttonStyle(.pressEffect)
             .foregroundStyle(.secondary)
             .help("Open Repository (⌘O)")
+            .onHover { AppState.pointerOverTopControl = $0 }
             Spacer()
         }
         .padding(.horizontal, 80) // leave room for traffic lights
@@ -146,6 +147,9 @@ struct RepoTab: View {
         .contentShape(Rectangle())
         // Tab switching is a many-times-a-day action: no animation, instant.
         .onTapGesture { appState.activeRepoID = repo.id }
-        .onHover { hovering = $0 }
+        .onHover {
+            hovering = $0
+            AppState.pointerOverTopControl = $0
+        }
     }
 }
