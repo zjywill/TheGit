@@ -48,45 +48,48 @@ struct GraphView: View {
         let changeCount = repo.snapshot.staged.count + repo.snapshot.unstaged.count
             + repo.snapshot.conflicted.count
 
-        List(selection: $repo.selectedCommit) {
-            ForEach(rows) { row in
-                if row.commit.isWip {
-                    // WIP is a synthetic commit laid out like any other, so
-                    // its dashed node sits exactly on HEAD's lane.
-                    WipGraphRow(row: row, changeCount: changeCount, graphWidth: graphWidth, badgeWidth: badgeWidth)
-                        .contentShape(Rectangle())
-                        // Clicking WIP returns the right panel to the commit box.
-                        .onTapGesture { repo.selectedCommit = nil }
-                        .contextMenu {
-                            Button("Stage All Changes") { repo.stageAll() }
-                            Button("Stash All Changes") { repo.stash() }
-                            Divider()
-                            Button("Discard All Changes…", role: .destructive) {
-                                repo.confirmDiscardAll = true
-                            }
+        // ScrollView + LazyVStack instead of List: NSTableView-backed List
+        // restores/adjusts its scroll offset on SwiftUI updates (selection,
+        // background refreshes), producing large jumps. With fixed-height
+        // rows and stable ids, LazyVStack never moves the scroll position.
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(rows) { row in
+                    Group {
+                        if row.commit.isWip {
+                            // WIP is a synthetic commit laid out like any other,
+                            // so its dashed node sits exactly on HEAD's lane.
+                            WipGraphRow(row: row, changeCount: changeCount, graphWidth: graphWidth, badgeWidth: badgeWidth)
+                                .contentShape(Rectangle())
+                                // Clicking WIP returns the right panel to the commit box.
+                                .onTapGesture { repo.selectedCommit = nil }
+                                .contextMenu {
+                                    Button("Stage All Changes") { repo.stageAll() }
+                                    Button("Stash All Changes") { repo.stash() }
+                                    Divider()
+                                    Button("Discard All Changes…", role: .destructive) {
+                                        repo.confirmDiscardAll = true
+                                    }
+                                }
+                        } else {
+                            GraphRowView(
+                                row: row,
+                                graphWidth: graphWidth,
+                                badgeWidth: badgeWidth,
+                                faded: faded,
+                                searchMode: searching,
+                                repo: repo
+                            )
+                            // Infinite scroll: reaching the last row loads 500 more.
+                            .onAppear { repo.loadMoreIfNeeded(row) }
                         }
-                        .frame(height: Self.rowHeight)
-                        .listRowInsets(EdgeInsets(top: 0, leading: Self.leadingInset, bottom: 0, trailing: 8))
-                        .listRowSeparator(.hidden)
-                } else {
-                    GraphRowView(
-                        row: row,
-                        graphWidth: graphWidth,
-                        badgeWidth: badgeWidth,
-                        faded: faded,
-                        searchMode: searching,
-                        repo: repo
-                    )
+                    }
                     .frame(height: Self.rowHeight)
-                    .listRowInsets(EdgeInsets(top: 0, leading: Self.leadingInset, bottom: 0, trailing: 8))
-                    .listRowSeparator(.hidden)
-                    .tag(row.commit.hash)
-                    // Infinite scroll: reaching the last row loads 500 more.
-                    .onAppear { repo.loadMoreIfNeeded(row) }
+                    .padding(.leading, Self.leadingInset)
+                    .padding(.trailing, 8)
                 }
             }
         }
-        .listStyle(.plain)
         .background(Color(nsColor: .textBackgroundColor))
         .overlay(alignment: .topLeading) {
             // Column resizer, spreadsheet-style: the graph is one column of a
@@ -239,9 +242,13 @@ struct GraphRowView: View {
                 .fixedSize()
         }
         .background(
-            // Subtle branch-color tint per row, GitKraken-style.
-            LaneCanvas.color(row.columnColor).opacity(0.055)
+            repo.selectedCommit == row.commit.hash
+                ? Color.accentColor.opacity(0.22)
+                // Subtle branch-color tint per row, GitKraken-style.
+                : LaneCanvas.color(row.columnColor).opacity(0.055)
         )
+        .contentShape(Rectangle())
+        .onTapGesture { repo.selectedCommit = row.commit.hash }
         .contextMenu { menuItems }
     }
 
