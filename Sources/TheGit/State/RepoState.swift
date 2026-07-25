@@ -63,6 +63,8 @@ final class RepoState: ObservableObject, Identifiable {
     @Published var promptText = ""
     @Published var branchToDelete: Branch?
     @Published var commitToHardReset: Commit?
+    @Published var selectedFile: FileChange?
+    @Published var diffLines: [DiffLine] = []
 
     nonisolated var id: String { path }
     var displayName: String { (path as NSString).lastPathComponent }
@@ -111,6 +113,11 @@ final class RepoState: ObservableObject, Identifiable {
             snap.currentBranch = s.branch
             snap.operation = try await operation
             snapshot = snap
+            // Close the diff if its file no longer has changes.
+            if let file = selectedFile {
+                let all = snap.staged + snap.unstaged + snap.conflicted
+                if !all.contains(where: { $0.id == file.id }) { closeDiff() }
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -161,9 +168,44 @@ final class RepoState: ObservableObject, Identifiable {
         }
     }
 
+    /// GitKraken's pull-button default operation choices.
+    enum PullMode: String, CaseIterable {
+        case fetchAll
+        case ff
+        case ffOnly
+        case rebase
+
+        var title: String {
+            switch self {
+            case .fetchAll: return "Fetch All"
+            case .ff: return "Pull (fast-forward if possible)"
+            case .ffOnly: return "Pull (fast-forward only)"
+            case .rebase: return "Pull (rebase)"
+            }
+        }
+    }
+
     func fetch() { perform { try await $0.fetch() } }
     func pull() { perform { try await $0.pull() } }
     func push() { perform { try await $0.push() } }
+
+    func runPull(_ mode: PullMode) {
+        switch mode {
+        case .fetchAll: perform { try await $0.fetch() }
+        case .ff: perform { try await $0.pull() }
+        case .ffOnly: perform { try await $0.pull(extraArgs: ["--ff-only"]) }
+        case .rebase: perform { try await $0.pull(extraArgs: ["--rebase"]) }
+        }
+    }
+
+    func stash() { perform { try await $0.stashPush() } }
+    func stashPop() { perform { try await $0.stashPop() } }
+
+    func promptNewBranch() {
+        guard let current = snapshot.localBranches.first(where: \.isCurrent) else { return }
+        promptText = ""
+        branchPrompt = .createBranch(from: current)
+    }
 
     // MARK: - Branch context-menu actions
 
@@ -229,6 +271,31 @@ final class RepoState: ObservableObject, Identifiable {
     nonisolated static func copyToPasteboard(_ string: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(string, forType: .string)
+    }
+
+    // MARK: - Diff view
+
+    func selectFile(_ file: FileChange) {
+        selectedFile = file
+        diffLines = []
+        Task {
+            do {
+                if file.status == "?" {
+                    let content = (try? String(contentsOfFile: path + "/" + file.path, encoding: .utf8)) ?? ""
+                    diffLines = DiffParser.synthesizeAdded(content)
+                } else {
+                    let text = try await git.diff(path: file.path, staged: file.area == .staged)
+                    diffLines = DiffParser.parse(text)
+                }
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func closeDiff() {
+        selectedFile = nil
+        diffLines = []
     }
 
     // MARK: - Conflict resolution

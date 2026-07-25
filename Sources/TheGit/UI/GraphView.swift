@@ -26,13 +26,36 @@ struct GraphView: View {
         // Lanes beyond the column width fade out instead of hard-clipping
         // (VS Code Git Graph style). Drag the column edge to reveal them.
         let faded = neededWidth > graphWidth + 1
+        // Dedicated BRANCH/TAG column left of the graph (GitKraken layout):
+        // zero width when the loaded range has no refs at all.
+        let hasBadges = rows.contains { !RefBadge.infos(for: $0.commit.refs).isEmpty }
+        let badgeWidth: CGFloat = hasBadges ? 150 : 0
 
-        List(rows, selection: $repo.selectedCommit) { row in
-            GraphRowView(row: row, graphWidth: graphWidth, faded: faded, repo: repo)
+        let changeCount = repo.snapshot.staged.count + repo.snapshot.unstaged.count
+            + repo.snapshot.conflicted.count
+        // The dashed WIP node sits on the checked-out branch's lane.
+        let headRow = rows.first { $0.commit.refs.contains { $0.hasPrefix("HEAD") } }
+
+        List(selection: $repo.selectedCommit) {
+            if changeCount > 0 {
+                WipRowView(
+                    column: headRow?.column ?? 0,
+                    color: headRow?.columnColor ?? 0,
+                    changeCount: changeCount,
+                    graphWidth: graphWidth,
+                    badgeWidth: badgeWidth
+                )
                 .frame(height: Self.rowHeight)
                 .listRowInsets(EdgeInsets(top: 0, leading: Self.leadingInset, bottom: 0, trailing: 8))
                 .listRowSeparator(.hidden)
-                .tag(row.commit.hash)
+            }
+            ForEach(rows) { row in
+                GraphRowView(row: row, graphWidth: graphWidth, badgeWidth: badgeWidth, faded: faded, repo: repo)
+                    .frame(height: Self.rowHeight)
+                    .listRowInsets(EdgeInsets(top: 0, leading: Self.leadingInset, bottom: 0, trailing: 8))
+                    .listRowSeparator(.hidden)
+                    .tag(row.commit.hash)
+            }
         }
         .listStyle(.plain)
         .background(Color(nsColor: .textBackgroundColor))
@@ -64,9 +87,73 @@ struct GraphView: View {
     }
 }
 
+/// GitKraken's "// WIP" row: uncommitted changes shown as a dashed node
+/// on the checked-out branch's lane, above the graph.
+struct WipRowView: View {
+    let column: Int
+    let color: Int
+    let changeCount: Int
+    let graphWidth: CGFloat
+    let badgeWidth: CGFloat
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if badgeWidth > 0 {
+                Spacer().frame(width: badgeWidth)
+            }
+
+            Canvas { context, size in
+                let laneW = GraphView.laneWidth
+                let x = CGFloat(column) * laneW + laneW / 2
+                let midY = size.height / 2
+                guard x < size.width else { return }
+                let tint = LaneCanvas.color(color)
+                let r: CGFloat = 7
+
+                var stub = Path()
+                stub.move(to: CGPoint(x: x, y: midY + r))
+                stub.addLine(to: CGPoint(x: x, y: size.height))
+                context.stroke(
+                    stub,
+                    with: .color(tint.opacity(0.7)),
+                    style: StrokeStyle(lineWidth: 2, dash: [3, 3])
+                )
+
+                let rect = CGRect(x: x - r, y: midY - r, width: r * 2, height: r * 2)
+                context.stroke(
+                    Path(ellipseIn: rect),
+                    with: .color(tint.opacity(0.9)),
+                    style: StrokeStyle(lineWidth: 1.5, dash: [3, 2.5])
+                )
+            }
+            .frame(width: graphWidth, height: GraphView.rowHeight)
+
+            RoundedRectangle(cornerRadius: 1)
+                .fill(Color.secondary.opacity(0.5))
+                .frame(width: 3, height: 16)
+
+            Text("// WIP")
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 2) {
+                Image(systemName: "plus")
+                    .font(.system(size: 9, weight: .bold))
+                Text("\(changeCount)")
+                    .font(.system(size: 11, weight: .semibold))
+            }
+            .foregroundStyle(.green)
+
+            Spacer(minLength: 12)
+        }
+        .background(Color.primary.opacity(0.04))
+    }
+}
+
 struct GraphRowView: View {
     let row: GraphRow
     let graphWidth: CGFloat
+    let badgeWidth: CGFloat
     let faded: Bool
     @ObservedObject var repo: RepoState
 
@@ -77,6 +164,11 @@ struct GraphRowView: View {
 
     var body: some View {
         HStack(spacing: 8) {
+            if badgeWidth > 0 {
+                BadgeColumn(refs: row.commit.refs)
+                    .frame(width: badgeWidth, alignment: .trailing)
+            }
+
             LaneCanvas(row: row)
                 .frame(width: graphWidth, height: GraphView.rowHeight)
                 .mask(
@@ -93,26 +185,33 @@ struct GraphRowView: View {
                 )
                 .clipped()
 
-            ForEach(row.commit.refs.prefix(3), id: \.self) { ref in
-                RefBadge(ref: ref)
-            }
+            // Branch-colored tick before the message, GitKraken-style.
+            RoundedRectangle(cornerRadius: 1)
+                .fill(LaneCanvas.color(row.columnColor))
+                .frame(width: 3, height: 16)
 
             Text(row.commit.subject)
                 .font(.system(size: 12))
                 .lineLimit(1)
-                .layoutPriority(1)
+                .truncationMode(.tail)
 
             Spacer(minLength: 12)
 
+            // Fixed-width trailing columns: the message truncates,
+            // author/hash never wrap or shrink.
             Text(row.commit.author)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-                .frame(maxWidth: 120, alignment: .trailing)
+                .truncationMode(.tail)
+                .frame(width: 90, alignment: .trailing)
+                .help(row.commit.author)
 
             Text(row.commit.shortHash)
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .fixedSize()
         }
         .background(
             // Subtle branch-color tint per row, GitKraken-style.
@@ -264,31 +363,87 @@ struct LaneCanvas: View {
     }
 }
 
-struct RefBadge: View {
-    let ref: String
+/// The BRANCH/TAG column cell: one badge, plus a "+N" pill when a commit
+/// carries several refs. Hover the "+N" for the full list.
+struct BadgeColumn: View {
+    let refs: [String]
 
-    var isHead: Bool { ref.hasPrefix("HEAD") }
-    var isTag: Bool { ref.hasPrefix("tag: ") }
-    var label: String {
-        if isTag { return String(ref.dropFirst(5)) }
-        if let arrow = ref.range(of: "-> ") { return String(ref[arrow.upperBound...]) }
-        return ref
+    var body: some View {
+        let infos = RefBadge.infos(for: refs)
+        HStack(spacing: 4) {
+            Spacer(minLength: 0)
+            if let first = infos.first {
+                RefBadge(info: first)
+            }
+            if infos.count > 1 {
+                Text("+\(infos.count - 1)")
+                    .font(.system(size: 10, weight: .medium))
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Color.primary.opacity(0.1)))
+                    .foregroundStyle(.secondary)
+                    .help(infos.dropFirst().map(\.label).joined(separator: "\n"))
+            }
+        }
+    }
+}
+
+struct RefBadge: View {
+    struct Info: Identifiable {
+        let label: String
+        let isHead: Bool
+        let isTag: Bool
+        let isRemote: Bool
+        var id: String { label }
+    }
+
+    let info: Info
+
+    /// Turn raw %D refs into display badges: drop origin/HEAD, merge the
+    /// local + remote refs of the same branch into one badge, HEAD first.
+    static func infos(for refs: [String]) -> [Info] {
+        var result: [Info] = []
+        for ref in refs {
+            if ref.hasSuffix("/HEAD") { continue }
+            let isHead = ref.hasPrefix("HEAD")
+            let isTag = ref.hasPrefix("tag: ")
+            var label = ref
+            if isTag { label = String(ref.dropFirst(5)) }
+            if let arrow = ref.range(of: "-> ") { label = String(ref[arrow.upperBound...]) }
+            let isRemote = !isTag && label.contains("/") // heuristic: origin/x
+            // "origin/main" collapses into an existing "main" badge (and vice versa).
+            let short = isRemote ? label.split(separator: "/").dropFirst().joined(separator: "/") : label
+            if let i = result.firstIndex(where: { $0.label == short || ($0.isRemote && $0.label.hasSuffix("/" + label)) }) {
+                let old = result[i]
+                result[i] = Info(
+                    label: old.isRemote ? short : old.label,
+                    isHead: old.isHead || isHead,
+                    isTag: old.isTag,
+                    isRemote: true
+                )
+                continue
+            }
+            result.append(Info(label: label, isHead: isHead, isTag: isTag, isRemote: isRemote))
+        }
+        return result.sorted { $0.isHead && !$1.isHead }
     }
 
     var color: Color {
-        if isHead { return .accentColor }
-        if isTag { return .orange }
-        if ref.contains("/") { return .purple } // remote ref
+        if info.isHead { return .accentColor }
+        if info.isTag { return .orange }
+        if info.isRemote { return .purple }
         return .teal
     }
 
     var body: some View {
-        Text(label)
+        Text(info.label)
             .font(.system(size: 10, weight: .medium))
             .lineLimit(1)
+            .truncationMode(.tail)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(Capsule().fill(color.opacity(0.18)))
             .foregroundStyle(color)
+            .help(info.label)
     }
 }

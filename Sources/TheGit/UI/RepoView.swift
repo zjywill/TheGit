@@ -9,9 +9,17 @@ struct RepoView: View {
         HSplitView {
             SidebarView(repo: repo)
                 .frame(minWidth: 200, idealWidth: 240, maxWidth: 360)
-            GraphView(repo: repo)
-                .frame(minWidth: 400)
-                .layoutPriority(1)
+            // The diff OVERLAYS the graph instead of replacing it: swapping
+            // the split child makes HSplitView re-balance all three panes
+            // (the right panel visibly changed width on every file click).
+            ZStack {
+                GraphView(repo: repo)
+                if repo.selectedFile != nil {
+                    FileDiffView(repo: repo)
+                }
+            }
+            .frame(minWidth: 400)
+            .layoutPriority(1)
             CommitPanelView(repo: repo)
                 .frame(minWidth: 260, idealWidth: 300, maxWidth: 420)
         }
@@ -45,36 +53,64 @@ struct RepoView: View {
 
 struct RepoToolbar: ToolbarContent {
     @ObservedObject var repo: RepoState
+    /// Default action for the Pull button, GitKraken-style; the dropdown
+    /// only picks the default, the button itself executes it.
+    @AppStorage("pullMode") private var pullModeRaw = RepoState.PullMode.ff.rawValue
+
+    private var pullMode: RepoState.PullMode {
+        RepoState.PullMode(rawValue: pullModeRaw) ?? .ff
+    }
 
     var body: some ToolbarContent {
         ToolbarItemGroup {
-            // Fixed slot + opacity fade: the spinner must never push the
-            // other toolbar buttons sideways when it appears.
-            ProgressView()
-                .controlSize(.small)
-                .opacity(repo.isBusy ? 1 : 0)
-                .animation(.easeOut(duration: 0.12), value: repo.isBusy)
-                .frame(width: 20)
-            Button {
-                repo.fetch()
+            Menu {
+                Section("Default pull/fetch operation") {
+                    ForEach(RepoState.PullMode.allCases, id: \.rawValue) { mode in
+                        Button {
+                            pullModeRaw = mode.rawValue
+                        } label: {
+                            HStack {
+                                Text(mode.title)
+                                if mode == pullMode { Image(systemName: "checkmark") }
+                            }
+                        }
+                    }
+                }
             } label: {
-                Label("Fetch", systemImage: "arrow.triangle.2.circlepath")
+                Label(pullMode == .fetchAll ? "Fetch" : "Pull",
+                      systemImage: "arrow.down.to.line")
+            } primaryAction: {
+                repo.runPull(pullMode)
             }
-            .help("Fetch all remotes")
-
-            Button {
-                repo.pull()
-            } label: {
-                Label("Pull", systemImage: "arrow.down")
-            }
-            .help("Pull")
+            .help(pullMode.title)
 
             Button {
                 repo.push()
             } label: {
-                Label("Push", systemImage: "arrow.up")
+                Label("Push", systemImage: "arrow.up.to.line")
             }
             .help("Push")
+
+            Button {
+                repo.promptNewBranch()
+            } label: {
+                Label("Branch", systemImage: "arrow.triangle.branch")
+            }
+            .help("Create branch at HEAD")
+
+            Button {
+                repo.stash()
+            } label: {
+                Label("Stash", systemImage: "tray.and.arrow.down")
+            }
+            .help("Stash all changes (incl. untracked)")
+
+            Button {
+                repo.stashPop()
+            } label: {
+                Label("Pop", systemImage: "tray.and.arrow.up")
+            }
+            .help("Pop latest stash")
 
             Button {
                 Task { await repo.refresh() }
@@ -83,6 +119,22 @@ struct RepoToolbar: ToolbarContent {
             }
             .keyboardShortcut("r")
             .help("Refresh (⌘R)")
+        }
+
+        // Busy indicator AFTER the left-anchored button cluster: it grows
+        // to the right of the buttons, so they never move. Inserted only
+        // while busy — an idle item still draws an empty capsule shell.
+        if repo.isBusy {
+            if #available(macOS 26.0, *) {
+                ToolbarItem {
+                    ProgressView().controlSize(.small)
+                }
+                .sharedBackgroundVisibility(.hidden)
+            } else {
+                ToolbarItem {
+                    ProgressView().controlSize(.small)
+                }
+            }
         }
     }
 }

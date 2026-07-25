@@ -7,13 +7,19 @@ struct SidebarView: View {
     var body: some View {
         List {
             Section("Local") {
-                ForEach(repo.snapshot.localBranches) { branch in
-                    BranchRow(branch: branch, repo: repo)
+                OutlineGroup(
+                    BranchTree.build(repo.snapshot.localBranches, path: \.name),
+                    children: \.children
+                ) { node in
+                    BranchNodeRow(node: node, repo: repo)
                 }
             }
             Section("Remote") {
-                ForEach(repo.snapshot.remoteBranches) { branch in
-                    BranchRow(branch: branch, repo: repo)
+                OutlineGroup(
+                    BranchTree.remoteTree(repo.snapshot.remoteBranches),
+                    children: \.children
+                ) { node in
+                    BranchNodeRow(node: node, repo: repo)
                 }
             }
             Section("Worktrees") {
@@ -75,8 +81,32 @@ struct SidebarView: View {
     }
 }
 
+/// One sidebar tree row: a folder (git-flow prefix or a remote) or a branch.
+struct BranchNodeRow: View {
+    let node: BranchNode
+    @ObservedObject var repo: RepoState
+
+    var body: some View {
+        if let branch = node.branch {
+            BranchRow(branch: branch, label: node.name, repo: repo)
+        } else {
+            HStack(spacing: 6) {
+                Image(systemName: node.id.hasPrefix("remote:") && !node.id.contains("/")
+                    ? "cloud" : "folder")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Text(node.name)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+    }
+}
+
 struct BranchRow: View {
     let branch: Branch
+    var label: String?
     @ObservedObject var repo: RepoState
 
     var body: some View {
@@ -84,7 +114,7 @@ struct BranchRow: View {
             Image(systemName: branch.isCurrent ? "checkmark.circle.fill" : "arrow.triangle.branch")
                 .font(.system(size: 11))
                 .foregroundStyle(branch.isCurrent ? Color.accentColor : .secondary)
-            Text(branch.name)
+            Text(label ?? branch.name)
                 .font(.system(size: 12, weight: branch.isCurrent ? .semibold : .regular))
                 .lineLimit(1)
                 .truncationMode(.middle)

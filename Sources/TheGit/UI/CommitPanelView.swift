@@ -24,7 +24,8 @@ struct CommitPanelView: View {
                 bulkTitle: "Stage All",
                 emptyText: "No unstaged changes",
                 action: { repo.stage($0) },
-                bulkAction: { repo.stageAll() }
+                bulkAction: { repo.stageAll() },
+                repo: repo
             )
 
             Divider()
@@ -37,7 +38,8 @@ struct CommitPanelView: View {
                 bulkTitle: "Unstage All",
                 emptyText: "No staged changes",
                 action: { repo.unstage($0) },
-                bulkAction: { repo.unstageAll() }
+                bulkAction: { repo.unstageAll() },
+                repo: repo
             )
 
             Divider()
@@ -187,6 +189,7 @@ struct ConflictRow: View {
             .help("Resolve conflict")
         }
         .contentShape(Rectangle())
+        .onTapGesture { repo.selectFile(file) }
         .contextMenu {
             Button("Accept Ours (current branch)") { repo.acceptOurs(file) }
             Button("Accept Theirs (incoming)") { repo.acceptTheirs(file) }
@@ -205,6 +208,7 @@ struct FileSection: View {
     let emptyText: String
     let action: (FileChange) -> Void
     let bulkAction: () -> Void
+    @ObservedObject var repo: RepoState
 
     var body: some View {
         VStack(spacing: 0) {
@@ -230,9 +234,14 @@ struct FileSection: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List(files) { file in
-                    FileRow(file: file, actionIcon: actionIcon, actionHelp: actionHelp) {
-                        action(file)
-                    }
+                    FileRow(
+                        file: file,
+                        actionIcon: actionIcon,
+                        actionHelp: actionHelp,
+                        isSelected: repo.selectedFile?.id == file.id,
+                        action: { action(file) },
+                        select: { repo.selectFile(file) }
+                    )
                     .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 12))
                 }
                 .listStyle(.plain)
@@ -246,7 +255,9 @@ struct FileRow: View {
     let file: FileChange
     let actionIcon: String
     let actionHelp: String
+    let isSelected: Bool
     let action: () -> Void
+    let select: () -> Void
     @State private var hovering = false
 
     var statusColor: Color {
@@ -291,8 +302,13 @@ struct FileRow: View {
             .animation(.easeOut(duration: 0.12), value: hovering)
             .help(actionHelp)
         }
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .fill(isSelected ? Color.accentColor.opacity(0.15) : .clear)
+        )
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .onTapGesture(count: 2) { action() }
+        // Single click opens the diff — a many-times-a-day action, instant.
+        .onTapGesture { select() }
     }
 }

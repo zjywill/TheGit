@@ -118,6 +118,13 @@ actor GitClient {
         return nil
     }
 
+    func diff(path: String, staged: Bool) async throws -> String {
+        var args = ["diff"]
+        if staged { args.append("--cached") }
+        args += ["--", path]
+        return try await run(args)
+    }
+
     // MARK: - Conflict resolution
 
     /// Take one side of a conflicted file wholesale, then mark it resolved.
@@ -247,8 +254,16 @@ actor GitClient {
         try await run(["fetch", "--all", "--prune"])
     }
 
-    func pull() async throws {
-        try await run(["pull"])
+    func pull(extraArgs: [String] = []) async throws {
+        try await run(["pull"] + extraArgs)
+    }
+
+    func stashPush() async throws {
+        try await run(["stash", "push", "-u"])
+    }
+
+    func stashPop() async throws {
+        try await run(["stash", "pop"])
     }
 
     func push() async throws {
