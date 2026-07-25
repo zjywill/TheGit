@@ -6,6 +6,8 @@ import SwiftUI
 final class AppState: ObservableObject {
     @Published var repos: [RepoState] = []
     @Published var activeRepoID: String?
+    /// A folder the user tried to open that isn't a git repository.
+    @Published var nonGitPath: String?
 
     private static let recentKey = "TheGit.openRepos"
 
@@ -34,7 +36,12 @@ final class AppState: ObservableObject {
     func open(path: String) {
         var isDir: ObjCBool = false
         let gitPath = path + "/.git"
-        guard FileManager.default.fileExists(atPath: gitPath, isDirectory: &isDir) else { return }
+        guard FileManager.default.fileExists(atPath: gitPath, isDirectory: &isDir) else {
+            // Never auto-init: a novice picking their home folder would
+            // turn it into a repo. Tell them how to do it themselves.
+            nonGitPath = path
+            return
+        }
         if let existing = repos.first(where: { $0.path == path }) {
             activeRepoID = existing.id
             return

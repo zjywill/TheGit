@@ -88,6 +88,11 @@ struct CommitPanelView: View {
                         repo.commit()
                     } label: {
                         Text(commitButtonTitle)
+                            // The file count rolls like an odometer when
+                            // staging/unstaging — feedback that the button
+                            // heard the change, without relayout jumps.
+                            .contentTransition(.numericText(value: Double(repo.snapshot.staged.count)))
+                            .animation(.easeOut(duration: 0.2), value: repo.snapshot.staged.count)
                             .frame(maxWidth: .infinity)
                     }
                     .controlSize(.large)
@@ -265,10 +270,12 @@ struct FileSection: View {
                 Text("\(title) (\(files.count))")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
+                    .contentTransition(.numericText(value: Double(files.count)))
+                    .animation(.easeOut(duration: 0.2), value: files.count)
                 Spacer()
                 if !files.isEmpty {
                     Button(bulkTitle) { bulkAction() }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.pressEffect)
                         .font(.system(size: 11))
                         .foregroundStyle(Color.accentColor)
                 }

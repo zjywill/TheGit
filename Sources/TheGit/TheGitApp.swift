@@ -41,6 +41,28 @@ struct RootView: View {
                 EmptyStateView()
             }
         }
+        .alert(
+            "Not a Git repository",
+            isPresented: Binding(
+                get: { appState.nonGitPath != nil },
+                set: { if !$0 { appState.nonGitPath = nil } }
+            )
+        ) {
+            Button("Copy Command") {
+                if let path = appState.nonGitPath {
+                    RepoState.copyToPasteboard("cd \"\(path)\" && git init")
+                }
+            }
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("""
+            "\((appState.nonGitPath as NSString?)?.lastPathComponent ?? "")" has no .git directory.
+
+            To turn it into a repository, run this in Terminal, then open the folder again:
+
+            cd "\(appState.nonGitPath ?? "")" && git init
+            """)
+        }
     }
 }
 

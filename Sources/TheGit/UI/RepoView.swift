@@ -16,6 +16,13 @@ struct RepoView: View {
                 GraphView(repo: repo)
                 if repo.selectedFile != nil {
                     FileDiffView(repo: repo)
+                        // Fast fade-in masks the abrupt full-panel swap;
+                        // removal stays instant — close is usually Esc,
+                        // and keyboard actions never animate.
+                        .transition(.asymmetric(
+                            insertion: .opacity.animation(.easeOut(duration: 0.12)),
+                            removal: .identity
+                        ))
                 }
             }
             .frame(minWidth: 400)

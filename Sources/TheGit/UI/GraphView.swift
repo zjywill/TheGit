@@ -66,6 +66,8 @@ struct GraphView: View {
                 .fill(hoveringResizer || dragBaseWidth != nil
                     ? Color.accentColor.opacity(0.6)
                     : Color.primary.opacity(0.07))
+                // Hover tint fades; the width drag itself stays 1:1.
+                .animation(.easeOut(duration: 0.1), value: hoveringResizer)
                 .frame(width: 2)
                 .frame(maxHeight: .infinity)
                 .offset(x: Self.leadingInset + graphWidth + 2)
@@ -141,6 +143,8 @@ struct WipRowView: View {
                     .font(.system(size: 9, weight: .bold))
                 Text("\(changeCount)")
                     .font(.system(size: 11, weight: .semibold))
+                    .contentTransition(.numericText(value: Double(changeCount)))
+                    .animation(.easeOut(duration: 0.2), value: changeCount)
             }
             .foregroundStyle(.green)
 
