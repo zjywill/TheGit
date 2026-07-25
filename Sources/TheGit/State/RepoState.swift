@@ -73,6 +73,10 @@ final class RepoState: ObservableObject, Identifiable {
     @Published var selectedFile: FileChange?
     @Published var diffLines: [DiffLine] = []
     @Published var fileToDelete: FileChange?
+    @Published var showAddRemote = false
+    @Published var newRemoteName = "origin"
+    @Published var newRemoteURL = ""
+    @Published var remoteToRemove: String?
 
     nonisolated var id: String { path }
     var displayName: String { (path as NSString).lastPathComponent }
@@ -361,6 +365,32 @@ final class RepoState: ObservableObject, Identifiable {
     nonisolated static func copyToPasteboard(_ string: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(string, forType: .string)
+    }
+
+    // MARK: - Remote management
+
+    func promptAddRemote() {
+        newRemoteName = snapshot.remoteNames.isEmpty ? "origin" : ""
+        newRemoteURL = ""
+        showAddRemote = true
+    }
+
+    /// `git remote add` then fetch it so its branches appear right away.
+    func confirmAddRemote() {
+        let name = newRemoteName.trimmingCharacters(in: .whitespaces)
+        let url = newRemoteURL.trimmingCharacters(in: .whitespaces)
+        showAddRemote = false
+        guard !name.isEmpty, !url.isEmpty else { return }
+        perform { git in
+            try await git.addRemote(name: name, url: url)
+            try await git.fetch()
+        }
+    }
+
+    func confirmRemoveRemote() {
+        guard let name = remoteToRemove else { return }
+        remoteToRemove = nil
+        perform { try await $0.removeRemote(name) }
     }
 
     // MARK: - File context-menu actions

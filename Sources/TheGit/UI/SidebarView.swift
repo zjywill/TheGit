@@ -12,9 +12,33 @@ struct SidebarView: View {
                     BranchNodeRow(node: node, repo: repo)
                 }
             }
-            Section("Remote") {
+            Section {
                 ForEach(BranchTree.remoteTree(repo.snapshot.remoteBranches)) { node in
                     BranchNodeRow(node: node, repo: repo)
+                }
+                if repo.snapshot.remoteBranches.isEmpty {
+                    Button {
+                        repo.promptAddRemote()
+                    } label: {
+                        Label("Add Remote…", systemImage: "plus.circle")
+                            .font(.system(size: 12))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.accentColor)
+                }
+            } header: {
+                HStack {
+                    Text("Remote")
+                    Spacer()
+                    Button {
+                        repo.promptAddRemote()
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .buttonStyle(.pressEffect)
+                    .foregroundStyle(.secondary)
+                    .help("Add remote")
                 }
             }
             Section("Worktrees") {
@@ -83,6 +107,40 @@ struct SidebarView: View {
             Button(repo.branchPrompt?.confirmLabel ?? "OK") { repo.confirmPrompt() }
             Button("Cancel", role: .cancel) {}
         }
+        .sheet(isPresented: $repo.showAddRemote) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Add Remote")
+                    .font(.headline)
+                TextField("Name (e.g. origin)", text: $repo.newRemoteName)
+                TextField("URL (https://… or git@…)", text: $repo.newRemoteURL)
+                    .frame(minWidth: 320)
+                HStack {
+                    Spacer()
+                    Button("Cancel") { repo.showAddRemote = false }
+                        .keyboardShortcut(.escape, modifiers: [])
+                    Button("Add & Fetch") { repo.confirmAddRemote() }
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.return, modifiers: [])
+                        .disabled(
+                            repo.newRemoteName.trimmingCharacters(in: .whitespaces).isEmpty
+                                || repo.newRemoteURL.trimmingCharacters(in: .whitespaces).isEmpty
+                        )
+                }
+            }
+            .padding(20)
+        }
+        .alert(
+            "Remove remote \(repo.remoteToRemove ?? "")?",
+            isPresented: Binding(
+                get: { repo.remoteToRemove != nil },
+                set: { if !$0 { repo.remoteToRemove = nil } }
+            )
+        ) {
+            Button("Remove", role: .destructive) { repo.confirmRemoveRemote() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Removes the remote and its tracking branches from this repo. Nothing is deleted on the server.")
+        }
         .alert(
             deleteTitle,
             isPresented: Binding(
@@ -150,7 +208,19 @@ struct FolderDisclosure: View {
             .onTapGesture {
                 withAnimation(.easeOut(duration: 0.15)) { expanded.toggle() }
             }
+            .contextMenu {
+                if isRemoteRoot {
+                    Button("Remove Remote…", role: .destructive) {
+                        repo.remoteToRemove = node.name
+                    }
+                }
+            }
         }
+    }
+
+    /// Top-level remote node ("remote:origin"), not a folder inside it.
+    private var isRemoteRoot: Bool {
+        node.id.hasPrefix("remote:") && !node.id.dropFirst(7).contains("/")
     }
 }
 

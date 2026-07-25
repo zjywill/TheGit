@@ -270,6 +270,14 @@ actor GitClient {
         try await run(["format-patch", "-1", hash, "--stdout"])
     }
 
+    func addRemote(name: String, url: String) async throws {
+        try await run(["remote", "add", name, url])
+    }
+
+    func removeRemote(_ name: String) async throws {
+        try await run(["remote", "remove", name])
+    }
+
     func remoteURL(_ remote: String = "origin") async throws -> String {
         try await run(["remote", "get-url", remote])
             .trimmingCharacters(in: .whitespacesAndNewlines)
