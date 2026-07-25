@@ -265,11 +265,32 @@ struct GraphRowView: View {
         .contextMenu { menuItems }
     }
 
+    /// Branches whose tip is this commit (from its decorations).
+    private var branchesHere: [Branch] {
+        RefBadge.infos(for: row.commit.refs)
+            .filter { !$0.isTag }
+            .compactMap { info in
+                repo.snapshot.localBranches.first { $0.name == info.label }
+                    ?? repo.snapshot.remoteBranches.first { $0.name == info.label }
+            }
+    }
+
     /// GitKraken-style commit context menu.
     @ViewBuilder
     private var menuItems: some View {
         let commit = row.commit
         let current = repo.snapshot.currentBranch ?? "HEAD"
+
+        // Branch tips on this commit come first: switching branches is the
+        // most common intent when right-clicking a labeled row.
+        let tips = branchesHere
+        if !tips.isEmpty {
+            ForEach(tips) { branch in
+                Button("Checkout \(branch.name)") { repo.checkout(branch) }
+                    .disabled(branch.isCurrent)
+            }
+            Divider()
+        }
 
         Button("Checkout this commit (detached)") { repo.checkoutCommit(commit) }
         Button("Create worktree from this commit…") { repo.addWorktree(atCommit: commit) }
