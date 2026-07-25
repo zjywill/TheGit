@@ -215,8 +215,10 @@ final class RepoState: ObservableObject, Identifiable {
             // still makes List re-diff and visibly nudges the scroll
             // position right after scrolling stops.
             if snap != snapshot { snapshot = snap }
-            // Close the diff if its file no longer has changes.
-            if let file = selectedFile {
+            // Close the diff if its file no longer has changes — but only
+            // for working-tree diffs. A commit's diff (diffCommit set) is
+            // historical and must survive background refreshes.
+            if diffCommit == nil, let file = selectedFile {
                 let all = snap.staged + snap.unstaged + snap.conflicted
                 if !all.contains(where: { $0.id == file.id }) { closeDiff() }
             }
