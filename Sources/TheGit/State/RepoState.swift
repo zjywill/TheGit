@@ -521,7 +521,20 @@ final class RepoState: ObservableObject, Identifiable {
 
     func fetch() { perform { try await $0.fetch() } }
     func pull() { perform { try await $0.pull() } }
-    func push() { perform { try await $0.push() } }
+    /// A branch created locally has no upstream, and bare `git push` refuses
+    /// to guess one — the toolbar button would fail on every new branch until
+    /// the user typed `push -u` by hand. Set the upstream on the first push
+    /// instead, the same as the branch menu's "Push to" already does.
+    func push() {
+        guard let current = snapshot.localBranches.first(where: \.isCurrent),
+              current.upstream == nil
+        else {
+            perform { try await $0.push() }
+            return
+        }
+        let remote = snapshot.defaultRemote
+        perform { try await $0.push(remote: remote, branch: current.name, setUpstream: true) }
+    }
 
     func runPull(_ mode: PullMode) {
         switch mode {

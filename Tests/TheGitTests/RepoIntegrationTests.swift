@@ -579,4 +579,89 @@ final class RepoIntegrationTests: XCTestCase {
         XCTAssertEqual(subs.first?.state, "+")
         XCTAssertEqual(subs.first?.stateDescription, "Checked-out commit differs from index")
     }
+
+    /// The Push button on a freshly created branch: bare `git push` refuses
+    /// to guess a destination, so it has to set the upstream itself instead
+    /// of leaving the user to type `push -u origin <branch>`.
+    func testPushSetsUpstreamForABranchThatHasNone() async throws {
+        let origin = root.appendingPathComponent("origin.git").path
+        try await Shell.run("/usr/bin/env", ["git", "init", "-q", "--bare", "-b", "main", origin])
+        let path = try await makeRepo("push-new-branch")
+        try await git(path, ["remote", "add", "origin", origin])
+        try await git(path, ["push", "-q", "-u", "origin", "main"])
+
+        try await git(path, ["checkout", "-q", "-b", "feature/x"])
+        try write("work\n", to: path + "/work.txt")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "work"])
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        XCTAssertNil(repo.snapshot.localBranches.first(where: \.isCurrent)?.upstream)
+
+        repo.push()
+        try await waitUntil("the push to set an upstream", { [weak repo] in
+            repo?.snapshot.localBranches.first(where: \.isCurrent)?.upstream == "origin/feature/x"
+        }, refreshing: { await repo.refresh() })
+        XCTAssertNil(repo.errorMessage)
+
+        let remoteRefs = try await git(origin, ["branch", "--format=%(refname:short)"])
+        XCTAssertTrue(remoteRefs.contains("feature/x"), remoteRefs)
+    }
+
+    /// Nothing has ever been pushed, so there are no remote-tracking
+    /// branches to read a remote name off — the very first push still has to
+    /// land on the configured `origin`.
+    func testFirstPushOfAllInARepoWithNoRemoteBranchesYet() async throws {
+        let origin = root.appendingPathComponent("origin-empty.git").path
+        try await Shell.run("/usr/bin/env", ["git", "init", "-q", "--bare", "-b", "main", origin])
+        let path = try await makeRepo("push-first-ever")
+        try await git(path, ["remote", "add", "origin", origin])
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        XCTAssertTrue(repo.snapshot.remoteNames.isEmpty)
+
+        repo.push()
+        try await waitUntil("the first push to set an upstream", { [weak repo] in
+            repo?.snapshot.localBranches.first(where: \.isCurrent)?.upstream == "origin/main"
+        }, refreshing: { await repo.refresh() })
+        XCTAssertNil(repo.errorMessage)
+    }
+
+    /// Pushing a branch that is not checked out — the sidebar's Push on
+    /// another branch row. It must move that branch's ref, not HEAD's.
+    func testPushingANonCurrentBranchLeavesHEADAlone() async throws {
+        let origin = root.appendingPathComponent("origin-other.git").path
+        try await Shell.run("/usr/bin/env", ["git", "init", "-q", "--bare", "-b", "main", origin])
+        let path = try await makeRepo("push-other-branch")
+        try await git(path, ["remote", "add", "origin", origin])
+        try await git(path, ["push", "-q", "-u", "origin", "main"])
+
+        // A commit on `side`, then back to main and a commit there too.
+        try await git(path, ["checkout", "-q", "-b", "side"])
+        try write("side\n", to: path + "/side.txt")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "side work"])
+        try await git(path, ["checkout", "-q", "main"])
+        try write("main\n", to: path + "/main.txt")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "main work"])
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        let side = try XCTUnwrap(repo.snapshot.localBranches.first { $0.name == "side" })
+        repo.push(side, to: repo.remote(for: side))
+
+        try await waitUntil("side to reach the remote", { [weak repo] in
+            repo?.snapshot.localBranches.first { $0.name == "side" }?.upstream == "origin/side"
+        }, refreshing: { await repo.refresh() })
+        XCTAssertNil(repo.errorMessage)
+
+        // main's new commit stayed local: the push targeted `side` only.
+        let remoteMain = try await git(origin, ["log", "-1", "--format=%s", "main"])
+        XCTAssertEqual(remoteMain.trimmingCharacters(in: .whitespacesAndNewlines), "init")
+        let remoteSide = try await git(origin, ["log", "-1", "--format=%s", "side"])
+        XCTAssertEqual(remoteSide.trimmingCharacters(in: .whitespacesAndNewlines), "side work")
+    }
 }

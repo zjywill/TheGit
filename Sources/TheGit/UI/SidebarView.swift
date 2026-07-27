@@ -1144,16 +1144,13 @@ struct BranchRow: View {
         }
     }
 
-    /// One remote: a plain Push. Several: pick, because "git push" with no
-    /// upstream and two remotes has no correct default.
+    /// One remote: a plain Push — `push()` picks the remote and sets the
+    /// upstream itself when the branch hasn't got one. Several: pick, because
+    /// "git push" with no upstream and two remotes has no correct default.
     @ViewBuilder
     private var pushMenu: some View {
         let remotes = repo.snapshot.remoteNames
-        if branch.upstream != nil, remotes.count <= 1 {
-            Button("Push") { repo.push() }
-        } else if remotes.isEmpty {
-            Button("Push") { repo.push() }
-        } else {
+        if remotes.count > 1 {
             Menu("Push to") {
                 ForEach(remotes, id: \.self) { remote in
                     Button(branch.upstream == nil
@@ -1163,6 +1160,11 @@ struct BranchRow: View {
                     }
                 }
             }
+        } else if branch.isCurrent {
+            Button("Push") { repo.push() }
+        } else {
+            // Bare `git push` would push HEAD, not the branch clicked on.
+            Button("Push") { repo.push(branch, to: repo.remote(for: branch)) }
         }
     }
 
