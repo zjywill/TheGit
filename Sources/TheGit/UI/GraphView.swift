@@ -12,9 +12,8 @@ struct GraphView: View {
     @AppStorage("graphColumnWidth") private var storedWidth: Double = 0
     @State private var dragBaseWidth: CGFloat?
     @State private var hoveringResizer = false
-    /// Shared horizontal offset for the lane column. The badge column sits
-    /// outside it, so ref bubbles stay pinned at the left while the lanes
-    /// slide underneath — GitKraken's behaviour.
+    /// Shared horizontal offset for the lane column. The ref-label column
+    /// sits outside it, so labels stay put while the lanes slide.
     @State private var graphScrollX: CGFloat = 0
 
     private static let leadingInset: CGFloat = 8
@@ -221,11 +220,6 @@ struct GraphRowView: View {
         )
     }
 
-    /// This commit carries a ref label in the pinned column.
-    private var hasBadge: Bool {
-        badgeWidth > 0 && !RefBadge.infos(for: row.commit.refs).isEmpty
-    }
-
     /// True when this commit is the tip of the checked-out branch.
     private var isHead: Bool {
         row.commit.refs.contains { $0.hasPrefix("HEAD") }
@@ -238,23 +232,15 @@ struct GraphRowView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 8) {
             if badgeWidth > 0 {
                 BadgeColumn(
                     refs: row.commit.refs,
                     localBranches: repo.snapshot.localBranches,
                     repo: repo,
-                    maxBadgeWidth: max(40, badgeWidth - 34),
-                    // The connector starts at the badge and is finished by
-                    // the lane canvas, so the two halves read as one line
-                    // running from the pinned label to its node.
-                    connector: hasBadge ? LaneCanvas.color(row.columnColor) : nil,
-                    dimmed: !onCurrentBranch
+                    maxBadgeWidth: max(40, badgeWidth - 34)
                 )
-                // Pinned hard left, GitKraken-style: a label that keeps the
-                // same x on every row is scannable; one that floats with
-                // its own width is not.
-                .frame(width: badgeWidth + 8, alignment: .leading)
+                .frame(width: badgeWidth, alignment: .trailing)
             }
 
             LaneCanvas(
@@ -267,8 +253,7 @@ struct GraphRowView: View {
                         gitlabRepo: repo.forge == .gitlab ? repo.path : nil
                     )
                     : nil,
-                scrollX: scrollX,
-                hasBadge: hasBadge
+                scrollX: scrollX
             )
             .frame(width: graphWidth, height: GraphView.rowHeight)
                 .mask(
@@ -419,9 +404,6 @@ struct LaneCanvas: View {
     var avatar: Image? = nil
     /// Shared horizontal scroll offset for the lane column.
     var scrollX: CGFloat = 0
-    /// This commit carries a ref badge in the pinned left column, so it
-    /// gets a leader line out to its node.
-    var hasBadge = false
 
     static let palette: [Color] = [
         .blue, .purple, .teal, .orange, .pink, .green, .indigo, .red, .cyan, .yellow,
@@ -456,27 +438,6 @@ struct LaneCanvas: View {
                     style: isWip
                         ? StrokeStyle(lineWidth: 2, dash: [3, 3])
                         : StrokeStyle(lineWidth: 2)
-                )
-            }
-
-            // Leader line from the pinned badge column to this commit's
-            // node. The badge is always visible on the left, but its node
-            // can sit six lanes to the right or be scrolled past — without
-            // this you can't tell which lane the label belongs to.
-            // Drawn first so the lane lines cross over it, not under.
-            if hasBadge, !isWip, dotX > scrollX {
-                var p = Path()
-                p.move(to: CGPoint(x: scrollX, y: midY))
-                p.addLine(to: CGPoint(x: dotX, y: midY))
-                // Solid, matching the half drawn in the badge column so the
-                // two read as one line. It can't be confused with a lane:
-                // lanes are vertical, this is the only horizontal run.
-                // Barely dimmed on purpose — the rows that need it most are
-                // exactly the dimmed ones whose node sits far to the right.
-                context.stroke(
-                    p,
-                    with: .color(Self.color(row.columnColor).opacity(dimmed ? 0.45 : 0.7)),
-                    style: StrokeStyle(lineWidth: 1.5)
                 )
             }
 
@@ -654,9 +615,6 @@ struct BadgeColumn: View {
     var repo: RepoState?
     /// Widest a single badge may get before its label truncates.
     var maxBadgeWidth: CGFloat = 130
-    /// Branch colour of the row, when this commit has a label to connect.
-    var connector: Color?
-    var dimmed = false
     @State private var showOverflow = false
 
     /// ahead/behind of the local branch a badge represents, if any.
@@ -671,14 +629,12 @@ struct BadgeColumn: View {
     var body: some View {
         let infos = RefBadge.infos(for: refs)
         HStack(spacing: 4) {
+            Spacer(minLength: 0)
             if let first = infos.first {
-                // Constrain rather than let it overflow: an unbounded badge
+                // Capped rather than left to overflow: an unbounded badge
                 // grows past its column and gets sliced by the window edge.
                 RefBadge(info: first, track: track(first), repo: repo)
-                    .frame(maxWidth: maxBadgeWidth, alignment: .leading)
-                    // The label claims its width first; the connector is
-                    // greedy and would otherwise squeeze it to nothing.
-                    .layoutPriority(1)
+                    .frame(maxWidth: maxBadgeWidth, alignment: .trailing)
             }
             if infos.count > 1 {
                 Button {
@@ -701,17 +657,6 @@ struct BadgeColumn: View {
                     }
                     .padding(10)
                 }
-            }
-            // Runs from the label to the edge of this column; the lane
-            // canvas picks it up on the other side and carries it to the
-            // node, so the two halves read as one line.
-            if let connector, !infos.isEmpty {
-                Rectangle()
-                    .fill(connector.opacity(dimmed ? 0.45 : 0.7))
-                    .frame(height: 1.5)
-                    .frame(maxWidth: .infinity)
-            } else {
-                Spacer(minLength: 0)
             }
         }
     }
