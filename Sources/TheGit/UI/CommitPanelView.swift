@@ -3,6 +3,28 @@ import SwiftUI
 /// Right panel: unstaged / staged files + commit message + commit button.
 struct CommitPanelView: View {
     @ObservedObject var repo: RepoState
+    @ObservedObject private var ai = AISettings.shared
+    @Environment(\.uiZoom) private var zoom
+    @State private var confirmingSend = false
+
+    /// Message box height, unzoomed, 0 until the user drags it. A generated
+    /// message is several lines longer than a hand-typed one, so the old
+    /// fixed 90pt box stopped being enough the moment ✨ landed.
+    @AppStorage("commitMessageHeight") private var storedMessageHeight: Double = 0
+    /// Live height while the drag is in flight. The stored value is written
+    /// once, on release: a UserDefaults write per frame republishes
+    /// @AppStorage and rebuilds the whole panel sixty times a second.
+    @State private var draggedHeight: CGFloat?
+    @State private var dragBaseHeight: CGFloat?
+    @State private var hoveringResizer = false
+
+    private static let defaultMessageHeight: CGFloat = 90
+    private static let messageHeightRange: ClosedRange<CGFloat> = 60...460
+
+    private var messageHeight: CGFloat {
+        if let draggedHeight { return draggedHeight }
+        return storedMessageHeight > 0 ? CGFloat(storedMessageHeight) : Self.defaultMessageHeight
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -42,7 +64,7 @@ struct CommitPanelView: View {
                 repo: repo
             )
 
-            Divider()
+            messageResizer
 
             VStack(alignment: .leading, spacing: 8) {
                 // GitKraken's Commit / Stash mode tabs: same message box,
@@ -69,11 +91,13 @@ struct CommitPanelView: View {
                         }
                     }
 
+                if ai.isEnabled, repo.panelMode == .commit { generateRow }
+
                 TextEditor(text: $repo.commitMessage)
                     .zoomFont(12)
                     .scrollContentBackground(.hidden)
                     .padding(6)
-                    .frame(height: 90)
+                    .frame(height: messageHeight * zoom)
                     .background(
                         RoundedRectangle(cornerRadius: 6)
                             .fill(Color(nsColor: .textBackgroundColor))
@@ -137,6 +161,114 @@ struct CommitPanelView: View {
         } message: {
             Text("The file will be removed from disk. Uncommitted changes in it are lost.")
         }
+    }
+
+    /// The divider above the message box doubles as its resize handle —
+    /// same spreadsheet-column feel as the graph's, turned on its side. The
+    /// file lists above are flexible, so the space comes out of them.
+    private var messageResizer: some View {
+        Rectangle()
+            .fill(hoveringResizer || dragBaseHeight != nil
+                ? Color.accentColor.opacity(0.6)
+                : Color.primary.opacity(0.07))
+            // The hover tint fades; the drag itself tracks the pointer 1:1.
+            .animation(.easeOut(duration: 0.1), value: hoveringResizer)
+            .frame(height: 2)
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle().inset(by: -4))
+            .onHover { inside in
+                // The handle slides out from under the pointer as the box
+                // grows, so hover flips constantly mid-drag. Pushing and
+                // popping the cursor on each flip makes it strobe.
+                guard dragBaseHeight == nil else { return }
+                hoveringResizer = inside
+                if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
+            }
+            .gesture(
+                // Global coordinates, not the default local ones: this view
+                // moves as a direct result of the drag, and a translation
+                // measured against a moving frame feeds back into itself —
+                // which is what made fast drags flicker.
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                    .onChanged { value in
+                        let base = dragBaseHeight ?? messageHeight
+                        dragBaseHeight = base
+                        // Dragging up grows the box; the height is kept
+                        // unzoomed so the box survives ⌘= at its own size.
+                        let height = base - value.translation.height / zoom
+                        draggedHeight = min(
+                            max(height, Self.messageHeightRange.lowerBound),
+                            Self.messageHeightRange.upperBound
+                        )
+                    }
+                    .onEnded { _ in
+                        if let draggedHeight { storedMessageHeight = Double(draggedHeight) }
+                        draggedHeight = nil
+                        dragBaseHeight = nil
+                    }
+            )
+            .help("Drag to resize the message box")
+    }
+
+    /// GitKraken's ✨: writes the message from the staged diff. Only ever
+    /// shown when AI is switched on — a git client with no AI configured
+    /// shouldn't grow a button advertising it.
+    private var generateRow: some View {
+        HStack(spacing: 6) {
+            Spacer(minLength: 0)
+            if repo.isGeneratingMessage {
+                ProgressView()
+                    .controlSize(.small)
+                Button("Stop") { repo.cancelMessageGeneration() }
+                    .buttonStyle(.plain)
+                    .zoomFont(11)
+                    .foregroundStyle(.secondary)
+            } else {
+                if ai.isReady {
+                    Text(ai.modelID)
+                        .zoomFont(10)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Button {
+                    if ai.didConfirmSending {
+                        repo.generateCommitMessage()
+                    } else {
+                        confirmingSend = true
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "sparkles")
+                        Text("Generate")
+                    }
+                    .zoomFont(11)
+                }
+                .buttonStyle(.pressEffect)
+                .disabled(!canGenerate)
+                .help(ai.notReadyReason ?? "Write the commit message from the staged diff")
+            }
+        }
+        .alert(
+            "Send this diff to \(ai.provider?.name ?? "the provider")?",
+            isPresented: $confirmingSend
+        ) {
+            Button("Send") {
+                ai.didConfirmSending = true
+                repo.generateCommitMessage()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("""
+            Generating a message uploads the staged diff — file paths and the changed lines — to \(ai.provider?.name ?? "the provider") at \(ai.baseURL?.host ?? "its endpoint").
+
+            TheGit won't ask again. Turn the feature off in Settings (⌘,) at any time.
+            """)
+        }
+    }
+
+    private var canGenerate: Bool {
+        ai.isReady && (repo.amend || !repo.snapshot.staged.isEmpty)
     }
 
     private var canCommit: Bool {

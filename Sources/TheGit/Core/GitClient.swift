@@ -154,6 +154,33 @@ actor GitClient {
         return try await run(args)
     }
 
+    /// The change a commit would record, for the AI message generator:
+    /// the index against HEAD, or against HEAD's parent when amending.
+    /// `--no-ext-diff` matters — a user's difftool would hand back
+    /// something that isn't a unified diff at all.
+    func stagedDiff(amend: Bool, stat: Bool) async throws -> String {
+        var args = ["diff", "--cached", "--no-color", "--no-ext-diff"]
+        args += stat ? ["--stat=200"] : ["-U3"]
+        // A root commit has no HEAD~1; amending one still diffs the index
+        // against HEAD, which is empty for it anyway.
+        if amend, (try? await run(["rev-parse", "--verify", "HEAD~1"])) != nil {
+            args.append("HEAD~1")
+        }
+        return try await run(args)
+    }
+
+    /// Recent messages, as a style sample for the generator. Merges are
+    /// skipped: "Merge pull request #18" teaches a model nothing.
+    func recentCommitMessages(limit: Int = 8) async throws -> [String] {
+        let output = try await run([
+            "log", "-n", String(limit), "--no-merges", "--format=%B%x00",
+        ])
+        return output
+            .components(separatedBy: "\0")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
     // MARK: - Conflict resolution
 
     /// Take one side of a conflicted file wholesale, then mark it resolved.

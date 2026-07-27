@@ -28,6 +28,11 @@ rm -rf "$DIST"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/$APP_NAME"
 
+# The AI provider catalog. SwiftPM also emits it as a sibling .bundle, but
+# that only belongs next to a bare binary — inside an .app the resource
+# goes in Contents/Resources, which is where AIProviderCatalog looks first.
+cp "$ROOT/Sources/TheGit/Resources/providers.json" "$APP/Contents/Resources/"
+
 if [ -f "$ROOT/Resources/AppIcon.icns" ]; then
     cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 else

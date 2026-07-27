@@ -84,6 +84,13 @@ struct TheGitApp: App {
                     .disabled(zoomLevel == UIZoom.defaultLevel)
             }
         }
+
+        // Its own window, inheriting nothing from the one above — zoom has
+        // to be handed to it separately.
+        Settings {
+            AISettingsView()
+                .environment(\.uiZoom, zoom)
+        }
     }
 }
 

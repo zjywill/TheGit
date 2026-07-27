@@ -119,6 +119,10 @@ final class RepoState: ObservableObject, Identifiable {
     @Published var searchText = ""
     @Published var amend = false
     @Published var isBusy = false
+    /// Separate from `isBusy`: a generation runs for seconds and must not
+    /// disable staging or the commit button while it does.
+    @Published var isGeneratingMessage = false
+    private var generateTask: Task<Void, Never>?
     @Published var errorMessage: String?
     @Published var selectedCommit: String?
     /// Stash highlighted from its graph node; the sidebar row lights up.
@@ -398,6 +402,74 @@ final class RepoState: ObservableObject, Identifiable {
             await refresh()
         }
     }
+
+    // MARK: - AI commit message
+
+    /// Streams a generated message into `commitMessage`. The user's own
+    /// draft goes into the prompt as a statement of intent and comes back
+    /// if anything fails — nothing they typed is lost to a 401.
+    func generateCommitMessage() {
+        guard let endpoint = AISettings.shared.endpoint, !isGeneratingMessage else { return }
+        let settings = AISettings.shared
+        let amending = amend
+        let draft = commitMessage
+        isGeneratingMessage = true
+
+        generateTask = Task {
+            defer {
+                isGeneratingMessage = false
+                generateTask = nil
+            }
+            do {
+                let stat = try await git.stagedDiff(amend: amending, stat: true)
+                let diff = try await git.stagedDiff(amend: amending, stat: false)
+                guard !diff.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    errorMessage = "Nothing is staged to describe."
+                    return
+                }
+                let recent = settings.matchRepoStyle
+                    ? ((try? await git.recentCommitMessages()) ?? [])
+                    : []
+
+                let request = AIRequest(
+                    system: CommitMessageGenerator.systemPrompt(
+                        style: settings.style,
+                        language: settings.language,
+                        extra: settings.extraInstructions
+                    ),
+                    user: CommitMessageGenerator.userPrompt(
+                        summary: CommitMessageGenerator.summarize(
+                            stat: stat, diff: diff, budget: settings.budget.rawValue
+                        ),
+                        recentMessages: recent,
+                        draft: draft
+                    )
+                )
+
+                commitMessage = ""
+                var answer = ""
+                for try await delta in AIClient.stream(request, endpoint: endpoint) {
+                    answer += delta
+                    commitMessage = CommitMessageGenerator.clean(answer)
+                }
+                let message = CommitMessageGenerator.clean(answer)
+                if message.isEmpty {
+                    commitMessage = draft
+                    // Cancelling finishes the stream cleanly, so an empty
+                    // answer there is the user's doing, not a failure.
+                    if !Task.isCancelled { errorMessage = "The model returned nothing." }
+                } else {
+                    commitMessage = message
+                }
+            } catch {
+                commitMessage = draft
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    /// Stops the stream but keeps whatever already landed in the box.
+    func cancelMessageGeneration() { generateTask?.cancel() }
 
     /// HEAD commit's subject, used to prefill the amend message.
     var headSubject: String? {
