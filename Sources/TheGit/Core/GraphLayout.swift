@@ -7,6 +7,9 @@ import Foundation
 struct GraphEdge: Hashable {
     let lane: Int
     let color: Int
+    /// The WIP line: dashed for its whole run, from the WIP node down to
+    /// the HEAD commit it points at (GitKraken draws it the same way).
+    var dashed = false
 }
 
 /// One row of the commit graph. Coordinates are lane indices (column numbers).
@@ -34,6 +37,7 @@ enum GraphLayout {
     static func layout(commits: [Commit]) -> [GraphRow] {
         var lanes: [String?] = []   // lanes[i] == hash that lane i expects next
         var laneColors: [Int] = []  // branch-line color currently flowing in lane i
+        var laneDashed: [Bool] = [] // lane i currently carries the WIP line
         var nextColor = 0
         var rows: [GraphRow] = []
         rows.reserveCapacity(commits.count)
@@ -42,10 +46,12 @@ enum GraphLayout {
             if let free = lanes.firstIndex(where: { $0 == nil }) {
                 lanes[free] = hash
                 laneColors[free] = color
+                laneDashed[free] = false
                 return free
             }
             lanes.append(hash)
             laneColors.append(color)
+            laneDashed.append(false)
             return lanes.count - 1
         }
 
@@ -67,23 +73,32 @@ enum GraphLayout {
 
             // Top edge: only children lines arrive at the dot. Tips get none —
             // drawing a stub from the top edge here was a bug.
-            let mergeSources = matching.map { GraphEdge(lane: $0, color: laneColors[$0]) }
+            let mergeSources = matching.map {
+                GraphEdge(lane: $0, color: laneColors[$0], dashed: laneDashed[$0])
+            }
             let passThrough = lanes.indices
                 .filter { lanes[$0] != nil && !matching.contains($0) }
-                .map { GraphEdge(lane: $0, color: laneColors[$0]) }
+                .map { GraphEdge(lane: $0, color: laneColors[$0], dashed: laneDashed[$0]) }
 
             // Release all lanes that terminated here.
-            for i in matching { lanes[i] = nil }
+            for i in matching {
+                lanes[i] = nil
+                laneDashed[i] = false
+            }
 
             // Bottom edge: connect the dot to each parent's lane.
             var parentLanes: [GraphEdge] = []
             for (idx, parent) in commit.parents.enumerated() {
                 if idx == 0 {
                     // First parent keeps the commit's own lane and color —
-                    // keeps the main line straight.
+                    // keeps the main line straight. The WIP commit's line
+                    // stays dashed until it reaches HEAD.
                     lanes[column] = parent
                     laneColors[column] = columnColor
-                    parentLanes.append(GraphEdge(lane: column, color: columnColor))
+                    laneDashed[column] = commit.isWip
+                    parentLanes.append(
+                        GraphEdge(lane: column, color: columnColor, dashed: commit.isWip)
+                    )
                 } else if let existing = lanes.firstIndex(of: parent) {
                     // Another drawn commit already expects this parent —
                     // merge into that line, using ITS color.

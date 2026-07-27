@@ -62,13 +62,25 @@ struct GraphView: View {
         // rows and stable ids, LazyVStack never moves the scroll position.
         ScrollViewReader { proxy in
         ScrollView {
-            LazyVStack(spacing: 0) {
+            // Leading-aligned: rows whose fixed columns overflow a narrow
+            // window report different widths, and the default center
+            // alignment would shift each row by half its own overflow —
+            // the WIP row and commit rows stopped lining up.
+            LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(rows) { row in
                     Group {
                         if row.commit.isWip {
                             // WIP is a synthetic commit laid out like any other,
                             // so its dashed node sits exactly on HEAD's lane.
-                            WipGraphRow(row: row, changeCount: changeCount, graphWidth: graphWidth, badgeWidth: badgeWidth, scrollX: scrollX)
+                            WipGraphRow(
+                                row: row,
+                                changeCount: changeCount,
+                                graphWidth: graphWidth,
+                                badgeWidth: badgeWidth,
+                                scrollX: scrollX,
+                                fadeLeading: fadeLeading,
+                                fadeTrailing: fadeTrailing
+                            )
                                 .contentShape(Rectangle())
                                 // Clicking WIP returns the right panel to the commit box.
                                 .onTapGesture { repo.selectedCommit = nil }
@@ -96,6 +108,13 @@ struct GraphView: View {
                         }
                     }
                     .frame(height: Self.rowHeight)
+                    // Leading-aligned even when the row's fixed columns
+                    // exceed the window: an overflowing HStack is centered
+                    // by default, which shifts each row left by half its
+                    // own overflow — rows with different content (WIP vs
+                    // commit) would shift by different amounts and the
+                    // lane columns stop lining up.
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.leading, Self.leadingInset)
                     .padding(.trailing, 8)
                     .id(row.id)
@@ -160,6 +179,8 @@ struct WipGraphRow: View {
     let graphWidth: CGFloat
     let badgeWidth: CGFloat
     var scrollX: CGFloat = 0
+    var fadeLeading = false
+    var fadeTrailing = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -167,8 +188,13 @@ struct WipGraphRow: View {
                 Spacer().frame(width: badgeWidth)
             }
 
-            LaneCanvas(row: row, scrollX: scrollX)
-                .frame(width: graphWidth, height: GraphView.rowHeight)
+            LaneCanvas(
+                row: row,
+                scrollX: scrollX,
+                fadeLeading: fadeLeading,
+                fadeTrailing: fadeTrailing
+            )
+            .frame(width: graphWidth, height: GraphView.rowHeight)
 
             RoundedRectangle(cornerRadius: 1)
                 .fill(Color.secondary.opacity(0.5))
@@ -253,18 +279,11 @@ struct GraphRowView: View {
                         gitlabRepo: repo.forge == .gitlab ? repo.path : nil
                     )
                     : nil,
-                scrollX: scrollX
+                scrollX: scrollX,
+                fadeLeading: fadeLeading,
+                fadeTrailing: faded
             )
             .frame(width: graphWidth, height: GraphView.rowHeight)
-                .mask(
-                    LinearGradient(
-                        stops: Self.fadeStops(
-                            leading: fadeLeading, trailing: faded, width: graphWidth
-                        ),
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    )
-                )
                 .clipped()
 
             // Branch-colored tick before the message, GitKraken-style.
@@ -312,20 +331,6 @@ struct GraphRowView: View {
         // Drag a commit onto a branch to cherry-pick it there. The WIP row
         // isn't a real commit, so it isn't draggable.
         .modifier(CommitDragSource(commit: row.commit))
-    }
-
-    /// Soft edges only where the lanes actually continue, so the fade reads
-    /// as "there's more this way" rather than as decoration.
-    static func fadeStops(
-        leading: Bool, trailing: Bool, width: CGFloat
-    ) -> [Gradient.Stop] {
-        let edge = min(24 / max(width, 1), 0.4)
-        var stops: [Gradient.Stop] = []
-        stops.append(.init(color: leading ? .clear : .black, location: 0))
-        if leading { stops.append(.init(color: .black, location: edge)) }
-        if trailing { stops.append(.init(color: .black, location: 1 - edge)) }
-        stops.append(.init(color: trailing ? .clear : .black, location: 1))
-        return stops
     }
 
     /// Branches whose tip is this commit (from its decorations).
@@ -404,6 +409,10 @@ struct LaneCanvas: View {
     var avatar: Image? = nil
     /// Shared horizontal scroll offset for the lane column.
     var scrollX: CGFloat = 0
+    /// Fade the lane lines at the edges where content continues. Applied to
+    /// the lines only, in-canvas — a pinned node must not fade with them.
+    var fadeLeading = false
+    var fadeTrailing = false
 
     static let palette: [Color] = [
         .blue, .purple, .teal, .orange, .pink, .green, .indigo, .red, .cyan, .yellow,
@@ -413,16 +422,61 @@ struct LaneCanvas: View {
         palette[lane % palette.count]
     }
 
+    /// Soft edges only where the lanes actually continue, so the fade reads
+    /// as "there's more this way" rather than as decoration.
+    static func fadeStops(
+        leading: Bool, trailing: Bool, width: CGFloat
+    ) -> [Gradient.Stop] {
+        let edge = min(24 / max(width, 1), 0.4)
+        var stops: [Gradient.Stop] = []
+        stops.append(.init(color: leading ? .clear : .black, location: 0))
+        if leading { stops.append(.init(color: .black, location: edge)) }
+        if trailing { stops.append(.init(color: .black, location: 1 - edge)) }
+        stops.append(.init(color: trailing ? .clear : .black, location: 1))
+        return stops
+    }
+
     var body: some View {
         Canvas { context, size in
-            // Horizontal scroll is a draw-time translate rather than a view
-            // offset: the Canvas already clips to its frame, so the lanes
-            // slide under the fixed badge column with nothing to lay out.
-            if scrollX != 0 { context.translateBy(x: -scrollX, y: 0) }
             let laneW = GraphView.laneWidth
             let midY = size.height / 2
             let dotX = x(row.column, laneW)
             let isWip = row.commit.isWip
+
+            // Node position on screen. Scrolling right would carry the dot
+            // out the left edge; instead it pins at lane 0's center and the
+            // lines keep sliding underneath, GitKraken-style. The WIP node
+            // is the exception: it isn't a real commit, so it hides with
+            // its lane instead of pinning — same as GitKraken.
+            let pinX = laneW / 2
+            let pinned = !isWip && scrollX > 0 && dotX - scrollX < pinX
+
+            // Lines fade at the edges; the mask lives inside the canvas so
+            // the pinned node (drawn later, unmasked) stays fully opaque.
+            // When scrolled, a blank strip one lane wide grows in from the
+            // left: no line is drawn there, so pinned nodes sit on clean
+            // background instead of on top of sliding lines.
+            var lineContext = context
+            if fadeLeading || fadeTrailing {
+                let strip = fadeLeading ? min(scrollX, laneW) : 0
+                let span = size.width - strip
+                lineContext.clipToLayer { layer in
+                    layer.fill(
+                        Path(CGRect(x: strip, y: 0, width: span, height: size.height)),
+                        with: .linearGradient(
+                            Gradient(stops: Self.fadeStops(
+                                leading: fadeLeading, trailing: fadeTrailing, width: span
+                            )),
+                            startPoint: CGPoint(x: strip, y: 0),
+                            endPoint: CGPoint(x: size.width, y: 0)
+                        )
+                    )
+                }
+            }
+            // Horizontal scroll is a draw-time translate rather than a view
+            // offset: the Canvas already clips to its frame, so the lanes
+            // slide under the fixed badge column with nothing to lay out.
+            if scrollX != 0 { lineContext.translateBy(x: -scrollX, y: 0) }
 
             // Whole lines dim together: an edge is bright when its
             // branch-line color id belongs to the current branch's history.
@@ -431,12 +485,15 @@ struct LaneCanvas: View {
                 return brightColors.contains(color) ? 1 : 0.35
             }
 
-            func stroke(_ path: Path, color: Int) {
-                context.stroke(
+            func stroke(_ path: Path, edge: GraphEdge) {
+                lineContext.stroke(
                     path,
-                    with: .color(Self.color(color).opacity(lineAlpha(color))),
-                    style: isWip
-                        ? StrokeStyle(lineWidth: 2, dash: [3, 3])
+                    with: .color(Self.color(edge.color).opacity(lineAlpha(edge.color))),
+                    // Dash period must divide the row height (32): each row
+                    // strokes its own segment from phase 0, and a pattern
+                    // that doesn't tile fuses into blobs at row boundaries.
+                    style: edge.dashed
+                        ? StrokeStyle(lineWidth: 2, dash: [4, 4])
                         : StrokeStyle(lineWidth: 2)
                 )
             }
@@ -447,7 +504,7 @@ struct LaneCanvas: View {
                 var p = Path()
                 p.move(to: CGPoint(x: lx, y: 0))
                 p.addLine(to: CGPoint(x: lx, y: size.height))
-                stroke(p, color: edge.color)
+                stroke(p, edge: edge)
             }
 
             // Children lines joining the dot from the top edge.
@@ -464,7 +521,7 @@ struct LaneCanvas: View {
                         control2: CGPoint(x: dotX, y: midY * 0.4)
                     )
                 }
-                stroke(p, color: edge.color)
+                stroke(p, edge: edge)
             }
 
             // Lines leaving the dot toward parents at the bottom edge.
@@ -481,19 +538,47 @@ struct LaneCanvas: View {
                         control2: CGPoint(x: lx, y: midY + midY * 0.2)
                     )
                 }
-                stroke(p, color: edge.color)
+                stroke(p, edge: edge)
             }
+
+            // The node draws in its own context: trailing fade only, never
+            // the leading one — a dot approaching the left edge stays fully
+            // opaque until it pins, so there is no fade-then-snap. The WIP
+            // node instead shares the lines' clipping, so it slides into
+            // the blank strip and disappears along with its lane.
+            var nodeContext: GraphicsContext
+            if isWip {
+                nodeContext = lineContext
+            } else {
+                nodeContext = context
+                if fadeTrailing {
+                    nodeContext.clipToLayer { layer in
+                        layer.fill(
+                            Path(CGRect(origin: .zero, size: size)),
+                            with: .linearGradient(
+                                Gradient(stops: Self.fadeStops(
+                                    leading: false, trailing: true, width: size.width
+                                )),
+                                startPoint: .zero,
+                                endPoint: CGPoint(x: size.width, y: 0)
+                            )
+                        )
+                    }
+                }
+                if scrollX != 0 { nodeContext.translateBy(x: -scrollX, y: 0) }
+            }
+            let nodeX = pinned ? scrollX + pinX : dotX
 
             // Avatar-style node: branch-colored ring around author initials.
             let r: CGFloat = 8
-            let nodeRect = CGRect(x: dotX - r, y: midY - r, width: r * 2, height: r * 2)
-            context.fill(
+            let nodeRect = CGRect(x: nodeX - r, y: midY - r, width: r * 2, height: r * 2)
+            nodeContext.fill(
                 Path(ellipseIn: nodeRect),
                 with: .color(Color(nsColor: .textBackgroundColor))
             )
             if isWip {
                 // Empty dashed circle, GitKraken-style uncommitted node.
-                context.stroke(
+                nodeContext.stroke(
                     Path(ellipseIn: nodeRect.insetBy(dx: 1, dy: 1)),
                     with: .color(Self.color(row.columnColor).opacity(0.9)),
                     style: StrokeStyle(lineWidth: 1.5, dash: [3, 2.5])
@@ -501,7 +586,7 @@ struct LaneCanvas: View {
                 return
             }
             let inner = nodeRect.insetBy(dx: 1.5, dy: 1.5)
-            context.fill(
+            nodeContext.fill(
                 Path(ellipseIn: inner),
                 with: .color(Self.color(row.columnColor).opacity(dimmed ? 0.1 : 0.22))
             )
@@ -510,23 +595,23 @@ struct LaneCanvas: View {
             // — and the initials below are the single fallback for all of
             // them. There is no third state that could render as broken.
             if let avatar {
-                context.drawLayer { layer in
+                nodeContext.drawLayer { layer in
                     layer.opacity = dimmed ? 0.5 : 1
                     layer.clip(to: Path(ellipseIn: inner))
                     layer.draw(avatar, in: inner)
                 }
             }
-            context.stroke(
+            nodeContext.stroke(
                 Path(ellipseIn: nodeRect),
                 with: .color(Self.color(row.columnColor).opacity(dimmed ? 0.45 : 1)),
                 lineWidth: 2
             )
             if avatar == nil {
-                context.draw(
+                nodeContext.draw(
                     Text(Self.initials(row.commit.author))
                         .font(.system(size: 7, weight: .bold))
                         .foregroundColor(Self.color(row.columnColor).opacity(dimmed ? 0.5 : 1)),
-                    at: CGPoint(x: dotX, y: midY)
+                    at: CGPoint(x: nodeX, y: midY)
                 )
             }
         }
