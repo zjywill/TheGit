@@ -178,7 +178,7 @@ final class RepoState: ObservableObject, Identifiable {
     /// the whole pull-request feature invisible.
     @Published var forge: Forge?
     @Published var pullRequests: [PullRequest] = []
-    @Published var forgeError: String?
+    @Published var forgeError: ForgeFailure?
     @Published var loadingPullRequests = false
 
     nonisolated var id: String { path }
@@ -258,9 +258,19 @@ final class RepoState: ObservableObject, Identifiable {
         if !quiet { isBusy = true }
         defer { if !quiet { isBusy = false } }
         do {
-            // Stashes first: their base commits feed the log as extra start
-            // points, so a stash taken on a since-rebased branch still has
-            // a row in the graph to anchor and locate to.
+            // Stashes first, and serially: their base commits feed the log as
+            // extra start points, so a stash taken on a since-rebased branch
+            // still has a row in the graph to anchor and locate to.
+            //
+            // Folding this read into the concurrent group below saves ~20ms
+            // and costs correctness. It moves `git status` to the very first
+            // instant of every refresh, and `git status` takes index.lock to
+            // write back its stat cache — so a refresh landing on the same
+            // instant as a merge or a stash push makes one of them fail with
+            // "Unable to create .git/index.lock". Reproduced as intermittent
+            // failures across the merge and stash tests; the serial read is
+            // what staggers them apart. The 20ms was on the full refresh,
+            // which staging no longer goes through anyway.
             let stashList = (try? await git.stashes()) ?? []
             async let commits = git.log(
                 limit: logLimit,
@@ -279,36 +289,18 @@ final class RepoState: ObservableObject, Identifiable {
             var snap = RepoSnapshot()
             snap.commits = try await commits
             let s0 = try await status
-            // WIP is a synthetic commit whose parent is HEAD: the lane
-            // algorithm then routes its line to HEAD's lane correctly,
-            // wherever HEAD sits in date-order.
-            var layoutCommits = snap.commits
-            if !(s0.staged.isEmpty && s0.unstaged.isEmpty && s0.conflicted.isEmpty) {
-                let headHash = snap.headHash
-                let wip = Commit(
-                    hash: Commit.wipHash,
-                    parents: headHash.map { [$0] } ?? [],
-                    author: "",
-                    date: Date.distantFuture,
-                    refs: [],
-                    subject: "// WIP"
-                )
-                layoutCommits = [wip] + snap.commits
-            }
-            snap.graphRows = GraphLayout.layout(commits: layoutCommits)
             snap.reachableFromHead = Self.reachableSet(
                 from: snap.headHash,
                 commits: snap.commits
             )
-            // A line is "on the current branch" when it carries a reachable
-            // commit or leads to its parents (also reachable by definition).
-            var bright: Set<Int> = []
-            for row in snap.graphRows
-            where row.commit.isWip || snap.reachableFromHead.contains(row.commit.hash) {
-                bright.insert(row.columnColor)
-                for edge in row.parentLanes { bright.insert(edge.color) }
-            }
-            snap.brightColors = bright
+            let g = Self.graph(
+                commits: snap.commits,
+                headHash: snap.headHash,
+                dirty: !(s0.staged.isEmpty && s0.unstaged.isEmpty && s0.conflicted.isEmpty),
+                reachable: snap.reachableFromHead
+            )
+            snap.graphRows = g.rows
+            snap.brightColors = g.bright
             let b = try await branches
             snap.localBranches = b.local
             snap.remoteBranches = b.remote
@@ -339,6 +331,90 @@ final class RepoState: ObservableObject, Identifiable {
         }
     }
 
+    /// Re-read only what an index or working-tree change can affect. One
+    /// subprocess instead of nine, and no relayout of a 500-commit graph to
+    /// move one file between two lists.
+    ///
+    /// Valid only for actions that touch the index and the working tree and
+    /// nothing else — staging, unstaging, hunks, resolving a conflict.
+    /// Anything that can move a ref, a stash, a tag, a worktree or a
+    /// submodule has to go through the full `refresh()`.
+    func refreshStatus() async {
+        do {
+            let s = try await git.status()
+            var snap = snapshot
+            snap.staged = s.staged
+            snap.unstaged = s.unstaged
+            snap.conflicted = s.conflicted
+            snap.currentBranch = s.branch
+            // The WIP row exists only while the working tree is dirty, so
+            // the graph has to be rebuilt exactly when that flips — staging
+            // one of five changed files doesn't flip it, and that's the case
+            // this path exists for.
+            // Read off the file lists, not off the rows: this is the same
+            // predicate that decided the layout in the first place, and it
+            // doesn't assume where in the row order the WIP node landed.
+            let wasDirty = !(
+                snapshot.staged.isEmpty
+                    && snapshot.unstaged.isEmpty
+                    && snapshot.conflicted.isEmpty
+            )
+            let isDirty = !(s.staged.isEmpty && s.unstaged.isEmpty && s.conflicted.isEmpty)
+            if wasDirty != isDirty {
+                let g = Self.graph(
+                    commits: snap.commits,
+                    headHash: snap.headHash,
+                    dirty: isDirty,
+                    reachable: snap.reachableFromHead
+                )
+                snap.graphRows = g.rows
+                snap.brightColors = g.bright
+            }
+            if snap != snapshot { snapshot = snap }
+            if diffCommit == nil, let file = selectedFile {
+                let all = snap.staged + snap.unstaged + snap.conflicted
+                if !all.contains(where: { $0.id == file.id }) { closeDiff() }
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Graph rows and the bright-line set, both derived from the commits and
+    /// from whether the working tree is dirty. Shared by the full refresh and
+    /// the status-only one so the two can never draw the graph differently.
+    nonisolated static func graph(
+        commits: [Commit],
+        headHash: String?,
+        dirty: Bool,
+        reachable: Set<String>
+    ) -> (rows: [GraphRow], bright: Set<Int>) {
+        // WIP is a synthetic commit whose parent is HEAD: the lane algorithm
+        // then routes its line to HEAD's lane correctly, wherever HEAD sits
+        // in date-order.
+        var layoutCommits = commits
+        if dirty {
+            let wip = Commit(
+                hash: Commit.wipHash,
+                parents: headHash.map { [$0] } ?? [],
+                author: "",
+                date: Date.distantFuture,
+                refs: [],
+                subject: "// WIP"
+            )
+            layoutCommits = [wip] + commits
+        }
+        let rows = GraphLayout.layout(commits: layoutCommits)
+        // A line is "on the current branch" when it carries a reachable
+        // commit or leads to its parents (also reachable by definition).
+        var bright: Set<Int> = []
+        for row in rows where row.commit.isWip || reachable.contains(row.commit.hash) {
+            bright.insert(row.columnColor)
+            for edge in row.parentLanes { bright.insert(edge.color) }
+        }
+        return (rows, bright)
+    }
+
     /// Parent-closure of HEAD within the loaded commits.
     nonisolated static func reachableSet(from head: String?, commits: [Commit]) -> Set<String> {
         guard let head else { return [] }
@@ -355,9 +431,9 @@ final class RepoState: ObservableObject, Identifiable {
         return seen
     }
 
-    /// Run a mutating git action, then refresh everything. When the repo
-    /// has submodules, keep them updated after every action (GitKraken's
-    /// "Keep submodules up to date" default).
+    /// Run a mutating git action, then re-read the repo. When the repo has
+    /// submodules, keep them updated after every action (GitKraken's "Keep
+    /// submodules up to date" default).
     func perform(_ action: @escaping (GitClient) async throws -> Void) {
         Task {
             isBusy = true
@@ -373,12 +449,32 @@ final class RepoState: ObservableObject, Identifiable {
         }
     }
 
+    /// `perform` for actions that only move things in and out of the index.
+    /// Three things differ, and all three are the point:
+    ///
+    /// - `refreshStatus()` instead of `refresh()` — one `git status`.
+    /// - No `updateSubmodules()`: staging a file cannot change a submodule,
+    ///   and that call is a recursive network-capable command.
+    /// - No `isBusy`. The round trip is a few tens of milliseconds; a
+    ///   spinner that appears and vanishes inside one frame or two is worse
+    ///   than no spinner, and it disables the Commit button as it goes.
+    func performIndexOnly(_ action: @escaping (GitClient) async throws -> Void) {
+        Task {
+            do {
+                try await action(git)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            await refreshStatus()
+        }
+    }
+
     // MARK: - Convenience actions
 
-    func stage(_ file: FileChange) { perform { try await $0.stage(file.path) } }
-    func unstage(_ file: FileChange) { perform { try await $0.unstage(file.path) } }
-    func stageAll() { perform { try await $0.stageAll() } }
-    func unstageAll() { perform { try await $0.unstageAll() } }
+    func stage(_ file: FileChange) { performIndexOnly { try await $0.stage(file.path) } }
+    func unstage(_ file: FileChange) { performIndexOnly { try await $0.unstage(file.path) } }
+    func stageAll() { performIndexOnly { try await $0.stageAll() } }
+    func unstageAll() { performIndexOnly { try await $0.unstageAll() } }
 
     func commit() {
         let message = commitMessage.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -962,6 +1058,9 @@ final class RepoState: ObservableObject, Identifiable {
 
     private var forgeDetected = false
     private var prsLoadedAt: Date?
+    /// The remote's host, kept so a failure can name the place we couldn't
+    /// reach ("gitlab.acme.com") instead of the CLI that failed to reach it.
+    private var forgeHost: String?
 
     /// One-shot: the remote host decides the CLI, and the CLI has to be
     /// installed. Nothing here is shown or logged when it comes back nil.
@@ -973,6 +1072,7 @@ final class RepoState: ObservableObject, Identifiable {
               let found = ForgeClient.detect(remoteURL: url)
         else { return }
         forge = found
+        forgeHost = ForgeParsers.host(of: url)
         await loadPullRequests()
     }
 
@@ -1002,19 +1102,26 @@ final class RepoState: ObservableObject, Identifiable {
             do {
                 try await forgeClient.checkout(pr, forge: forge)
             } catch {
-                errorMessage = forgeFailure(error)
+                errorMessage = forgeFailure(error).alertText
             }
             await refresh()
         }
     }
 
+    /// The list already carries the web URL, and opening it ourselves is
+    /// instant; `gh pr view --web` is only the fallback for a CLI version
+    /// that didn't give us one.
     func openPullRequestInBrowser(_ pr: PullRequest) {
         guard let forge else { return }
+        if let url = URL(string: pr.url), !pr.url.isEmpty {
+            NSWorkspace.shared.open(url)
+            return
+        }
         Task {
             do {
                 try await forgeClient.openInBrowser(pr, forge: forge)
             } catch {
-                errorMessage = forgeFailure(error)
+                errorMessage = forgeFailure(error).alertText
             }
         }
     }
@@ -1028,20 +1135,17 @@ final class RepoState: ObservableObject, Identifiable {
             do {
                 try await forgeClient.createPullRequest(branch: name, forge: forge)
             } catch {
-                errorMessage = forgeFailure(error)
+                errorMessage = forgeFailure(error).alertText
             }
         }
     }
 
-    /// The one CLI failure worth explaining: not logged in.
-    private func forgeFailure(_ error: Error) -> String {
+    /// Raw CLI stderr is a Go networking sentence; the sidebar gets one
+    /// plain line out of it and keeps the original for the tooltip.
+    private func forgeFailure(_ error: Error) -> ForgeFailure {
         let text = error.localizedDescription
-        guard let forge else { return text }
-        let lowered = text.lowercased()
-        guard lowered.contains("auth") || lowered.contains("log in")
-            || lowered.contains("token") || lowered.contains("credential")
-        else { return text }
-        return text + "\n\nRun `\(forge.loginHint)` in a terminal, then refresh."
+        guard let forge else { return ForgeFailure(summary: text, detail: text) }
+        return ForgeFailure.describe(error, forge: forge, host: forgeHost)
     }
 
     // MARK: - Clean up
@@ -1517,13 +1621,12 @@ final class RepoState: ObservableObject, Identifiable {
         else { return }
         let reverse = file.area == .staged
         Task {
-            isBusy = true
             do {
                 try await git.applyPatch(patch, reverse: reverse)
             } catch {
                 errorMessage = error.localizedDescription
             }
-            await refresh(quiet: true)
+            await refreshStatus()
             // Reload what's left of this file's diff; close when nothing remains.
             let all = snapshot.staged + snapshot.unstaged + snapshot.conflicted
             if all.contains(where: { $0.id == file.id }) {
@@ -1531,7 +1634,6 @@ final class RepoState: ObservableObject, Identifiable {
             } else {
                 closeDiff()
             }
-            isBusy = false
         }
     }
 
@@ -1545,16 +1647,19 @@ final class RepoState: ObservableObject, Identifiable {
 
     // MARK: - Conflict resolution
 
+    // All three only write the index and the file on disk. The merge or
+    // rebase itself is still in progress either way, so `operationState`
+    // cannot have changed — only `status` has.
     func acceptOurs(_ file: FileChange) {
-        perform { try await $0.acceptSide(file.path, ours: true) }
+        performIndexOnly { try await $0.acceptSide(file.path, ours: true) }
     }
 
     func acceptTheirs(_ file: FileChange) {
-        perform { try await $0.acceptSide(file.path, ours: false) }
+        performIndexOnly { try await $0.acceptSide(file.path, ours: false) }
     }
 
     func markResolved(_ file: FileChange) {
-        perform { try await $0.stage(file.path) }
+        performIndexOnly { try await $0.stage(file.path) }
     }
 
     func continueOperation() {

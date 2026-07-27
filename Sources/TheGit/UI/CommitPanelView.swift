@@ -345,23 +345,25 @@ struct OperationBanner: View {
 /// or mark resolved after hand-editing.
 struct ConflictSection: View {
     @ObservedObject var repo: RepoState
+    @Environment(\.uiZoom) private var zoom
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
                 Text("Conflicted Files (\(repo.snapshot.conflicted.count))")
                     .zoomFont(11, weight: .semibold)
+                    .tracking(0.3)
                     .foregroundStyle(.orange)
                 Spacer()
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, FileListMetrics.inset)
             .padding(.vertical, 8)
 
             ScrollView {
-                LazyVStack(spacing: 4) {
+                LazyVStack(spacing: FileListMetrics.spacing * zoom) {
                     ForEach(repo.snapshot.conflicted) { file in
                         ConflictRow(file: file, repo: repo)
-                            .padding(.horizontal, 12)
+                            .padding(.horizontal, (FileListMetrics.inset - FileListMetrics.bleed) * zoom)
                     }
                 }
                 .padding(.vertical, 2)
@@ -374,6 +376,7 @@ struct ConflictSection: View {
 struct ConflictRow: View {
     let file: FileChange
     @ObservedObject var repo: RepoState
+    @Environment(\.uiZoom) private var zoom
 
     var body: some View {
         HStack(spacing: 6) {
@@ -407,6 +410,8 @@ struct ConflictRow: View {
             .frame(width: 24)
             .help("Resolve conflict")
         }
+        .padding(.horizontal, FileListMetrics.bleed * zoom)
+        .frame(height: FileListMetrics.row * zoom)
         .contentShape(Rectangle())
         .onTapGesture { repo.selectFile(file) }
         .contextTarget("conflict:" + file.id, repo)
@@ -429,12 +434,14 @@ struct FileSection: View {
     let action: (FileChange) -> Void
     let bulkAction: () -> Void
     @ObservedObject var repo: RepoState
+    @Environment(\.uiZoom) private var zoom
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
                 Text("\(title) (\(files.count))")
                     .zoomFont(11, weight: .semibold)
+                    .tracking(0.3)
                     .foregroundStyle(.secondary)
                     .contentTransition(.numericText(value: Double(files.count)))
                     .animation(.easeOut(duration: 0.2), value: files.count)
@@ -456,7 +463,7 @@ struct FileSection: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 4) {
+                    LazyVStack(spacing: FileListMetrics.spacing * zoom) {
                         ForEach(files) { file in
                             FileRow(
                                 file: file,
@@ -468,7 +475,7 @@ struct FileSection: View {
                             )
                             .contextTarget("file:" + file.id, repo)
                             .contextMenu { FileMenu(file: file, repo: repo) }
-                            .padding(.horizontal, 12)
+                            .padding(.horizontal, (FileListMetrics.inset - FileListMetrics.bleed) * zoom)
                         }
                     }
                     .padding(.vertical, 2)
@@ -581,6 +588,28 @@ struct IgnoreButtons: View {
     }
 }
 
+/// The file lists' layout grid, at zoom 1. Shared by the commit panel, the
+/// conflict list and the commit-detail list: three lists of the same thing
+/// in one window, so they have to keep one rhythm.
+enum FileListMetrics {
+    /// One row's height. The rows used to declare none, so it fell out of
+    /// whichever glyph happened to be tallest — the 13pt stage button —
+    /// leaving about 17pt with the filename hard against its neighbours.
+    /// 24 is the macOS list row, and it's a click target as well as a line
+    /// of text: single click opens the diff, many times a day.
+    static let row: CGFloat = 24
+    /// How far the selection fill extends past the row's text. A highlight
+    /// that stops at the glyphs reads as a box drawn around a word; one
+    /// with air in it reads as a selected row.
+    static let bleed: CGFloat = 6
+    /// Panel edge → row text. `bleed` is taken out of it at the call site,
+    /// so filenames still line up under the section title above them.
+    static let inset: CGFloat = 12
+    /// Between rows. Small on purpose now that each row carries its own
+    /// height: the rhythm belongs to the rows, not to the gaps.
+    static let spacing: CGFloat = 2
+}
+
 struct FileRow: View {
     let file: FileChange
     let actionIcon: String
@@ -589,6 +618,7 @@ struct FileRow: View {
     let action: () -> Void
     let select: () -> Void
     @State private var hovering = false
+    @Environment(\.uiZoom) private var zoom
 
     var statusColor: Color {
         switch file.status {
@@ -632,13 +662,24 @@ struct FileRow: View {
             .animation(.easeOut(duration: 0.12), value: hovering)
             .help(actionHelp)
         }
+        .padding(.horizontal, FileListMetrics.bleed * zoom)
+        .frame(height: FileListMetrics.row * zoom)
         .background(
-            RoundedRectangle(cornerRadius: 4)
-                .fill(isSelected ? Color.accentColor.opacity(0.15) : .clear)
+            RoundedRectangle(cornerRadius: 5)
+                .fill(rowFill)
         )
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
         // Single click opens the diff — a many-times-a-day action, instant.
         .onTapGesture { select() }
+    }
+
+    /// Hover gets its own (fainter) fill: with a row this size the pointer
+    /// is often between two filenames, and a row that lights up says which
+    /// one the click will land on before it lands.
+    private var rowFill: Color {
+        if isSelected { return Color.accentColor.opacity(0.15) }
+        return hovering ? Color.primary.opacity(0.06) : .clear
     }
 }

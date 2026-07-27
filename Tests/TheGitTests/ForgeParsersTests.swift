@@ -93,4 +93,68 @@ final class ForgeParsersTests: XCTestCase {
         XCTAssertEqual(mrs[0].author, "")
         XCTAssertFalse(mrs[0].isDraft)
     }
+
+    // MARK: - Failures
+
+    private func summary(_ stderr: String, forge: Forge = .gitlab, host: String? = "gitlab.acme.com") -> String {
+        ForgeFailure.describe(
+            ShellError(command: "glab mr list", message: stderr),
+            forge: forge,
+            host: host
+        ).summary
+    }
+
+    /// The VPN-is-off case: glab hands back a Go networking sentence, and
+    /// the row has to say the one thing the user can act on.
+    func testOfflineFailuresNameTheHost() {
+        let offline = [
+            "ERROR: Get \"https://gitlab.acme.com/api/v4/projects\": dial tcp: lookup gitlab.acme.com: no such host\n",
+            "Get \"https://gitlab.acme.com/api/v4/user\": net/http: TLS handshake timeout",
+            "ERROR: Get \"https://gitlab.acme.com\": dial tcp 10.0.0.1:443: i/o timeout",
+            "error: connection refused",
+        ]
+        for stderr in offline {
+            XCTAssertEqual(
+                summary(stderr),
+                "Can't reach gitlab.acme.com — check your network or VPN.",
+                stderr
+            )
+        }
+    }
+
+    func testAuthFailureNamesTheLoginCommand() {
+        XCTAssertEqual(
+            summary("ERROR: 401 Unauthorized"),
+            "Not signed in to gitlab.acme.com — run `glab auth login`."
+        )
+        XCTAssertEqual(
+            summary("gh: Not authenticated. Run gh auth login", forge: .github, host: "github.com"),
+            "Not signed in to github.com — run `gh auth login`."
+        )
+    }
+
+    /// Anything we don't recognise keeps the CLI's own first line rather
+    /// than being guessed at — minus the shouting, and minus the rest of
+    /// the stack trace no sidebar row can hold.
+    func testUnknownFailureQuotesTheFirstLine() {
+        XCTAssertEqual(
+            summary("ERROR: project not found\nrun `glab repo view` for details\n"),
+            "project not found"
+        )
+        XCTAssertEqual(summary("glab is not installed."), "glab is not installed.")
+        XCTAssertLessThanOrEqual(summary(String(repeating: "x", count: 400)).count, 140)
+    }
+
+    /// The tooltip keeps the command that failed; the summary never does.
+    func testDetailKeepsTheCommandContext() {
+        let failure = ForgeFailure.describe(
+            ShellError(command: "glab mr list", message: "ERROR: 401 Unauthorized"),
+            forge: .gitlab,
+            host: "gitlab.acme.com"
+        )
+        XCTAssertTrue(failure.detail.hasPrefix("glab mr list: "))
+        XCTAssertFalse(failure.summary.contains("glab mr list"))
+        XCTAssertTrue(failure.alertText.contains(failure.summary))
+        XCTAssertTrue(failure.alertText.contains(failure.detail))
+    }
 }

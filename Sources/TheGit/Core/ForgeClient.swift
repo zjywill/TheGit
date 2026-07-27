@@ -33,6 +33,72 @@ enum Forge: String {
     var loginHint: String { self == .github ? "gh auth login" : "glab auth login" }
 }
 
+/// A forge CLI failure, split in two: one plain line the sidebar can show
+/// on a narrow row, and the CLI's own words for the tooltip and alerts.
+/// Raw `glab` stderr is a Go networking sentence — useless at 10pt, wrapped
+/// to three lines, and it buries the one thing the user can act on.
+struct ForgeFailure: Equatable {
+    let summary: String
+    let detail: String
+
+    /// The two failures worth naming. Everything else keeps the CLI's own
+    /// first line: guessing at an unknown error reads worse than quoting it.
+    static func describe(_ error: Error, forge: Forge, host: String?) -> ForgeFailure {
+        let detail = error.localizedDescription
+        // The command prefix ("glab mr list: ") is context for the tooltip,
+        // noise in a one-line summary.
+        let raw = (error as? ShellError)?.message ?? detail
+        let lowered = raw.lowercased()
+        let place = host ?? (forge == .github ? "GitHub" : "GitLab")
+
+        // Offline first: a box that can't route to the host also can't
+        // authenticate, and "check the VPN" is the useful half of that.
+        if offlineMarkers.contains(where: lowered.contains) {
+            return ForgeFailure(
+                summary: "Can't reach \(place) — check your network or VPN.",
+                detail: detail
+            )
+        }
+        if authMarkers.contains(where: lowered.contains) {
+            return ForgeFailure(
+                summary: "Not signed in to \(place) — run `\(forge.loginHint)`.",
+                detail: detail
+            )
+        }
+        return ForgeFailure(summary: firstLine(raw), detail: detail)
+    }
+
+    /// What an alert shows: the plain line, then the CLI's own text under it.
+    var alertText: String { summary == detail ? detail : summary + "\n\n" + detail }
+
+    private static let offlineMarkers = [
+        "dial tcp", "no such host", "i/o timeout", "connection refused",
+        "network is unreachable", "no route to host", "connection reset",
+        "tls handshake", "x509", "proxyconnect", "server misbehaving",
+        "context deadline exceeded", "timeout", "unexpected eof",
+        "temporary failure in name resolution", "could not resolve host",
+    ]
+
+    private static let authMarkers = [
+        "401", "403", "unauthorized", "forbidden", "authenticat",
+        "log in", "token", "credential",
+    ]
+
+    /// First line with anything in it, minus the CLI's own "ERROR:" shout,
+    /// clipped to something a sidebar row can hold.
+    private static func firstLine(_ text: String) -> String {
+        var line = text
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty } ?? text
+        for shout in ["ERROR: ", "error: ", "ERROR ", "FATAL: "] where line.hasPrefix(shout) {
+            line = String(line.dropFirst(shout.count))
+            break
+        }
+        return line.count > 140 ? String(line.prefix(139)) + "…" : line
+    }
+}
+
 // MARK: - CLI JSON shapes
 
 /// Turns `gh` / `glab` JSON into `PullRequest`, mirroring `GitParsers`.

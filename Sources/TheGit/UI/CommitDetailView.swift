@@ -5,12 +5,14 @@ import SwiftUI
 struct CommitDetailView: View {
     @ObservedObject var repo: RepoState
     let commit: Commit
+    @Environment(\.uiZoom) private var zoom
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text("Commit Details")
                     .zoomFont(11, weight: .semibold)
+                    .tracking(0.3)
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button {
@@ -65,14 +67,15 @@ struct CommitDetailView: View {
             HStack {
                 Text("Changed Files (\(repo.commitFiles.count))")
                     .zoomFont(11, weight: .semibold)
+                    .tracking(0.3)
                     .foregroundStyle(.secondary)
                 Spacer()
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, FileListMetrics.inset)
             .padding(.vertical, 8)
 
             ScrollView {
-                LazyVStack(spacing: 4) {
+                LazyVStack(spacing: FileListMetrics.spacing * zoom) {
                     ForEach(repo.commitFiles) { file in
                         CommitFileRow(
                             file: file,
@@ -80,7 +83,7 @@ struct CommitDetailView: View {
                         ) {
                             repo.selectCommitFile(file)
                         }
-                        .padding(.horizontal, 12)
+                        .padding(.horizontal, (FileListMetrics.inset - FileListMetrics.bleed) * zoom)
                     }
                 }
                 .padding(.vertical, 2)
@@ -94,6 +97,8 @@ struct CommitFileRow: View {
     let file: FileChange
     let isSelected: Bool
     let select: () -> Void
+    @State private var hovering = false
+    @Environment(\.uiZoom) private var zoom
 
     var statusColor: Color {
         switch file.status {
@@ -124,11 +129,19 @@ struct CommitFileRow: View {
 
             Spacer()
         }
+        .padding(.horizontal, FileListMetrics.bleed * zoom)
+        .frame(height: FileListMetrics.row * zoom)
         .background(
-            RoundedRectangle(cornerRadius: 4)
-                .fill(isSelected ? Color.accentColor.opacity(0.15) : .clear)
+            RoundedRectangle(cornerRadius: 5)
+                .fill(
+                    isSelected
+                        ? Color.accentColor.opacity(0.15)
+                        : (hovering ? Color.primary.opacity(0.06) : .clear)
+                )
         )
         .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
         .onTapGesture { select() }
     }
 }

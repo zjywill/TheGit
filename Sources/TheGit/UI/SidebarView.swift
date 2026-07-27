@@ -388,6 +388,7 @@ struct SidebarView: View {
             SectionHeader(
                 title: "Local",
                 count: branches.count,
+                topSpace: 0,
                 actionHelp: "Create branch at HEAD"
             ) { repo.promptNewBranch() }
             ForEach(BranchTree.build(branches, path: \.name)) { node in
@@ -408,7 +409,6 @@ struct SidebarView: View {
                 count: filtering ? branches.count : repo.snapshot.remoteNames.count,
                 actionHelp: "Add remote"
             ) { repo.promptAddRemote() }
-            .padding(.top, 14)
             ForEach(BranchTree.remoteTree(branches)) { node in
                 BranchNodeRow(node: node, repo: repo, forceExpanded: filtering)
             }
@@ -433,21 +433,26 @@ struct SidebarView: View {
                 SectionHeader(
                     title: forge.sectionTitle,
                     count: prs.count,
+                    // A "0" next to a failed list reads as "none open",
+                    // which is exactly the wrong thing to believe.
+                    countLabel: repo.forgeError == nil ? nil : "—",
                     actionIcon: "arrow.clockwise",
                     actionHelp: "Refresh \(forge.sectionTitle.lowercased())"
                 ) { repo.refreshPullRequests() }
-                .padding(.top, 14)
                 // Both of these explain an empty section, so they'd be a
                 // second, contradictory answer while a filter is on.
                 if !filtering {
                     if let error = repo.forgeError {
-                        SidebarRow(icon: "exclamationmark.triangle", iconColor: .orange) {
-                            Text(error)
+                        SidebarRow(icon: "exclamationmark.triangle", iconColor: .secondary) {
+                            Text(error.summary)
                                 .zoomFont(10)
-                                .foregroundStyle(.orange)
-                                .lineLimit(3)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
                         }
-                        .help(error)
+                        // The CLI's own words stay one hover away — the row
+                        // itself is for the sentence you can act on.
+                        .help(error.detail + "\n\nClick to try again.")
+                        .onTapGesture { repo.refreshPullRequests() }
                     } else if repo.pullRequests.isEmpty {
                         SidebarRow(icon: nil) {
                             Text(repo.loadingPullRequests ? "Loading…" : "No open \(forge.itemNoun.lowercased())s")
@@ -468,7 +473,6 @@ struct SidebarView: View {
         let worktrees = matchedWorktrees
         if !filtering || !worktrees.isEmpty {
             SectionHeader(title: "Worktrees", count: worktrees.count)
-                .padding(.top, 14)
             ForEach(worktrees) { wt in
                 SidebarRow(icon: "folder") {
                     VStack(alignment: .leading, spacing: 1) {
@@ -505,7 +509,6 @@ struct SidebarView: View {
         let tags = matchedTags
         if !tags.isEmpty {
             SectionHeader(title: "Tags", count: tags.count)
-                .padding(.top, 14)
             ForEach(tags) { tag in
                 // Secondary, not orange: orange is this sidebar's
                 // "needs attention" colour (behind, gone, LFS
@@ -544,7 +547,6 @@ struct SidebarView: View {
         let stashes = matchedStashes
         if !stashes.isEmpty {
             SectionHeader(title: "Stashes", count: stashes.count)
-                .padding(.top, 14)
             ForEach(stashes) { stash in
                 SidebarRow(icon: "tray.full") {
                     VStack(alignment: .leading, spacing: 1) {
@@ -601,7 +603,6 @@ struct SidebarView: View {
                     actionIcon: "arrow.down.circle",
                     actionHelp: "Download LFS objects (git lfs pull)"
                 ) { repo.pullLFSObjects() }
-                .padding(.top, 14)
                 let missing = repo.snapshot.lfsMissing.count
                 // A repo-wide total has nothing to do with the filter, so
                 // it would read as a match that it isn't.
@@ -647,7 +648,6 @@ struct SidebarView: View {
                 count: submodules.count,
                 actionHelp: "Add submodule"
             ) { repo.promptAddSubmodule() }
-            .padding(.top, 14)
             ForEach(submodules) { sub in
                 SubmoduleRow(sub: sub, repo: repo)
             }
@@ -771,6 +771,13 @@ struct AddSubmoduleSheet: View {
 struct SectionHeader: View {
     let title: String
     let count: Int
+    /// Stands in for the count when the number would lie — an "—" while the
+    /// list couldn't be fetched, rather than a confident 0.
+    var countLabel: String?
+    /// Space above the header, i.e. the gap that separates this group from
+    /// the previous one. Only the first section overrides it (to 0) — the
+    /// scroller's own top inset already stands in for the gap there.
+    var topSpace: CGFloat = SidebarMetrics.sectionGap
     var actionIcon = "plus"
     var actionHelp: String?
     var action: (() -> Void)?
@@ -784,14 +791,23 @@ struct SectionHeader: View {
             // header must style itself.
             Text(title)
                 .zoomFont(11, weight: .semibold)
+                // Small type wants a little more air between letters, and
+                // the extra width is the cheapest way to make an 11pt label
+                // read as a label rather than as a 12pt row that shrank.
+                .tracking(0.3)
                 .foregroundStyle(.secondary)
             Spacer()
             // Count and + button share one centered slot, so the swap on
             // hover never shifts anything.
             ZStack {
-                Text("\(count)")
+                // String(count), never "\(count)": SwiftUI localises an Int
+                // interpolated into a Text and 1000 becomes "1,000".
+                Text(countLabel ?? String(count))
                     .zoomFont(11, weight: .semibold)
-                    .foregroundStyle(Color.accentColor.opacity(0.8))
+                    .foregroundStyle(
+                        countLabel == nil
+                            ? Color.accentColor.opacity(0.8) : Color.secondary.opacity(0.8)
+                    )
                     .opacity(action != nil && hovering ? 0 : 1)
                 if let action {
                     Button(action: action) {
@@ -819,6 +835,11 @@ struct SectionHeader: View {
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
+        // Outside the hover shape on purpose: the gaps belong to the layout,
+        // not to the header's hit area, or the + would arm itself while the
+        // pointer is still in the space between two sections.
+        .padding(.top, topSpace * zoom)
+        .padding(.bottom, SidebarMetrics.headerGap * zoom)
     }
 }
 
@@ -849,6 +870,16 @@ enum SidebarMetrics {
     /// a column the eye already knows.
     static let indent: CGFloat = icon + gap
     static let trailing: CGFloat = 10
+    /// Above a section header: the gap that says "a new group starts here".
+    static let sectionGap: CGFloat = 18
+    /// Below a section header, before its own first row. Deliberately much
+    /// smaller than `sectionGap` — proximity is the only thing telling the
+    /// eye which rows the header owns, so the two values have to stay far
+    /// enough apart to be read as different. It used to be 0: the header
+    /// and the first row were both 22pt boxes sitting flush, and the only
+    /// air under the label was whatever the hidden + button's 22pt hit
+    /// target happened to leave, which is a byproduct rather than a choice.
+    static let headerGap: CGFloat = 5
 }
 
 /// Every row in the sidebar: `[icon][content][chevron]`, fixed columns.
@@ -1018,18 +1049,21 @@ struct PullRequestRow: View {
             }
         }
         .opacity(pr.isDraft ? 0.75 : 1)
-        .help("\(forge.label(pr.number)) \(pr.title)\n\(pr.branch)")
+        .help("\(forge.label(pr.number)) \(pr.title)\n\(pr.branch)\n\nDouble-click to open in the browser.")
         .contextTarget("pr:\(pr.number)", repo)
         .contextMenu {
-            Button("Checkout \(forge.label(pr.number))") { repo.checkoutPullRequest(pr) }
             Button("Open in Browser") { repo.openPullRequestInBrowser(pr) }
+            Button("Checkout \(forge.label(pr.number))") { repo.checkoutPullRequest(pr) }
             Divider()
             Button("Copy URL") { RepoState.copyToPasteboard(pr.url) }
             Button("Copy branch name") { RepoState.copyToPasteboard(pr.branch) }
             Divider()
             Button("Refresh") { repo.refreshPullRequests() }
         }
-        .onTapGesture(count: 2) { repo.checkoutPullRequest(pr) }
+        // Opening the page is what you almost always want from this row,
+        // and it changes nothing locally. Checkout moves HEAD, so it stays
+        // an explicit choice in the menu.
+        .onTapGesture(count: 2) { repo.openPullRequestInBrowser(pr) }
         // Single click locates the PR's branch tip, like clicking a branch.
         .onTapGesture {
             if let tip = remoteTip { repo.locate(tip) }

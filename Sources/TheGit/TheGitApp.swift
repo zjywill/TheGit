@@ -99,8 +99,14 @@ struct RootView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            RepoTabsBar()
-            Divider()
+            // With no repo open the bar holds one lone + against an empty
+            // strip, and the empty state below already offers the same
+            // action in a form that reads as the thing to do. A tab bar
+            // with no tabs is chrome describing nothing.
+            if !appState.repos.isEmpty {
+                RepoTabsBar()
+                Divider()
+            }
             if let repo = appState.activeRepo {
                 RepoView(repo: repo)
                     .id(repo.id)

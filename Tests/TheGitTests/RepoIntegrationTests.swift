@@ -760,4 +760,108 @@ final class RepoIntegrationTests: XCTestCase {
         XCTAssertTrue(repo.snapshot.staged.isEmpty)
         XCTAssertTrue(repo.snapshot.unstaged.isEmpty)
     }
+
+    // MARK: - Status-only refresh
+
+    /// Staging is a move within the index. The lists have to change and
+    /// nothing that costs a subprocess to re-read is allowed to change with
+    /// them — that identity is the whole point of the narrow path, so it is
+    /// asserted rather than assumed.
+    func testStagingAFileMovesItWithoutRebuildingTheGraph() async throws {
+        let path = try await makeRepo("stage-narrow")
+        try write("one\n", to: path + "/one.txt")
+        try write("two\n", to: path + "/two.txt")
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        XCTAssertEqual(untrackedPaths(repo).sorted(), ["one.txt", "two.txt"])
+        let rowsBefore = repo.snapshot.graphRows.map(\.commit.hash)
+        let commitsBefore = repo.snapshot.commits
+
+        guard let one = repo.snapshot.unstaged.first(where: { $0.path == "one.txt" }) else {
+            return XCTFail("one.txt is missing from the unstaged list")
+        }
+        repo.stage(one)
+        try await waitUntil("one.txt to move to the staged list") {
+            repo.snapshot.staged.map(\.path) == ["one.txt"]
+        }
+
+        XCTAssertEqual(untrackedPaths(repo), ["two.txt"])
+        XCTAssertEqual(repo.snapshot.graphRows.map(\.commit.hash), rowsBefore)
+        XCTAssertEqual(repo.snapshot.commits, commitsBefore)
+        XCTAssertNil(repo.errorMessage)
+    }
+
+    /// The WIP node means "the working tree differs from HEAD", not "there
+    /// are unstaged files". Staging the last unstaged edit leaves the tree
+    /// just as dirty, so the row has to stay — reading the dirty flag off
+    /// the unstaged list alone would drop it here.
+    func testStagingTheLastUnstagedFileKeepsTheWipNode() async throws {
+        let path = try await makeRepo("stage-wip")
+        try write("seed\nedited\n", to: path + "/seed.txt")
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        XCTAssertFalse(repo.snapshot.unstaged.isEmpty)
+        XCTAssertTrue(repo.snapshot.graphRows.contains { $0.commit.isWip })
+
+        repo.stageAll()
+        try await waitUntil("the edit to reach the index") {
+            repo.snapshot.unstaged.isEmpty && !repo.snapshot.staged.isEmpty
+        }
+        XCTAssertTrue(
+            repo.snapshot.graphRows.contains { $0.commit.isWip },
+            "the working tree still differs from HEAD, so the WIP row belongs in the graph"
+        )
+        XCTAssertNil(repo.errorMessage)
+    }
+
+    /// Unstage is the same path in reverse, and it also has to leave the
+    /// selected-file bookkeeping alone when the file is still pending.
+    func testUnstagingReturnsTheFileToTheUnstagedList() async throws {
+        let path = try await makeRepo("unstage-narrow")
+        try write("seed\nedited\n", to: path + "/seed.txt")
+        try await git(path, ["add", "seed.txt"])
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        guard let staged = repo.snapshot.staged.first else {
+            return XCTFail("seed.txt is missing from the staged list")
+        }
+        repo.unstage(staged)
+        try await waitUntil("seed.txt to come back unstaged") {
+            repo.snapshot.staged.isEmpty && repo.snapshot.unstaged.map(\.path) == ["seed.txt"]
+        }
+        XCTAssertTrue(repo.snapshot.graphRows.contains { $0.commit.isWip })
+        XCTAssertNil(repo.errorMessage)
+    }
+
+    /// What actually makes staging cheap, stated as behaviour: it re-reads
+    /// `git status` and nothing else, so a commit made behind the app's back
+    /// is still not in the log afterwards. The file watcher's full refresh
+    /// is what picks that up — this asserts the narrow path stayed narrow.
+    func testStagingDoesNotReReadTheLog() async throws {
+        let path = try await makeRepo("stage-log-untouched")
+        try write("one\n", to: path + "/one.txt")
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        let commitsBefore = repo.snapshot.commits.count
+        guard let one = repo.snapshot.unstaged.first(where: { $0.path == "one.txt" }) else {
+            return XCTFail("one.txt is missing from the unstaged list")
+        }
+
+        try await git(path, ["commit", "--allow-empty", "-qm", "made outside the app"])
+        repo.stage(one)
+        try await waitUntil("one.txt to reach the index") {
+            repo.snapshot.staged.map(\.path) == ["one.txt"]
+        }
+        XCTAssertEqual(
+            repo.snapshot.commits.count, commitsBefore,
+            "staging re-read the whole repo — the point of the narrow path is that it doesn't"
+        )
+
+        await repo.refresh()
+        XCTAssertEqual(repo.snapshot.commits.count, commitsBefore + 1)
+    }
 }
