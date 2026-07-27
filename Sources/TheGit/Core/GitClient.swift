@@ -17,53 +17,29 @@ actor GitClient {
 
     @discardableResult
     func run(_ args: [String]) async throws -> String {
-        let path = repoPath
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-                process.arguments = ["git", "-C", path] + args
+        do {
+            return try await Shell.run(
+                "/usr/bin/env",
+                ["git", "-C", repoPath] + args,
                 // Never let git open an editor or prompt on the terminal —
                 // continue/amend flows must complete non-interactively.
-                process.environment = ProcessInfo.processInfo.environment.merging([
+                env: [
                     "GIT_EDITOR": "true",
                     "GIT_PAGER": "cat",
                     "GIT_TERMINAL_PROMPT": "0",
-                ]) { _, new in new }
-                let stdout = Pipe()
-                let stderr = Pipe()
-                process.standardOutput = stdout
-                process.standardError = stderr
-
-                do {
-                    try process.run()
-                } catch {
-                    continuation.resume(throwing: error)
-                    return
-                }
-
-                let outData = stdout.fileHandleForReading.readDataToEndOfFile()
-                let errData = stderr.fileHandleForReading.readDataToEndOfFile()
-                process.waitUntilExit()
-
-                let out = String(data: outData, encoding: .utf8) ?? ""
-                if process.terminationStatus != 0 {
-                    let err = String(data: errData, encoding: .utf8) ?? ""
-                    continuation.resume(throwing: GitError(
-                        command: args.joined(separator: " "),
-                        message: err.isEmpty ? out : err
-                    ))
-                } else {
-                    continuation.resume(returning: out)
-                }
-            }
+                ],
+                label: args.joined(separator: " ")
+            )
+        } catch let error as ShellError {
+            throw GitError(command: error.command, message: error.message)
         }
     }
 
     // MARK: - Queries
 
-    // hash, parents, author, unix-date, refs, subject — tab separated, subject last.
-    private static let logFormat = "%H%x09%P%x09%an%x09%at%x09%D%x09%s"
+    // hash, parents, author, email, unix-date, refs, subject — tab
+    // separated, subject last (it's the only field that can contain tabs).
+    private static let logFormat = "%H%x09%P%x09%an%x09%ae%x09%at%x09%D%x09%s"
 
     /// - solo: show only history reachable from this rev (GitKraken Solo).
     /// - hiddenPatterns: full ref paths to exclude (GitKraken Hide).
@@ -278,6 +254,21 @@ actor GitClient {
         try await run(["branch", "--set-upstream-to=\(upstream)", branch])
     }
 
+    func unsetUpstream(_ branch: String) async throws {
+        try await run(["branch", "--unset-upstream", branch])
+    }
+
+    func setRemoteURL(_ remote: String, url: String) async throws {
+        try await run(["remote", "set-url", remote, url])
+    }
+
+    /// Restores a stash onto a fresh branch off the commit it was made on —
+    /// the clean way out of "I stashed this on the wrong branch". Succeeds
+    /// only if it applies cleanly, and drops the stash when it does.
+    func stashBranch(_ name: String, from ref: String) async throws {
+        try await run(["stash", "branch", name, ref])
+    }
+
     func addWorktree(at path: String, branch: String) async throws {
         try await run(["worktree", "add", path, branch])
     }
@@ -409,6 +400,95 @@ actor GitClient {
         try await run(["worktree", "remove", "--force", path])
     }
 
+    // MARK: - Cleanup
+
+    /// The repo's mainline: whatever `<remote>/HEAD` points at, falling
+    /// back to a local main/master.
+    func defaultBranch(remote: String) async -> String {
+        if let out = try? await run(["symbolic-ref", "--short", "refs/remotes/\(remote)/HEAD"]) {
+            let name = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            if name.hasPrefix(remote + "/") { return String(name.dropFirst(remote.count + 1)) }
+        }
+        for candidate in ["main", "master"] {
+            if (try? await run(["show-ref", "--verify", "--quiet", "refs/heads/\(candidate)"])) != nil {
+                return candidate
+            }
+        }
+        return "main"
+    }
+
+    /// Local branches whose tip is an ancestor of `base` — plain merges
+    /// and fast-forwards only. Squash merges are invisible here.
+    func mergedBranches(into base: String) async throws -> Set<String> {
+        let out = try await run(["branch", "--merged", base, "--format=%(refname:short)"])
+        return Set(out.split(separator: "\n").map {
+            String($0).trimmingCharacters(in: .whitespaces)
+        })
+    }
+
+    /// True when `base` already contains this branch's work as a single
+    /// squashed commit — the state a merged-and-deleted PR leaves behind.
+    ///
+    /// Neither `branch --merged` nor `git cherry` sees it, because a squash
+    /// shares no commit with the branch. So we build the commit a squash
+    /// *would* have produced (the branch's tree, parented on the merge
+    /// base) and ask git whether an equivalent patch is already upstream.
+    /// A branch that got new commits after its squash still reads as
+    /// unmerged, which is what we want.
+    /// Deliberately `nonisolated`: this is four git calls per branch and it
+    /// mutates nothing the app reads, so it must not queue behind the
+    /// actor's write lock. Serialised, a 150-branch repo took 16 seconds;
+    /// the caller runs these concurrently instead.
+    ///
+    /// (`commit-tree` does write a loose object, but it's dangling and
+    /// content-addressed — concurrent writes are safe, and gc reclaims it.)
+    nonisolated static func isSquashMerged(
+        repoPath: String, branch: String, into base: String
+    ) async -> Bool {
+        func git(_ args: [String]) async -> String? {
+            try? await Shell.run(
+                "/usr/bin/env",
+                ["git", "-C", repoPath] + args,
+                env: ["GIT_EDITOR": "true", "GIT_PAGER": "cat", "GIT_TERMINAL_PROMPT": "0"]
+            )
+        }
+        func trimmed(_ args: [String]) async -> String? {
+            let out = await git(args)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return (out?.isEmpty ?? true) ? nil : out
+        }
+        guard let mergeBase = await trimmed(["merge-base", base, branch]),
+              let tree = await trimmed(["rev-parse", "\(branch)^{tree}"]),
+              let synthetic = await trimmed(
+                  ["commit-tree", tree, "-p", mergeBase, "-m", "squash-probe"]
+              ),
+              let verdict = await git(["cherry", base, synthetic])
+        else { return false }
+        // "- <sha>" = an equivalent patch is already in base, "+" = not.
+        return verdict.hasPrefix("-")
+    }
+
+    func isSquashMerged(branch: String, into base: String) async -> Bool {
+        await Self.isSquashMerged(repoPath: repoPath, branch: branch, into: base)
+    }
+
+    func countCommits(_ range: String) async throws -> Int {
+        let out = try await run(["rev-list", "--count", range])
+        return Int(out.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+    }
+
+    /// Drops admin files for worktrees whose directory is gone. Nothing on
+    /// disk is deleted — and it always prunes every stale entry at once,
+    /// git offers no way to prune just one.
+    func pruneWorktrees() async throws {
+        try await run(["worktree", "prune"])
+    }
+
+    /// Deliberately without `--force`: git refuses when the worktree has
+    /// uncommitted changes, which is exactly the safety net we want here.
+    func removeWorktreeIfClean(_ path: String) async throws {
+        try await run(["worktree", "remove", path])
+    }
+
     /// Full commit message (subject + body).
     func commitMessage(_ hash: String) async throws -> String {
         try await run(["show", "-s", "--format=%B", hash])
@@ -424,5 +504,36 @@ actor GitClient {
 
     func push() async throws {
         try await run(["push"])
+    }
+
+    // MARK: - Multi-remote
+
+    func push(remote: String, branch: String, setUpstream: Bool) async throws {
+        var args = ["push"]
+        if setUpstream { args.append("-u") }
+        args += [remote, branch]
+        try await run(args)
+    }
+
+    func pull(remote: String, branch: String, extraArgs: [String] = []) async throws {
+        try await run(["pull"] + extraArgs + [remote, branch])
+    }
+
+    /// Advance a branch you are NOT on, without checking it out. git only
+    /// updates the ref when it's a true fast-forward and refuses otherwise,
+    /// so this can't silently discard local commits.
+    func fastForward(remote: String, branch: String) async throws {
+        try await run(["fetch", remote, "\(branch):\(branch)"])
+    }
+
+    /// The current branch can't be updated by refspec — its ref is checked
+    /// out — so it fast-forwards through merge instead. `--ff-only` keeps
+    /// the same guarantee: no merge commit, no surprise.
+    func mergeFastForwardOnly(_ ref: String) async throws {
+        try await run(["merge", "--ff-only", ref])
+    }
+
+    func renameRemote(_ old: String, to new: String) async throws {
+        try await run(["remote", "rename", old, new])
     }
 }

@@ -12,6 +12,10 @@ struct GraphView: View {
     @AppStorage("graphColumnWidth") private var storedWidth: Double = 0
     @State private var dragBaseWidth: CGFloat?
     @State private var hoveringResizer = false
+    /// Shared horizontal offset for the lane column. The badge column sits
+    /// outside it, so ref bubbles stay pinned at the left while the lanes
+    /// slide underneath — GitKraken's behaviour.
+    @State private var graphScrollX: CGFloat = 0
 
     private static let leadingInset: CGFloat = 8
 
@@ -37,9 +41,14 @@ struct GraphView: View {
             : storedWidth > 0
                 ? min(max(CGFloat(storedWidth), Self.laneWidth * 2), neededWidth)
                 : autoWidth
-        // Lanes beyond the column width fade out instead of hard-clipping
-        // (VS Code Git Graph style). Drag the column edge to reveal them.
-        let faded = !searching && neededWidth > graphWidth + 1
+        // How far the lanes can slide before their right edge is reached.
+        let maxScroll = max(0, neededWidth - graphWidth)
+        let scrollX = min(graphScrollX, maxScroll)
+        // Fade only where content actually continues, so the edge tells you
+        // there is more in that direction.
+        let fadeTrailing = !searching && scrollX < maxScroll - 1
+        let fadeLeading = !searching && scrollX > 1
+        let faded = fadeTrailing
         // Dedicated BRANCH/TAG column left of the graph (GitKraken layout):
         // zero width when the loaded range has no refs at all.
         let hasBadges = rows.contains { !RefBadge.infos(for: $0.commit.refs).isEmpty }
@@ -60,7 +69,7 @@ struct GraphView: View {
                         if row.commit.isWip {
                             // WIP is a synthetic commit laid out like any other,
                             // so its dashed node sits exactly on HEAD's lane.
-                            WipGraphRow(row: row, changeCount: changeCount, graphWidth: graphWidth, badgeWidth: badgeWidth)
+                            WipGraphRow(row: row, changeCount: changeCount, graphWidth: graphWidth, badgeWidth: badgeWidth, scrollX: scrollX)
                                 .contentShape(Rectangle())
                                 // Clicking WIP returns the right panel to the commit box.
                                 .onTapGesture { repo.selectedCommit = nil }
@@ -78,8 +87,10 @@ struct GraphView: View {
                                 graphWidth: graphWidth,
                                 badgeWidth: badgeWidth,
                                 faded: faded,
+                                fadeLeading: fadeLeading,
                                 searchMode: searching,
-                                repo: repo
+                                repo: repo,
+                                scrollX: scrollX
                             )
                             // Infinite scroll: reaching the last row loads 500 more.
                             .onAppear { repo.loadMoreIfNeeded(row) }
@@ -100,6 +111,17 @@ struct GraphView: View {
             }
         }
         .background(Color(nsColor: .textBackgroundColor))
+        .overlay(alignment: .topLeading) {
+            // Only over the lane column: scrolling elsewhere is unaffected.
+            if maxScroll > 0 {
+                HorizontalScrollCatcher { delta in
+                    graphScrollX = min(max(graphScrollX - delta, 0), maxScroll)
+                }
+                .frame(width: graphWidth + Self.leadingInset + badgeWidth)
+                .frame(maxHeight: .infinity)
+                .allowsHitTesting(false)
+            }
+        }
         }
         .overlay(alignment: .topLeading) {
             // Column resizer, spreadsheet-style: the graph is one column of a
@@ -138,6 +160,7 @@ struct WipGraphRow: View {
     let changeCount: Int
     let graphWidth: CGFloat
     let badgeWidth: CGFloat
+    var scrollX: CGFloat = 0
 
     var body: some View {
         HStack(spacing: 8) {
@@ -145,7 +168,7 @@ struct WipGraphRow: View {
                 Spacer().frame(width: badgeWidth)
             }
 
-            LaneCanvas(row: row)
+            LaneCanvas(row: row, scrollX: scrollX)
                 .frame(width: graphWidth, height: GraphView.rowHeight)
 
             RoundedRectangle(cornerRadius: 1)
@@ -177,8 +200,11 @@ struct GraphRowView: View {
     let graphWidth: CGFloat
     let badgeWidth: CGFloat
     let faded: Bool
+    var fadeLeading = false
     var searchMode: Bool = false
     @ObservedObject var repo: RepoState
+    var scrollX: CGFloat = 0
+    @ObservedObject private var avatars = AvatarStore.shared
 
     /// In search mode lane lines are meaningless (rows are filtered),
     /// so each row shows just its node in column 0.
@@ -209,20 +235,34 @@ struct GraphRowView: View {
     var body: some View {
         HStack(spacing: 8) {
             if badgeWidth > 0 {
-                BadgeColumn(refs: row.commit.refs, localBranches: repo.snapshot.localBranches)
-                    .frame(width: badgeWidth, alignment: .trailing)
+                BadgeColumn(
+                    refs: row.commit.refs,
+                    localBranches: repo.snapshot.localBranches,
+                    repo: repo,
+                    maxBadgeWidth: max(40, badgeWidth - 34)
+                )
+                .frame(width: badgeWidth, alignment: .trailing)
             }
 
-            LaneCanvas(row: displayRow, dimmed: !onCurrentBranch, brightColors: searchMode ? nil : repo.snapshot.brightColors)
-                .frame(width: graphWidth, height: GraphView.rowHeight)
+            LaneCanvas(
+                row: displayRow,
+                dimmed: !onCurrentBranch,
+                brightColors: searchMode ? nil : repo.snapshot.brightColors,
+                avatar: avatars.isEnabled
+                    ? avatars.avatar(
+                        for: row.commit.email,
+                        gitlabRepo: repo.forge == .gitlab ? repo.path : nil
+                    )
+                    : nil,
+                scrollX: scrollX,
+                hasBadge: badgeWidth > 0 && !RefBadge.infos(for: row.commit.refs).isEmpty
+            )
+            .frame(width: graphWidth, height: GraphView.rowHeight)
                 .mask(
                     LinearGradient(
-                        stops: faded
-                            ? [.init(color: .black, location: 0),
-                               .init(color: .black, location: max(0, 1 - 24 / graphWidth)),
-                               .init(color: .clear, location: 1)]
-                            : [.init(color: .black, location: 0),
-                               .init(color: .black, location: 1)],
+                        stops: Self.fadeStops(
+                            leading: fadeLeading, trailing: faded, width: graphWidth
+                        ),
                         startPoint: .leading,
                         endPoint: .trailing
                     )
@@ -270,6 +310,23 @@ struct GraphRowView: View {
         .contentShape(Rectangle())
         .onTapGesture { repo.selectedCommit = row.commit.hash }
         .contextMenu { menuItems }
+        // Drag a commit onto a branch to cherry-pick it there. The WIP row
+        // isn't a real commit, so it isn't draggable.
+        .modifier(CommitDragSource(commit: row.commit))
+    }
+
+    /// Soft edges only where the lanes actually continue, so the fade reads
+    /// as "there's more this way" rather than as decoration.
+    static func fadeStops(
+        leading: Bool, trailing: Bool, width: CGFloat
+    ) -> [Gradient.Stop] {
+        let edge = min(24 / max(width, 1), 0.4)
+        var stops: [Gradient.Stop] = []
+        stops.append(.init(color: leading ? .clear : .black, location: 0))
+        if leading { stops.append(.init(color: .black, location: edge)) }
+        if trailing { stops.append(.init(color: .black, location: 1 - edge)) }
+        stops.append(.init(color: trailing ? .clear : .black, location: 1))
+        return stops
     }
 
     /// Branches whose tip is this commit (from its decorations).
@@ -343,6 +400,14 @@ struct LaneCanvas: View {
     var dimmed: Bool = false
     /// Branch-line color ids on the current branch; nil = everything bright.
     var brightColors: Set<Int>? = nil
+    /// Nil means "draw initials" — loading, disabled, or failed all look
+    /// the same from here on purpose.
+    var avatar: Image? = nil
+    /// Shared horizontal scroll offset for the lane column.
+    var scrollX: CGFloat = 0
+    /// This commit carries a ref badge in the pinned left column, so it
+    /// gets a leader line out to its node.
+    var hasBadge = false
 
     static let palette: [Color] = [
         .blue, .purple, .teal, .orange, .pink, .green, .indigo, .red, .cyan, .yellow,
@@ -354,6 +419,10 @@ struct LaneCanvas: View {
 
     var body: some View {
         Canvas { context, size in
+            // Horizontal scroll is a draw-time translate rather than a view
+            // offset: the Canvas already clips to its frame, so the lanes
+            // slide under the fixed badge column with nothing to lay out.
+            if scrollX != 0 { context.translateBy(x: -scrollX, y: 0) }
             let laneW = GraphView.laneWidth
             let midY = size.height / 2
             let dotX = x(row.column, laneW)
@@ -373,6 +442,25 @@ struct LaneCanvas: View {
                     style: isWip
                         ? StrokeStyle(lineWidth: 2, dash: [3, 3])
                         : StrokeStyle(lineWidth: 2)
+                )
+            }
+
+            // Leader line from the pinned badge column to this commit's
+            // node. The badge is always visible on the left, but its node
+            // can sit six lanes to the right or be scrolled past — without
+            // this you can't tell which lane the label belongs to.
+            // Drawn first so the lane lines cross over it, not under.
+            if hasBadge, !isWip, dotX > scrollX {
+                var p = Path()
+                p.move(to: CGPoint(x: scrollX, y: midY))
+                p.addLine(to: CGPoint(x: dotX, y: midY))
+                // Barely dimmed on purpose: this line is wayfinding, not
+                // branch emphasis, and the rows that need it most are
+                // exactly the dimmed ones whose node sits far to the right.
+                context.stroke(
+                    p,
+                    with: .color(Self.color(row.columnColor).opacity(dimmed ? 0.45 : 0.7)),
+                    style: StrokeStyle(lineWidth: 1.5, dash: [4, 3])
                 )
             }
 
@@ -435,21 +523,35 @@ struct LaneCanvas: View {
                 )
                 return
             }
+            let inner = nodeRect.insetBy(dx: 1.5, dy: 1.5)
             context.fill(
-                Path(ellipseIn: nodeRect.insetBy(dx: 1.5, dy: 1.5)),
+                Path(ellipseIn: inner),
                 with: .color(Self.color(row.columnColor).opacity(dimmed ? 0.1 : 0.22))
             )
+            // Avatar under the ring, so the branch color still frames it.
+            // Nil covers every failure — loading, offline, 404, undecodable
+            // — and the initials below are the single fallback for all of
+            // them. There is no third state that could render as broken.
+            if let avatar {
+                context.drawLayer { layer in
+                    layer.opacity = dimmed ? 0.5 : 1
+                    layer.clip(to: Path(ellipseIn: inner))
+                    layer.draw(avatar, in: inner)
+                }
+            }
             context.stroke(
                 Path(ellipseIn: nodeRect),
                 with: .color(Self.color(row.columnColor).opacity(dimmed ? 0.45 : 1)),
                 lineWidth: 2
             )
-            context.draw(
-                Text(Self.initials(row.commit.author))
-                    .font(.system(size: 7, weight: .bold))
-                    .foregroundColor(Self.color(row.columnColor).opacity(dimmed ? 0.5 : 1)),
-                at: CGPoint(x: dotX, y: midY)
-            )
+            if avatar == nil {
+                context.draw(
+                    Text(Self.initials(row.commit.author))
+                        .font(.system(size: 7, weight: .bold))
+                        .foregroundColor(Self.color(row.columnColor).opacity(dimmed ? 0.5 : 1)),
+                    at: CGPoint(x: dotX, y: midY)
+                )
+            }
         }
     }
 
@@ -466,9 +568,76 @@ struct LaneCanvas: View {
 
 /// The BRANCH/TAG column cell: one badge, plus a "+N" pill when a commit
 /// carries several refs. Hover the "+N" for the full list.
+/// SwiftUI exposes no horizontal scroll deltas, so an AppKit event monitor
+/// picks them up for the graph column. A monitor rather than a hit-tested
+/// overlay: anything sitting on top of the rows to catch scrolls would also
+/// swallow their clicks, drags and context menus.
+struct HorizontalScrollCatcher: NSViewRepresentable {
+    let onScroll: (CGFloat) -> Void
+
+    final class Coordinator {
+        var onScroll: ((CGFloat) -> Void)?
+        weak var view: NSView?
+        var monitor: Any?
+
+        func install() {
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self, let view = self.view, let window = view.window,
+                      event.window === window
+                else { return event }
+                let point = view.convert(event.locationInWindow, from: nil)
+                guard view.bounds.contains(point) else { return event }
+                // A trackpad reports both axes at once; only take over when
+                // the gesture is clearly sideways, or vertical scrolling
+                // would drag the graph off to one side.
+                guard abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) else { return event }
+                self.onScroll?(event.scrollingDeltaX)
+                return nil // consumed
+            }
+        }
+
+        deinit {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        context.coordinator.view = view
+        context.coordinator.onScroll = onScroll
+        context.coordinator.install()
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        context.coordinator.view = view
+        context.coordinator.onScroll = onScroll
+        context.coordinator.install()
+    }
+}
+
+struct CommitDragSource: ViewModifier {
+    let commit: Commit
+
+    func body(content: Content) -> some View {
+        if commit.isWip {
+            content
+        } else {
+            content.draggable(DraggedCommit(hash: commit.hash, subject: commit.subject))
+        }
+    }
+}
+
 struct BadgeColumn: View {
     let refs: [String]
     var localBranches: [Branch] = []
+    /// When set, badges become drag sources and drop targets.
+    var repo: RepoState?
+    /// Widest a single badge may get before its label truncates.
+    var maxBadgeWidth: CGFloat = 130
     @State private var showOverflow = false
 
     /// ahead/behind of the local branch a badge represents, if any.
@@ -485,7 +654,10 @@ struct BadgeColumn: View {
         HStack(spacing: 4) {
             Spacer(minLength: 0)
             if let first = infos.first {
-                RefBadge(info: first, track: track(first))
+                // Constrain rather than let it overflow: an unbounded badge
+                // grows past its column and gets sliced by the window edge.
+                RefBadge(info: first, track: track(first), repo: repo)
+                    .frame(maxWidth: maxBadgeWidth, alignment: .trailing)
             }
             if infos.count > 1 {
                 Button {
@@ -503,7 +675,7 @@ struct BadgeColumn: View {
                 .popover(isPresented: $showOverflow, arrowEdge: .bottom) {
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(infos) { info in
-                            RefBadge(info: info)
+                            RefBadge(info: info, repo: repo)
                         }
                     }
                     .padding(10)
@@ -529,6 +701,10 @@ struct RefBadge: View {
     let info: Info
     /// ahead/behind vs upstream, shown inside the badge when non-nil.
     var track: (ahead: Int, behind: Int)?
+    /// Present in the graph (where badges are draggable), absent in the
+    /// static contexts that just render a badge.
+    var repo: RepoState?
+    @State private var targeted = false
 
     /// Turn raw %D refs into display badges: drop origin/HEAD, merge the
     /// local + remote refs of the same branch into one badge, HEAD first.
@@ -574,6 +750,31 @@ struct RefBadge: View {
     }
 
     var body: some View {
+        if let repo, !info.isTag {
+            capsule
+                // Ring rather than fill: the badge already carries a color,
+                // and the ring reads instantly without a transition.
+                .overlay(
+                    Capsule().stroke(Color.accentColor, lineWidth: targeted ? 2 : 0)
+                )
+                .draggable(DraggedBranch(name: info.label))
+                .modifier(BranchDropTarget(branch: dropTarget, repo: repo, targeted: $targeted))
+        } else {
+            capsule
+        }
+    }
+
+    /// The badge as a branch, so it can share the sidebar's drop logic.
+    /// Remote-only badges become `.remote` and are ignored as targets.
+    private var dropTarget: Branch {
+        if info.hasLocal {
+            return Branch(name: info.label, kind: .local, isCurrent: info.isHead)
+        }
+        let remote = info.label.split(separator: "/").first.map(String.init) ?? "origin"
+        return Branch(name: info.label, kind: .remote(remote), isCurrent: false)
+    }
+
+    private var capsule: some View {
         HStack(spacing: 3) {
             Text(info.label)
                 .lineLimit(1)

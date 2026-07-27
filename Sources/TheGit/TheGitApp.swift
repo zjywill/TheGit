@@ -4,11 +4,16 @@ import SwiftUI
 @main
 struct TheGitApp: App {
     @StateObject private var appState = AppState()
+    @ObservedObject private var avatars = AvatarStore.shared
 
     init() {
         // Needed when launched via `swift run` (no app bundle).
         NSApplication.shared.setActivationPolicy(.regular)
         NSApplication.shared.activate(ignoringOtherApps: true)
+        // The app has its own repo tab bar. macOS's native window tabbing
+        // would stack a second, unrelated tab bar above it — and its View
+        // menu items sit right next to ours, one slip away. Off entirely.
+        NSWindow.allowsAutomaticWindowTabbing = false
     }
 
     var body: some Scene {
@@ -22,6 +27,12 @@ struct TheGitApp: App {
             CommandGroup(after: .newItem) {
                 Button("Open Repository…") { appState.openRepoPanel() }
                     .keyboardShortcut("o")
+            }
+            CommandGroup(after: .toolbar) {
+                // Off by default and opt-in from here: avatars are the one
+                // feature that reaches a server the user didn't configure.
+                Toggle("Author Avatars", isOn: $avatars.isEnabled)
+                    .help("Fetch author avatars from Gravatar and GitHub")
             }
         }
     }

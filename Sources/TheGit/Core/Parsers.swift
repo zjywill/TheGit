@@ -5,11 +5,13 @@ enum GitParsers {
 
     static func parseLog(_ output: String) -> [Commit] {
         output.split(separator: "\n").compactMap { line in
-            let fields = line.split(separator: "\t", maxSplits: 5, omittingEmptySubsequences: false)
-            guard fields.count >= 6 else { return nil }
+            // hash, parents, author, email, date, refs, subject — the
+            // subject is last and may itself contain tabs, hence maxSplits.
+            let fields = line.split(separator: "\t", maxSplits: 6, omittingEmptySubsequences: false)
+            guard fields.count >= 7 else { return nil }
             let parents = fields[1].split(separator: " ").map(String.init)
-            let timestamp = TimeInterval(fields[3]) ?? 0
-            let refs = fields[4]
+            let timestamp = TimeInterval(fields[4]) ?? 0
+            let refs = fields[5]
                 .split(separator: ",")
                 .map { $0.trimmingCharacters(in: .whitespaces) }
                 .filter { !$0.isEmpty }
@@ -19,7 +21,8 @@ enum GitParsers {
                 author: String(fields[2]),
                 date: Date(timeIntervalSince1970: timestamp),
                 refs: refs,
-                subject: String(fields[5])
+                subject: String(fields[6]),
+                email: String(fields[3])
             )
         }
     }
@@ -71,14 +74,21 @@ enum GitParsers {
         var path: String?
         var head = ""
         var branch: String?
+        var prunable = false
+        var locked = false
 
         func flush() {
             if let p = path {
-                result.append(Worktree(path: p, branch: branch, head: head))
+                result.append(Worktree(
+                    path: p, branch: branch, head: head,
+                    prunable: prunable, locked: locked
+                ))
             }
             path = nil
             head = ""
             branch = nil
+            prunable = false
+            locked = false
         }
 
         for line in output.components(separatedBy: "\n") {
@@ -89,6 +99,11 @@ enum GitParsers {
                 head = String(line.dropFirst("HEAD ".count))
             } else if line.hasPrefix("branch refs/heads/") {
                 branch = String(line.dropFirst("branch refs/heads/".count))
+            } else if line == "prunable" || line.hasPrefix("prunable ") {
+                // Bare flag or "prunable <reason>", depending on git version.
+                prunable = true
+            } else if line == "locked" || line.hasPrefix("locked ") {
+                locked = true
             }
         }
         flush()

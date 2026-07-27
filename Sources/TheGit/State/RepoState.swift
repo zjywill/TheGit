@@ -9,6 +9,8 @@ enum BranchPrompt: Identifiable {
     case createBranchAtCommit(Commit)
     case tagCommit(Commit)
     case amendMessage(Commit)
+    case branchFromStash(Stash)
+    case renameRemote(String)
 
     var id: String {
         switch self {
@@ -17,6 +19,8 @@ enum BranchPrompt: Identifiable {
         case .createBranchAtCommit(let c): return "create-at-\(c.hash)"
         case .tagCommit(let c): return "tag-\(c.hash)"
         case .amendMessage(let c): return "amend-\(c.hash)"
+        case .branchFromStash(let s): return "stash-branch-\(s.ref)"
+        case .renameRemote(let name): return "rename-remote-\(name)"
         }
     }
 
@@ -27,13 +31,15 @@ enum BranchPrompt: Identifiable {
         case .createBranchAtCommit(let c): return "New branch at \(c.shortHash)"
         case .tagCommit(let c): return "New tag at \(c.shortHash)"
         case .amendMessage: return "Edit commit message"
+        case .branchFromStash(let s): return "New branch from \(s.ref)"
+        case .renameRemote(let name): return "Rename remote \(name)"
         }
     }
 
     var confirmLabel: String {
         switch self {
-        case .createBranch, .createBranchAtCommit: return "Create"
-        case .rename: return "Rename"
+        case .createBranch, .createBranchAtCommit, .branchFromStash: return "Create"
+        case .rename, .renameRemote: return "Rename"
         case .tagCommit: return "Tag"
         case .amendMessage: return "Amend"
         }
@@ -42,8 +48,55 @@ enum BranchPrompt: Identifiable {
     var fieldLabel: String {
         switch self {
         case .tagCommit: return "Tag name"
+        case .renameRemote: return "Remote name"
         case .amendMessage: return "Commit message"
         default: return "Branch name"
+        }
+    }
+
+    /// Extra line under the field, when the action needs explaining.
+    var note: String? {
+        switch self {
+        case .branchFromStash:
+            return "Branches off the commit the stash was made on, applies it there, and drops the stash."
+        case .renameRemote:
+            return "Renames the remote locally and rewrites every branch that tracks it. Nothing changes on the server."
+        default: return nil
+        }
+    }
+}
+
+/// A branch delete waiting on confirmation. `includeRemote` is the
+/// one-step "delete it everywhere" variant.
+struct PendingBranchDelete: Identifiable, Hashable {
+    let branch: Branch
+    var includeRemote = false
+    var id: String { branch.name + (includeRemote ? "+remote" : "") }
+}
+
+/// A finished drag, waiting for the user to say what it meant. Dropping is
+/// never itself the decision — the menu that follows is.
+enum DropIntent: Identifiable {
+    case branchOnBranch(source: String, target: String)
+    case commitOnBranch(commit: DraggedCommit, target: String)
+
+    var id: String {
+        switch self {
+        case .branchOnBranch(let s, let t): return "b:\(s)>\(t)"
+        case .commitOnBranch(let c, let t): return "c:\(c.hash)>\(t)"
+        }
+    }
+
+    var target: String {
+        switch self {
+        case .branchOnBranch(_, let t), .commitOnBranch(_, let t): return t
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .branchOnBranch(let source, let target): return "\(source) → \(target)"
+        case .commitOnBranch(let commit, let target): return "\(commit.shortHash) → \(target)"
         }
     }
 }
@@ -53,6 +106,7 @@ enum BranchPrompt: Identifiable {
 final class RepoState: ObservableObject, Identifiable {
     let path: String
     let git: GitClient
+    let forgeClient: ForgeClient
 
     enum PanelMode: String, CaseIterable {
         case commit = "Commit"
@@ -69,7 +123,7 @@ final class RepoState: ObservableObject, Identifiable {
     @Published var selectedCommit: String?
     @Published var branchPrompt: BranchPrompt?
     @Published var promptText = ""
-    @Published var branchToDelete: Branch?
+    @Published var branchToDelete: PendingBranchDelete?
     @Published var commitToHardReset: Commit?
     @Published var selectedFile: FileChange?
     @Published var diffLines: [DiffLine] = []
@@ -93,6 +147,17 @@ final class RepoState: ObservableObject, Identifiable {
     @Published var newRemoteName = "origin"
     @Published var newRemoteURL = ""
     @Published var remoteToRemove: String?
+    /// Non-nil while the remote sheet is editing an existing remote's URL
+    /// rather than adding a new one.
+    @Published var editingRemote: String?
+    /// A drop that landed and is waiting for the user to pick its meaning.
+    @Published var dropIntent: DropIntent?
+    /// Set once we know the repo's host has a CLI we can drive; nil keeps
+    /// the whole pull-request feature invisible.
+    @Published var forge: Forge?
+    @Published var pullRequests: [PullRequest] = []
+    @Published var forgeError: String?
+    @Published var loadingPullRequests = false
 
     nonisolated var id: String { path }
     var displayName: String { (path as NSString).lastPathComponent }
@@ -100,6 +165,7 @@ final class RepoState: ObservableObject, Identifiable {
     init(path: String) {
         self.path = path
         self.git = GitClient(repoPath: path)
+        self.forgeClient = ForgeClient(repoPath: path)
     }
 
     private var hasLoaded = false
@@ -157,6 +223,12 @@ final class RepoState: ObservableObject, Identifiable {
         } else {
             hasLoaded = true
             await refresh()
+        }
+        await detectForge()
+        // Coming back to a tab after a while: freshen the PR list, but
+        // never on every switch — it's a rate-limited API behind the CLI.
+        if forge != nil, let at = prsLoadedAt, Date().timeIntervalSince(at) > 60 {
+            await loadPullRequests()
         }
     }
 
@@ -393,9 +465,89 @@ final class RepoState: ObservableObject, Identifiable {
         perform { try await $0.rebase(onto: branch.name) }
     }
 
-    func setUpstream(_ branch: Branch) {
-        let remote = snapshot.defaultRemote
-        perform { try await $0.setUpstream(branch.name, to: "\(remote)/\(branch.name)") }
+    func setUpstream(_ branch: Branch, to upstream: String) {
+        perform { try await $0.setUpstream(branch.name, to: upstream) }
+    }
+
+    func unsetUpstream(_ branch: Branch) {
+        perform { try await $0.unsetUpstream(branch.name) }
+    }
+
+    // MARK: - Multi-remote
+
+    /// Catch a behind branch up to its upstream without leaving the branch
+    /// you're on — the case `git pull` can't cover, because pull only ever
+    /// touches HEAD.
+    func fastForward(_ branch: Branch) {
+        guard let upstream = branch.upstream else { return }
+        let remote = remote(for: branch)
+        let name = branch.name
+        let isCurrent = branch.isCurrent
+        perform { git in
+            if isCurrent {
+                try await git.mergeFastForwardOnly(upstream)
+            } else {
+                try await git.fastForward(remote: remote, branch: name)
+            }
+        }
+    }
+
+    /// Every local branch that is purely behind its upstream, so the whole
+    /// repo can be caught up in one action.
+    var fastForwardableBranches: [Branch] {
+        snapshot.localBranches.filter {
+            $0.upstream != nil && !$0.upstreamGone && $0.behind > 0 && $0.ahead == 0
+        }
+    }
+
+    func fastForwardAll() {
+        let branches = fastForwardableBranches
+        guard !branches.isEmpty else { return }
+        let current = snapshot.currentBranch
+        let targets = branches.map { (name: $0.name, remote: remote(for: $0), upstream: $0.upstream ?? "") }
+        perform { git in
+            for target in targets {
+                // One failure (someone force-pushed) must not stop the rest.
+                if target.name == current {
+                    try? await git.mergeFastForwardOnly(target.upstream)
+                } else {
+                    try? await git.fastForward(remote: target.remote, branch: target.name)
+                }
+            }
+        }
+    }
+
+    func push(_ branch: Branch, to remote: String) {
+        // No upstream yet: set one while pushing, or the next plain Push
+        // has nowhere to go.
+        let setUpstream = branch.upstream == nil
+        perform { try await $0.push(remote: remote, branch: branch.name, setUpstream: setUpstream) }
+    }
+
+    func pull(_ branch: Branch, from remote: String) {
+        perform { try await $0.pull(remote: remote, branch: branch.name) }
+    }
+
+    func pushTag(_ tag: Tag, to remote: String) {
+        perform { try await $0.pushTag(tag.name, remote: remote) }
+    }
+
+    func promptRenameRemote(_ name: String) {
+        promptText = name
+        branchPrompt = .renameRemote(name)
+    }
+
+    /// Remote-tracking branches offered as upstreams for `branch`, with the
+    /// same-named ones first — that's the pick in almost every case.
+    func upstreamChoices(for branch: Branch) -> [Branch] {
+        snapshot.remoteBranches
+            .filter { !$0.name.hasSuffix("/HEAD") }
+            .sorted { a, b in
+                let aMatch = a.shortName == branch.name
+                let bMatch = b.shortName == branch.name
+                if aMatch != bMatch { return aMatch }
+                return a.name < b.name
+            }
     }
 
     func updateSubmodules() {
@@ -420,20 +572,80 @@ final class RepoState: ObservableObject, Identifiable {
             perform { try await $0.tag(name, at: commit.hash) }
         case .amendMessage:
             perform { try await $0.amendMessage(name) }
+        case .branchFromStash(let stash):
+            perform { try await $0.stashBranch(name, from: stash.ref) }
+        case .renameRemote(let old):
+            guard old != name else { return }
+            perform { try await $0.renameRemote(old, to: name) }
         }
     }
 
-    /// Confirm side of the delete dialog. Local: force delete.
-    /// Remote: push --delete on the branch's remote.
+    /// The remote a local branch tracks ("origin/x" -> "origin"), falling
+    /// back to the default when nothing is configured.
+    func remote(for branch: Branch) -> String {
+        guard let upstream = branch.upstream,
+              let slash = upstream.firstIndex(of: "/")
+        else { return snapshot.defaultRemote }
+        return String(upstream[..<slash])
+    }
+
+    /// Confirm side of the delete dialog. Local: force delete, optionally
+    /// taking the remote branch with it. Remote: push --delete.
     func confirmDelete() {
-        guard let branch = branchToDelete else { return }
+        guard let pending = branchToDelete else { return }
         branchToDelete = nil
+        let branch = pending.branch
         switch branch.kind {
         case .local:
-            perform { try await $0.deleteLocalBranch(branch.name) }
+            guard pending.includeRemote else {
+                perform { try await $0.deleteLocalBranch(branch.name) }
+                return
+            }
+            let remote = remote(for: branch)
+            perform { git in
+                // Remote first: it's the half that can fail (no permission,
+                // no network). If it does, the local branch is still there
+                // and the error means something.
+                try await git.deleteRemoteBranch(remote: remote, branch: branch.name)
+                try await git.deleteLocalBranch(branch.name)
+            }
         case .remote(let remote):
             perform { try await $0.deleteRemoteBranch(remote: remote, branch: branch.shortName) }
         }
+    }
+
+    // MARK: - Drag and drop
+
+    /// Both branch-on-branch actions operate on HEAD, so the target has to
+    /// be checked out first. The dialog says so before the user commits.
+    func needsCheckout(_ intent: DropIntent) -> Bool {
+        intent.target != snapshot.currentBranch
+    }
+
+    private func withTargetCheckedOut(
+        _ target: String,
+        _ body: @escaping (GitClient) async throws -> Void
+    ) {
+        let current = snapshot.currentBranch
+        perform { git in
+            if target != current { try await git.checkout(branch: target) }
+            try await body(git)
+        }
+    }
+
+    func mergeDropped(source: String, into target: String) {
+        dropIntent = nil
+        withTargetCheckedOut(target) { try await $0.merge(source) }
+    }
+
+    func rebaseDropped(target: String, onto source: String) {
+        dropIntent = nil
+        withTargetCheckedOut(target) { try await $0.rebase(onto: source) }
+    }
+
+    func cherryPickDropped(_ commit: DraggedCommit, onto target: String) {
+        dropIntent = nil
+        withTargetCheckedOut(target) { try await $0.cherryPick(commit.hash) }
     }
 
     /// Pick a folder with NSOpenPanel, then `git worktree add` there.
@@ -513,19 +725,40 @@ final class RepoState: ObservableObject, Identifiable {
     // MARK: - Remote management
 
     func promptAddRemote() {
+        editingRemote = nil
         newRemoteName = snapshot.remoteNames.isEmpty ? "origin" : ""
         newRemoteURL = ""
         showAddRemote = true
     }
 
-    /// `git remote add` then fetch it so its branches appear right away.
+    /// Same sheet, prefilled: the name is fixed, only the URL is editable.
+    func promptEditRemote(_ name: String) {
+        editingRemote = name
+        newRemoteName = name
+        newRemoteURL = ""
+        showAddRemote = true
+        Task {
+            let url = (try? await git.remoteURL(name)) ?? ""
+            // The user may already be typing by the time this lands.
+            if editingRemote == name, newRemoteURL.isEmpty { newRemoteURL = url }
+        }
+    }
+
+    /// `git remote add` then fetch it so its branches appear right away —
+    /// or `set-url` when the sheet is in edit mode.
     func confirmAddRemote() {
         let name = newRemoteName.trimmingCharacters(in: .whitespaces)
         let url = newRemoteURL.trimmingCharacters(in: .whitespaces)
+        let editing = editingRemote
         showAddRemote = false
+        editingRemote = nil
         guard !name.isEmpty, !url.isEmpty else { return }
         perform { git in
-            try await git.addRemote(name: name, url: url)
+            if let editing {
+                try await git.setRemoteURL(editing, url: url)
+            } else {
+                try await git.addRemote(name: name, url: url)
+            }
             try await git.fetch()
         }
     }
@@ -534,6 +767,297 @@ final class RepoState: ObservableObject, Identifiable {
         guard let name = remoteToRemove else { return }
         remoteToRemove = nil
         perform { try await $0.removeRemote(name) }
+    }
+
+    // MARK: - Pull requests (gh / glab)
+
+    private var forgeDetected = false
+    private var prsLoadedAt: Date?
+
+    /// One-shot: the remote host decides the CLI, and the CLI has to be
+    /// installed. Nothing here is shown or logged when it comes back nil.
+    private func detectForge() async {
+        guard !forgeDetected, forge == nil else { return }
+        guard !snapshot.remoteNames.isEmpty else { return } // no remote yet — try again later
+        forgeDetected = true
+        guard let url = try? await git.remoteURL(snapshot.defaultRemote),
+              let found = ForgeClient.detect(remoteURL: url)
+        else { return }
+        forge = found
+        await loadPullRequests()
+    }
+
+    func loadPullRequests() async {
+        guard let forge else { return }
+        loadingPullRequests = true
+        defer { loadingPullRequests = false }
+        do {
+            pullRequests = try await forgeClient.pullRequests(forge)
+            forgeError = nil
+        } catch {
+            pullRequests = []
+            forgeError = forgeFailure(error)
+        }
+        prsLoadedAt = Date()
+    }
+
+    func refreshPullRequests() {
+        Task { await loadPullRequests() }
+    }
+
+    /// `gh pr checkout` moves HEAD, so it refreshes like any git mutation.
+    func checkoutPullRequest(_ pr: PullRequest) {
+        guard let forge else { return }
+        Task {
+            isBusy = true
+            do {
+                try await forgeClient.checkout(pr, forge: forge)
+            } catch {
+                errorMessage = forgeFailure(error)
+            }
+            await refresh()
+        }
+    }
+
+    func openPullRequestInBrowser(_ pr: PullRequest) {
+        guard let forge else { return }
+        Task {
+            do {
+                try await forgeClient.openInBrowser(pr, forge: forge)
+            } catch {
+                errorMessage = forgeFailure(error)
+            }
+        }
+    }
+
+    /// Opens the forge's compose form in the browser — the actual "create"
+    /// click stays with the user, and we don't rebuild their form.
+    func createPullRequest(from branch: Branch) {
+        guard let forge else { return }
+        let name = branch.shortName
+        Task {
+            do {
+                try await forgeClient.createPullRequest(branch: name, forge: forge)
+            } catch {
+                errorMessage = forgeFailure(error)
+            }
+        }
+    }
+
+    /// The one CLI failure worth explaining: not logged in.
+    private func forgeFailure(_ error: Error) -> String {
+        let text = error.localizedDescription
+        guard let forge else { return text }
+        let lowered = text.lowercased()
+        guard lowered.contains("auth") || lowered.contains("log in")
+            || lowered.contains("token") || lowered.contains("credential")
+        else { return text }
+        return text + "\n\nRun `\(forge.loginHint)` in a terminal, then refresh."
+    }
+
+    // MARK: - Clean up
+
+    /// A branch we deleted and can put back, because we kept its tip.
+    struct UndoableDelete: Identifiable, Hashable {
+        let name: String
+        let tip: String
+        var id: String { name }
+    }
+
+    @Published var showCleanup = false
+    @Published var cleanupCandidates: [CleanupCandidate] = []
+    @Published var scanningCleanup = false
+    @Published var cleanupError: String?
+    @Published var candidateToConfirm: CleanupCandidate?
+    @Published var cleanupUndo: [UndoableDelete] = []
+
+    func openCleanup() {
+        showCleanup = true
+        cleanupUndo = []
+        Task { await scanCleanup() }
+    }
+
+    func scanCleanup() async {
+        scanningCleanup = true
+        cleanupError = nil
+        defer { scanningCleanup = false }
+        do {
+            cleanupCandidates = try await findCleanupCandidates()
+        } catch {
+            cleanupCandidates = []
+            cleanupError = error.localizedDescription
+        }
+    }
+
+    /// Four signals, strongest first: the forge says the PR was merged;
+    /// git says the tip is an ancestor; the squash probe says the work is
+    /// already upstream; the upstream branch is gone. Anything else is
+    /// left alone — a branch we can't explain is not a candidate.
+    private func findCleanupCandidates() async throws -> [CleanupCandidate] {
+        let base = await git.defaultBranch(remote: snapshot.defaultRemote)
+        let merged = (try? await git.mergedBranches(into: base)) ?? []
+        // Best effort: the whole scan still works offline or without a CLI.
+        var mergedPRs: [String: Int] = [:]
+        if let forge {
+            mergedPRs = (try? await forgeClient.mergedBranches(forge)) ?? [:]
+        }
+        // A branch checked out in a worktree can't be deleted; its worktree
+        // is the candidate instead, and the branch shows up on the rescan.
+        let checkedOut = Set(snapshot.worktrees.compactMap(\.branch))
+
+        let candidates = snapshot.localBranches.filter {
+            $0.name != base && !$0.isCurrent && !checkedOut.contains($0.name)
+        }
+        var worktreeBranches: [String: Worktree] = [:]
+        for worktree in snapshot.worktrees
+        where !worktree.locked && !worktree.prunable {
+            if let branch = worktree.branch, branch != base {
+                worktreeBranches[branch] = worktree
+            }
+        }
+
+        // Anything the cheap signals can explain never needs the probe.
+        var reasons: [String: CleanupCandidate.Reason] = [:]
+        var needProbe: [Branch] = []
+        for branch in candidates + worktreeBranches.keys.map({
+            Branch(name: $0, kind: .local, isCurrent: false)
+        }) {
+            if let number = mergedPRs[branch.name] {
+                reasons[branch.name] = .mergedPullRequest(
+                    number: number, prefix: forge?.numberPrefix ?? "#"
+                )
+            } else if merged.contains(branch.name) {
+                reasons[branch.name] = .merged(into: base)
+            } else {
+                needProbe.append(branch)
+            }
+        }
+        for name in await squashMerged(needProbe.map(\.name), into: base) {
+            reasons[name] = .squashMerged(into: base)
+        }
+
+        var found: [CleanupCandidate] = []
+        for branch in candidates {
+            guard let reason = reasons[branch.name]
+                ?? (branch.upstreamGone ? .upstreamGone(branch.upstream ?? "") : nil)
+            else { continue }
+            var candidate = CleanupCandidate(
+                target: .branch(name: branch.name, tip: branch.tipHash),
+                reason: reason
+            )
+            // Only an orphaned branch can strand work: the other three
+            // reasons all mean the commits are already in base.
+            if case .upstreamGone = reason {
+                candidate.strandedCommits =
+                    (try? await git.countCommits("\(base)..\(branch.name)")) ?? 0
+            }
+            found.append(candidate)
+        }
+
+        for worktree in snapshot.worktrees where !worktree.locked {
+            if worktree.prunable {
+                found.append(CleanupCandidate(
+                    target: .worktree(path: worktree.path, prunable: true),
+                    reason: .worktreeGone
+                ))
+            } else if let branch = worktree.branch, let reason = reasons[branch] {
+                found.append(CleanupCandidate(
+                    target: .worktree(path: worktree.path, prunable: false),
+                    reason: reason
+                ))
+            }
+        }
+        return found
+    }
+
+    /// Squash-probe many branches at once. Each probe is four git calls, so
+    /// doing them one at a time is what made this scan slow; the cap keeps
+    /// a 150-branch repo from spawning hundreds of processes at once.
+    private func squashMerged(_ names: [String], into base: String) async -> Set<String> {
+        guard !names.isEmpty else { return [] }
+        let repoPath = path
+        return await withTaskGroup(of: (String, Bool).self) { group in
+            var next = 0
+            func schedule() {
+                guard next < names.count else { return }
+                let name = names[next]
+                next += 1
+                group.addTask {
+                    (name, await GitClient.isSquashMerged(
+                        repoPath: repoPath, branch: name, into: base
+                    ))
+                }
+            }
+            for _ in 0..<min(8, names.count) { schedule() }
+            var result: Set<String> = []
+            while let (name, isSquashed) = await group.next() {
+                if isSquashed { result.insert(name) }
+                schedule()
+            }
+            return result
+        }
+    }
+
+    /// Clean exactly one row. Safe rows come straight here; risky rows land
+    /// in `candidateToConfirm` first and arrive after the user says yes.
+    func clean(_ candidate: CleanupCandidate) {
+        Task {
+            var rescan = false
+            do {
+                switch candidate.target {
+                case .branch(let name, let tip):
+                    try await git.deleteLocalBranch(name)
+                    cleanupUndo.append(UndoableDelete(name: name, tip: tip))
+                case .worktree(let path, let prunable):
+                    if prunable {
+                        try await git.pruneWorktrees()
+                    } else {
+                        try await git.removeWorktreeIfClean(path)
+                    }
+                    // Removing a worktree frees its branch for cleanup.
+                    rescan = true
+                }
+            } catch {
+                cleanupError = error.localizedDescription
+                return
+            }
+            cleanupError = nil
+            withAnimation(.easeOut(duration: 0.16)) {
+                if case .worktree(_, true) = candidate.target {
+                    // `worktree prune` is all-or-nothing, so every stale
+                    // entry just went with it.
+                    cleanupCandidates.removeAll {
+                        if case .worktree(_, true) = $0.target { return true }
+                        return false
+                    }
+                } else {
+                    cleanupCandidates.removeAll { $0.id == candidate.id }
+                }
+            }
+            await refresh(quiet: true)
+            if rescan { await scanCleanup() }
+        }
+    }
+
+    func confirmCleanCandidate() {
+        guard let candidate = candidateToConfirm else { return }
+        candidateToConfirm = nil
+        clean(candidate)
+    }
+
+    /// Puts the last deleted branch back at exactly the tip it had.
+    func undoLastClean() {
+        guard let last = cleanupUndo.popLast() else { return }
+        Task {
+            do {
+                try await git.createBranch(last.name, at: last.tip, checkout: false)
+                cleanupError = nil
+            } catch {
+                cleanupError = error.localizedDescription
+            }
+            await refresh(quiet: true)
+            await scanCleanup()
+        }
     }
 
     // MARK: - File context-menu actions

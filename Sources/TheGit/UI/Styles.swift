@@ -14,3 +14,13 @@ struct PressEffectButtonStyle: ButtonStyle {
 extension ButtonStyle where Self == PressEffectButtonStyle {
     static var pressEffect: PressEffectButtonStyle { PressEffectButtonStyle() }
 }
+
+extension Animation {
+    /// Strong ease-out — cubic-bezier(0.23, 1, 0.32, 1). The built-in
+    /// curves are too weak to read as intentional; this one moves
+    /// immediately, which is what makes an entrance feel responsive.
+    /// Use for anything entering the screen.
+    static func easeOutStrong(_ duration: Double) -> Animation {
+        .timingCurve(0.23, 1, 0.32, 1, duration: duration)
+    }
+}

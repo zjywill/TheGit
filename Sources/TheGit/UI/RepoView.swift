@@ -46,6 +46,14 @@ struct RepoView: View {
             }
         }
         .toolbar { RepoToolbar(repo: repo) }
+        // On its own layer, not in the chain below: a .sheet stacked with
+        // the alerts and confirmationDialog on this same view never
+        // presents — they compete for one presentation slot, and the
+        // sheet loses. Color.clear gives it a view of its own.
+        .background(
+            Color.clear
+                .sheet(isPresented: $repo.showCleanup) { CleanupView(repo: repo) }
+        )
         .task { await repo.appeared() }
         // Refresh quietly whenever the app regains focus — changes made
         // in a terminal or editor show up without pressing ⌘R.
@@ -63,6 +71,37 @@ struct RepoView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(repo.errorMessage ?? "")
+        }
+        // A drop is never the decision — this menu is. Dragging stays free
+        // of consequences right up until a button here is clicked.
+        .confirmationDialog(
+            repo.dropIntent?.title ?? "",
+            isPresented: Binding(
+                get: { repo.dropIntent != nil },
+                set: { if !$0 { repo.dropIntent = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let intent = repo.dropIntent {
+                switch intent {
+                case .branchOnBranch(let source, let target):
+                    Button("Merge \(source) into \(target)") {
+                        repo.mergeDropped(source: source, into: target)
+                    }
+                    Button("Rebase \(target) onto \(source)") {
+                        repo.rebaseDropped(target: target, onto: source)
+                    }
+                case .commitOnBranch(let commit, let target):
+                    Button("Cherry-pick \(commit.shortHash) onto \(target)") {
+                        repo.cherryPickDropped(commit, onto: target)
+                    }
+                }
+                Button("Cancel", role: .cancel) { repo.dropIntent = nil }
+            }
+        } message: {
+            if let intent = repo.dropIntent, repo.needsCheckout(intent) {
+                Text("\(intent.target) is not checked out — it will be checked out first.")
+            }
         }
         .alert(
             "Discard ALL changes?",
@@ -149,6 +188,13 @@ struct RepoToolbar: ToolbarContent {
                 Label("Pop", systemImage: "tray.and.arrow.up")
             }
             .help("Pop latest stash")
+
+            Button {
+                repo.openCleanup()
+            } label: {
+                Label("Clean", systemImage: "sparkles")
+            }
+            .help("Review merged and abandoned branches and worktrees")
 
             Button {
                 Task { await repo.refresh() }

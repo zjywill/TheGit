@@ -7,6 +7,9 @@ struct Commit: Identifiable, Hashable {
     let date: Date
     let refs: [String]
     let subject: String
+    /// Author email — the avatar lookup key. Defaulted so the graph layout
+    /// tests can keep building commits without one.
+    var email: String = ""
 
     var id: String { hash }
     var shortHash: String { String(hash.prefix(7)) }
@@ -57,6 +60,10 @@ struct Worktree: Identifiable, Hashable {
     let path: String
     let branch: String?
     let head: String
+    /// git can't find the working directory any more. Only the admin files
+    /// in .git/worktrees are left, so pruning it loses nothing.
+    var prunable = false
+    var locked = false
 
     var id: String { path }
     var displayName: String { (path as NSString).lastPathComponent }

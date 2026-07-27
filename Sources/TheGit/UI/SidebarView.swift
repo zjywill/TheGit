@@ -39,6 +39,33 @@ struct SidebarView: View {
                     actionHelp: "Add remote"
                 ) { repo.promptAddRemote() }
             }
+            // Only present when the repo's host has a CLI installed —
+            // otherwise the feature leaves no trace at all.
+            if let forge = repo.forge {
+                Section {
+                    if let error = repo.forgeError {
+                        Text(error)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.orange)
+                            .lineLimit(3)
+                            .help(error)
+                    } else if repo.pullRequests.isEmpty {
+                        Text(repo.loadingPullRequests ? "Loading…" : "No open \(forge.itemNoun.lowercased())s")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                    }
+                    ForEach(repo.pullRequests) { pr in
+                        PullRequestRow(pr: pr, forge: forge, repo: repo)
+                    }
+                } header: {
+                    SectionHeader(
+                        title: forge.sectionTitle,
+                        count: repo.pullRequests.count,
+                        actionIcon: "arrow.clockwise",
+                        actionHelp: "Refresh \(forge.sectionTitle.lowercased())"
+                    ) { repo.refreshPullRequests() }
+                }
+            }
             Section {
                 ForEach(repo.snapshot.worktrees) { wt in
                     HStack(spacing: 6) {
@@ -91,7 +118,15 @@ struct SidebarView: View {
                         .contextMenu {
                             Button("Checkout \(tag.name) (detached)") { repo.checkoutTag(tag) }
                             Divider()
-                            Button("Push tag to \(repo.snapshot.defaultRemote)") { repo.pushTag(tag) }
+                            if repo.snapshot.remoteNames.count > 1 {
+                                Menu("Push tag to") {
+                                    ForEach(repo.snapshot.remoteNames, id: \.self) { remote in
+                                        Button(remote) { repo.pushTag(tag, to: remote) }
+                                    }
+                                }
+                            } else {
+                                Button("Push tag to \(repo.snapshot.defaultRemote)") { repo.pushTag(tag) }
+                            }
                             Button("Copy tag name") { RepoState.copyToPasteboard(tag.name) }
                             Divider()
                             Button("Delete tag…", role: .destructive) { repo.tagToDelete = tag }
@@ -124,6 +159,11 @@ struct SidebarView: View {
                         .contextMenu {
                             Button("Apply (keep stash)") { repo.applyStash(stash) }
                             Button("Pop (apply and remove)") { repo.popStash(stash) }
+                            Divider()
+                            Button("Create branch from stash…") {
+                                repo.promptText = ""
+                                repo.branchPrompt = .branchFromStash(stash)
+                            }
                             Divider()
                             Button("Drop…", role: .destructive) { repo.stashToDrop = stash }
                         }
@@ -169,6 +209,24 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        // Right-click on empty sidebar space: the actions that belong to
+        // the repo rather than to any one row.
+        .contextMenu {
+            Button("Create Branch at HEAD…") { repo.promptNewBranch() }
+            Button("Add Remote…") { repo.promptAddRemote() }
+            // The whole repo caught up at once — the multi-branch version
+            // of the gap pull leaves behind.
+            let behind = repo.fastForwardableBranches
+            if !behind.isEmpty {
+                Divider()
+                Button("Fast-forward \(behind.count) Behind Branch\(behind.count == 1 ? "" : "es")") {
+                    repo.fastForwardAll()
+                }
+            }
+            Divider()
+            Button("Open Repository…") { appState.openRepoPanel() }
+            Button("Refresh") { Task { await repo.refresh() } }
+        }
         .alert(
             repo.branchPrompt?.title ?? "",
             isPresented: Binding(
@@ -179,25 +237,35 @@ struct SidebarView: View {
             TextField(repo.branchPrompt?.fieldLabel ?? "Name", text: $repo.promptText)
             Button(repo.branchPrompt?.confirmLabel ?? "OK") { repo.confirmPrompt() }
             Button("Cancel", role: .cancel) {}
+        } message: {
+            if let note = repo.branchPrompt?.note { Text(note) }
         }
         .sheet(isPresented: $repo.showAddRemote) {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Add Remote")
+                Text(repo.editingRemote == nil ? "Add Remote" : "Edit \(repo.editingRemote ?? "")")
                     .font(.headline)
                 TextField("Name (e.g. origin)", text: $repo.newRemoteName)
+                    // Renaming a remote is a different operation with
+                    // different consequences; this sheet only sets URLs.
+                    .disabled(repo.editingRemote != nil)
                 TextField("URL (https://… or git@…)", text: $repo.newRemoteURL)
                     .frame(minWidth: 320)
                 HStack {
                     Spacer()
-                    Button("Cancel") { repo.showAddRemote = false }
-                        .keyboardShortcut(.escape, modifiers: [])
-                    Button("Add & Fetch") { repo.confirmAddRemote() }
-                        .buttonStyle(.borderedProminent)
-                        .keyboardShortcut(.return, modifiers: [])
-                        .disabled(
-                            repo.newRemoteName.trimmingCharacters(in: .whitespaces).isEmpty
-                                || repo.newRemoteURL.trimmingCharacters(in: .whitespaces).isEmpty
-                        )
+                    Button("Cancel") {
+                        repo.showAddRemote = false
+                        repo.editingRemote = nil
+                    }
+                    .keyboardShortcut(.escape, modifiers: [])
+                    Button(repo.editingRemote == nil ? "Add & Fetch" : "Save & Fetch") {
+                        repo.confirmAddRemote()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.return, modifiers: [])
+                    .disabled(
+                        repo.newRemoteName.trimmingCharacters(in: .whitespaces).isEmpty
+                            || repo.newRemoteURL.trimmingCharacters(in: .whitespaces).isEmpty
+                    )
                 }
             }
             .padding(20)
@@ -260,18 +328,27 @@ struct SidebarView: View {
             Button("Delete", role: .destructive) { repo.confirmDelete() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            if case .remote(let remote) = repo.branchToDelete?.kind {
-                Text("This deletes the branch on the \"\(remote)\" remote. Others using it will lose it.")
-            } else {
-                Text("The branch will be force-deleted, including unmerged commits.")
-            }
+            Text(deleteMessage)
         }
     }
 
     private var deleteTitle: String {
-        guard let branch = repo.branchToDelete else { return "" }
-        if case .remote = branch.kind { return "Delete \(branch.name) on remote?" }
-        return "Delete \(branch.name)?"
+        guard let pending = repo.branchToDelete else { return "" }
+        if case .remote = pending.branch.kind { return "Delete \(pending.branch.name) on remote?" }
+        if pending.includeRemote { return "Delete \(pending.branch.name) everywhere?" }
+        return "Delete \(pending.branch.name)?"
+    }
+
+    private var deleteMessage: String {
+        guard let pending = repo.branchToDelete else { return "" }
+        if case .remote(let remote) = pending.branch.kind {
+            return "This deletes the branch on the \"\(remote)\" remote. Others using it will lose it."
+        }
+        if pending.includeRemote {
+            return "Deletes the local branch and \(repo.remote(for: pending.branch))/"
+                + "\(pending.branch.name) on the remote. Others using it will lose it."
+        }
+        return "The branch will be force-deleted, including unmerged commits."
     }
 }
 
@@ -280,6 +357,7 @@ struct SidebarView: View {
 struct SectionHeader: View {
     let title: String
     let count: Int
+    var actionIcon = "plus"
     var actionHelp: String?
     var action: (() -> Void)?
     @State private var hovering = false
@@ -297,7 +375,7 @@ struct SectionHeader: View {
                     .opacity(action != nil && hovering ? 0 : 1)
                 if let action {
                     Button(action: action) {
-                        Image(systemName: "plus")
+                        Image(systemName: actionIcon)
                             .font(.system(size: 11, weight: .semibold))
                             .frame(width: 22, height: 22)
                             .contentShape(Rectangle())
@@ -367,6 +445,8 @@ struct FolderDisclosure: View {
             .contextMenu {
                 if isRemoteRoot {
                     Button("Fetch \(node.name) only") { repo.fetchRemoteOnly(node.name) }
+                    Button("Edit URL…") { repo.promptEditRemote(node.name) }
+                    Button("Rename Remote…") { repo.promptRenameRemote(node.name) }
                     Button("Copy URL") { repo.copyRemoteURL(node.name) }
                     Divider()
                     Button("Remove Remote…", role: .destructive) {
@@ -383,10 +463,103 @@ struct FolderDisclosure: View {
     }
 }
 
+/// One open PR/MR. Everything it can do is a `gh`/`glab` subcommand —
+/// no API client, no token of our own.
+struct PullRequestRow: View {
+    let pr: PullRequest
+    let forge: Forge
+    @ObservedObject var repo: RepoState
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "arrow.triangle.pull")
+                .font(.system(size: 11))
+                .foregroundStyle(pr.isDraft ? Color.secondary : .green)
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 4) {
+                    Text(forge.label(pr.number))
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                    Text(pr.title)
+                        .font(.system(size: 12))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                Text(pr.author.isEmpty ? pr.branch : "\(pr.branch) · \(pr.author)")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer(minLength: 0)
+            if pr.isDraft {
+                Text("draft")
+                    .font(.system(size: 9, weight: .medium))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.secondary.opacity(0.18)))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .opacity(pr.isDraft ? 0.75 : 1)
+        .contentShape(Rectangle())
+        .help("\(forge.label(pr.number)) \(pr.title)\n\(pr.branch)")
+        .contextMenu {
+            Button("Checkout \(forge.label(pr.number))") { repo.checkoutPullRequest(pr) }
+            Button("Open in Browser") { repo.openPullRequestInBrowser(pr) }
+            Divider()
+            Button("Copy URL") { RepoState.copyToPasteboard(pr.url) }
+            Button("Copy branch name") { RepoState.copyToPasteboard(pr.branch) }
+            Divider()
+            Button("Refresh") { repo.refreshPullRequests() }
+        }
+        .onTapGesture(count: 2) { repo.checkoutPullRequest(pr) }
+        // Single click locates the PR's branch tip, like clicking a branch.
+        .onTapGesture {
+            if let tip = remoteTip { repo.locate(tip) }
+        }
+    }
+
+    /// The remote-tracking branch this PR was opened from, when we've fetched it.
+    private var remoteTip: String? {
+        repo.snapshot.remoteBranches
+            .first { $0.shortName == pr.branch }?
+            .tipHash
+    }
+}
+
+/// Accepts branch and commit drags on a local branch row/badge, and turns
+/// the drop into a `DropIntent` for the confirmation menu. Shared by the
+/// sidebar rows and the graph's ref badges so both behave identically.
+struct BranchDropTarget: ViewModifier {
+    let branch: Branch
+    @ObservedObject var repo: RepoState
+    @Binding var targeted: Bool
+
+    func body(content: Content) -> some View {
+        if case .local = branch.kind {
+            content
+                .dropDestination(for: DraggedBranch.self) { items, _ in
+                    guard let source = items.first?.name, source != branch.name else { return false }
+                    repo.dropIntent = .branchOnBranch(source: source, target: branch.name)
+                    return true
+                } isTargeted: { targeted = $0 }
+                .dropDestination(for: DraggedCommit.self) { items, _ in
+                    guard let commit = items.first else { return false }
+                    repo.dropIntent = .commitOnBranch(commit: commit, target: branch.name)
+                    return true
+                } isTargeted: { targeted = $0 }
+        } else {
+            content
+        }
+    }
+}
+
 struct BranchRow: View {
     let branch: Branch
     var label: String?
     @ObservedObject var repo: RepoState
+    @State private var targeted = false
 
     var body: some View {
         HStack(spacing: 6) {
@@ -428,6 +601,9 @@ struct BranchRow: View {
             }
         }
         .contentShape(Rectangle())
+        // No animation on the highlight: during a drag the pointer is
+        // moving fast and a fade reads as lag, not polish.
+        .background(targeted ? Color.accentColor.opacity(0.15) : .clear)
         .contextMenu { menuItems }
         .onTapGesture(count: 2) {
             if !branch.isCurrent { repo.checkout(branch) }
@@ -436,6 +612,10 @@ struct BranchRow: View {
         .onTapGesture { repo.locate(branch.tipHash) }
         .help(branch.isCurrent ? "Current branch — click to locate" : "Click to locate, double-click to checkout")
         .opacity(repo.hiddenRefs.contains(branch.refPath) ? 0.45 : 1)
+        .draggable(DraggedBranch(name: branch.name))
+        // Only local branches take drops: both actions run against HEAD,
+        // and you can't check out a remote-tracking ref.
+        .modifier(BranchDropTarget(branch: branch, repo: repo, targeted: $targeted))
     }
 
     /// GitKraken-style menus: three variants — current branch,
@@ -446,13 +626,22 @@ struct BranchRow: View {
 
         if branch.isCurrent {
             Button("Pull (fast-forward if possible)") { repo.pull() }
-            Button("Push") { repo.push() }
-            Button("Set Upstream to \(repo.snapshot.defaultRemote)/\(branch.name)") { repo.setUpstream(branch) }
+            pushMenu
+            fastForwardItem
+            upstreamMenu
+            if let forge = repo.forge {
+                Divider()
+                Button("Create \(forge.itemNoun)…") { repo.createPullRequest(from: branch) }
+            }
             Divider()
             Button("Create branch here…") { promptCreate() }
             Button("Rename…") { promptRename() }
         } else {
             Button("Checkout \(branch.shortName)") { repo.checkout(branch) }
+            if case .local = branch.kind {
+                fastForwardItem
+                pushMenu
+            }
             Divider()
             Button("Merge \(branch.name) into \(current)") { repo.merge(branch) }
             Button("Rebase \(current) onto \(branch.name)") { repo.rebaseOnto(branch) }
@@ -460,15 +649,32 @@ struct BranchRow: View {
             Button("Create branch here…") { promptCreate() }
             if case .local = branch.kind {
                 Button("Rename…") { promptRename() }
+                upstreamMenu
+                if let forge = repo.forge {
+                    Button("Create \(forge.itemNoun) from \(branch.name)…") {
+                        repo.createPullRequest(from: branch)
+                    }
+                }
             }
             if case .remote = branch.kind {
                 Button("Create worktree from \(branch.shortName)…") { repo.addWorktree(for: branch) }
             }
             Divider()
             if case .remote = branch.kind {
-                Button("Delete on remote…", role: .destructive) { repo.branchToDelete = branch }
+                Button("Delete on remote…", role: .destructive) {
+                    repo.branchToDelete = PendingBranchDelete(branch: branch)
+                }
             } else {
-                Button("Delete…", role: .destructive) { repo.branchToDelete = branch }
+                Button("Delete…", role: .destructive) {
+                    repo.branchToDelete = PendingBranchDelete(branch: branch)
+                }
+                // Only offered when there is in fact a remote branch left
+                // to delete — a "gone" upstream has nothing on the far end.
+                if branch.upstream != nil, !branch.upstreamGone {
+                    Button("Delete local and remote…", role: .destructive) {
+                        repo.branchToDelete = PendingBranchDelete(branch: branch, includeRemote: true)
+                    }
+                }
             }
         }
         Divider()
@@ -478,6 +684,66 @@ struct BranchRow: View {
         }
         Divider()
         Button("Copy branch name") { RepoState.copyToPasteboard(branch.name) }
+    }
+
+    /// The gap `git pull` leaves: pull only ever advances HEAD, so a branch
+    /// you aren't standing on stays behind however often you pull. Offered
+    /// only when it's purely behind, and git refuses anything that isn't a
+    /// true fast-forward anyway.
+    @ViewBuilder
+    private var fastForwardItem: some View {
+        if branch.behind > 0, branch.ahead == 0, let upstream = branch.upstream,
+           !branch.upstreamGone {
+            Button("Fast-forward to \(upstream) (↓\(branch.behind))") {
+                repo.fastForward(branch)
+            }
+        }
+    }
+
+    /// One remote: a plain Push. Several: pick, because "git push" with no
+    /// upstream and two remotes has no correct default.
+    @ViewBuilder
+    private var pushMenu: some View {
+        let remotes = repo.snapshot.remoteNames
+        if branch.upstream != nil, remotes.count <= 1 {
+            Button("Push") { repo.push() }
+        } else if remotes.isEmpty {
+            Button("Push") { repo.push() }
+        } else {
+            Menu("Push to") {
+                ForEach(remotes, id: \.self) { remote in
+                    Button(branch.upstream == nil
+                        ? "\(remote) (set upstream)"
+                        : remote) {
+                        repo.push(branch, to: remote)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every remote-tracking branch is a legal upstream, so list them all
+    /// rather than assuming <defaultRemote>/<same name>. Same-named ones
+    /// sort first because that's the answer nine times out of ten.
+    @ViewBuilder
+    private var upstreamMenu: some View {
+        Menu("Set Upstream") {
+            ForEach(repo.upstreamChoices(for: branch)) { remoteBranch in
+                Button {
+                    repo.setUpstream(branch, to: remoteBranch.name)
+                } label: {
+                    if branch.upstream == remoteBranch.name {
+                        Label(remoteBranch.name, systemImage: "checkmark")
+                    } else {
+                        Text(remoteBranch.name)
+                    }
+                }
+            }
+            if branch.upstream != nil {
+                Divider()
+                Button("Unset upstream") { repo.unsetUpstream(branch) }
+            }
+        }
     }
 
     private func promptCreate() {
