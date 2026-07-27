@@ -59,12 +59,16 @@ struct RightClickCatcher: NSViewRepresentable {
 struct ContextMenuTarget: ViewModifier {
     let id: String
     @ObservedObject var repo: RepoState
+    /// Matches the shape the row already draws for hover and selection.
+    /// Square (0) for the edge-to-edge graph rows; rounded in the sidebar,
+    /// where a square mark behind a rounded hover fill shows its corners.
+    var corner: CGFloat = 0
 
     func body(content: Content) -> some View {
         content
             .background(RightClickCatcher { repo.contextTarget = id })
             .background(
-                Rectangle()
+                RoundedRectangle(cornerRadius: corner)
                     .fill(Color.primary.opacity(repo.contextTarget == id ? 0.12 : 0))
             )
     }
@@ -72,7 +76,7 @@ struct ContextMenuTarget: ViewModifier {
 
 extension View {
     /// Highlight this row while its context menu is open.
-    func contextTarget(_ id: String, _ repo: RepoState) -> some View {
-        modifier(ContextMenuTarget(id: id, repo: repo))
+    func contextTarget(_ id: String, _ repo: RepoState, corner: CGFloat = 0) -> some View {
+        modifier(ContextMenuTarget(id: id, repo: repo, corner: corner))
     }
 }

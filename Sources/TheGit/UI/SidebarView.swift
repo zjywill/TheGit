@@ -21,11 +21,13 @@ struct SidebarView: View {
             // exceptions (reentrant-delegate asserts, fatal under zoom changes).
             // Same reasoning as the graph column.
             ScrollView {
-                // spacing 0: every row carries its own height (SidebarMetrics.row),
-                // so the vertical rhythm is a property of the rows rather than of
-                // the gaps between them — which is what lets one-line and two-line
-                // rows sit on the same grid.
-                LazyVStack(alignment: .leading, spacing: 0) {
+                // Every row carries its own height (SidebarMetrics.row), so the
+                // vertical rhythm is a property of the rows rather than of the
+                // gaps between them — which is what lets one-line and two-line
+                // rows sit on the same grid. The 2pt gap is only so that two
+                // filled rows (hovered, selected) read as two rows and not as
+                // one taller block; the section paddings give it back.
+                LazyVStack(alignment: .leading, spacing: SidebarMetrics.rowGap) {
                     localSection
                     remoteSection
                     forgeSection
@@ -35,7 +37,7 @@ struct SidebarView: View {
                     lfsSection
                     submoduleSection
                     if filtering, !hasAnyMatch {
-                        SidebarRow(icon: "magnifyingglass") {
+                        SidebarRow(icon: "magnifyingglass", hoverable: false) {
                             Text("No matches for “\(query)”")
                                 .zoomFont(11)
                                 .foregroundStyle(.tertiary)
@@ -454,7 +456,7 @@ struct SidebarView: View {
                         .help(error.detail + "\n\nClick to try again.")
                         .onTapGesture { repo.refreshPullRequests() }
                     } else if repo.pullRequests.isEmpty {
-                        SidebarRow(icon: nil) {
+                        SidebarRow(icon: nil, hoverable: false) {
                             Text(repo.loadingPullRequests ? "Loading…" : "No open \(forge.itemNoun.lowercased())s")
                                 .zoomFont(11)
                                 .foregroundStyle(.tertiary)
@@ -475,7 +477,7 @@ struct SidebarView: View {
             SectionHeader(title: "Worktrees", count: worktrees.count)
             ForEach(worktrees) { wt in
                 SidebarRow(icon: "folder") {
-                    VStack(alignment: .leading, spacing: 1) {
+                    VStack(alignment: .leading, spacing: SidebarMetrics.lineGap) {
                         Text(wt.displayName)
                             .zoomFont(12)
                             .lineLimit(1)
@@ -488,7 +490,7 @@ struct SidebarView: View {
                     }
                 }
                 .help(wt.path)
-                .contextTarget("wt:" + wt.path, repo)
+                .contextTarget("wt:" + wt.path, repo, corner: SidebarMetrics.corner)
                 .contextMenu {
                     Button("Open as Tab") { appState.open(path: wt.path) }
                     Button("Show in Finder") {
@@ -521,7 +523,7 @@ struct SidebarView: View {
                 }
                 .onTapGesture { repo.locate(tag.hash) }
                 .help("\(tag.name) @ \(String(tag.hash.prefix(7))) — click to locate")
-                .contextTarget("tag:" + tag.name, repo)
+                .contextTarget("tag:" + tag.name, repo, corner: SidebarMetrics.corner)
                 .contextMenu {
                     Button("Checkout \(tag.name) (detached)") { repo.checkoutTag(tag) }
                     Divider()
@@ -548,8 +550,9 @@ struct SidebarView: View {
         if !stashes.isEmpty {
             SectionHeader(title: "Stashes", count: stashes.count)
             ForEach(stashes) { stash in
-                SidebarRow(icon: "tray.full") {
-                    VStack(alignment: .leading, spacing: 1) {
+                // `selected` lights up when the stash's graph node is clicked.
+                SidebarRow(icon: "tray.full", selected: repo.selectedStashRef == stash.ref) {
+                    VStack(alignment: .leading, spacing: SidebarMetrics.lineGap) {
                         Text(stash.message)
                             .zoomFont(12)
                             .lineLimit(1)
@@ -560,14 +563,8 @@ struct SidebarView: View {
                             .lineLimit(1)
                     }
                 }
-                // Lights up when the stash's graph node is clicked.
-                .background(
-                    repo.selectedStashRef == stash.ref
-                        ? Color.accentColor.opacity(0.15)
-                        : .clear
-                )
                 .help(stash.message)
-                .contextTarget("stash:" + stash.ref, repo)
+                .contextTarget("stash:" + stash.ref, repo, corner: SidebarMetrics.corner)
                 .contextMenu {
                     Button("Apply (keep stash)") { repo.applyStash(stash) }
                     Button("Pop (apply and remove)") { repo.popStash(stash) }
@@ -627,7 +624,7 @@ struct SidebarView: View {
                             .truncationMode(.middle)
                     }
                     .help("\(pattern) — tracked by Git LFS (.gitattributes)")
-                    .contextTarget("lfs:" + pattern, repo)
+                    .contextTarget("lfs:" + pattern, repo, corner: SidebarMetrics.corner)
                     .contextMenu {
                         Button("Copy pattern") { RepoState.copyToPasteboard(pattern) }
                         Button("Download LFS objects") { repo.pullLFSObjects() }
@@ -691,7 +688,7 @@ struct SubmoduleRow: View {
             icon: "shippingbox",
             iconColor: sub.state == " " ? Color.secondary : .orange
         ) {
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: SidebarMetrics.lineGap) {
                 Text(sub.displayName)
                     .zoomFont(12)
                     .lineLimit(1)
@@ -704,7 +701,7 @@ struct SubmoduleRow: View {
             }
         }
         .help("\(sub.path) @ \(String(sub.sha.prefix(7))) — \(sub.stateDescription)")
-        .contextTarget("sub:" + sub.path, repo)
+        .contextTarget("sub:" + sub.path, repo, corner: SidebarMetrics.corner)
         .contextMenu {
             Button("Open as Tab") { appState.open(path: fullPath) }
                 .disabled(!initialized)
@@ -848,8 +845,27 @@ struct SectionHeader: View {
 enum SidebarMetrics {
     /// One row's height. One-line rows are exactly this tall; two-line
     /// rows (worktrees, stashes, PRs) grow past it but keep the same
-    /// leading columns.
-    static let row: CGFloat = 22
+    /// leading columns. 24 is the macOS list row and what the commit
+    /// panel's file rows already use — and every one of these rows is a
+    /// click target (locate, expand, select), not just a line of text.
+    static let row: CGFloat = 24
+    /// Air above and below a row's content. It changes nothing on a
+    /// one-line row (15pt of text + 6 still fits inside `row`); it exists
+    /// for the two-line rows, where title and subtitle used to run flush
+    /// into the next row's title and the eye had no way to tell which
+    /// pair of lines belonged together.
+    static let rowPad: CGFloat = 3
+    /// Between the two lines of a two-line row. 1pt read as a typo rather
+    /// than as a gap: the 10pt subtitle needs to sit *under* its title,
+    /// not touch it.
+    static let lineGap: CGFloat = 2
+    /// Row highlight corner. Same radius as the HEAD chip and the filter
+    /// field above the list, which are the same width — three surfaces on
+    /// one column want one corner.
+    static let corner: CGFloat = 6
+    /// Between rows. Enough that two highlighted rows read as two rows;
+    /// taken back out of the section paddings so the rhythm is unchanged.
+    static let rowGap: CGFloat = 2
     /// Disclosure-chevron column, at the TRAILING edge. Kept off the
     /// leading edge on purpose: only folders have a chevron, so a leading
     /// gutter would be dead space on every branch, PR, tag and stash row
@@ -871,7 +887,9 @@ enum SidebarMetrics {
     static let indent: CGFloat = icon + gap
     static let trailing: CGFloat = 10
     /// Above a section header: the gap that says "a new group starts here".
-    static let sectionGap: CGFloat = 18
+    /// The stack's own `rowGap` is subtracted, so the space on screen is
+    /// still 18.
+    static let sectionGap: CGFloat = 16
     /// Below a section header, before its own first row. Deliberately much
     /// smaller than `sectionGap` — proximity is the only thing telling the
     /// eye which rows the header owns, so the two values have to stay far
@@ -879,12 +897,15 @@ enum SidebarMetrics {
     /// and the first row were both 22pt boxes sitting flush, and the only
     /// air under the label was whatever the hidden + button's 22pt hit
     /// target happened to leave, which is a byproduct rather than a choice.
-    static let headerGap: CGFloat = 5
+    /// Like `sectionGap`, stated net of `rowGap`.
+    static let headerGap: CGFloat = 3
 }
 
 /// Every row in the sidebar: `[icon][content][chevron]`, fixed columns.
 /// Going through one primitive is what makes alignment a structural
-/// property instead of something each section has to remember.
+/// property instead of something each section has to remember — and now
+/// the same for the row's fill: hover and selection are one stack in one
+/// place, so no two lists can disagree about what a live row looks like.
 struct SidebarRow<Content: View>: View {
     @Environment(\.uiZoom) private var zoom
     var depth = 0
@@ -894,7 +915,18 @@ struct SidebarRow<Content: View>: View {
     /// are text only ("No open pull requests") but still have to line up.
     var icon: String?
     var iconColor: Color = .secondary
+    /// Row the rest of the UI is currently pointing at — the stash whose
+    /// commit is showing, the branch a drag is over. Beats hover, because
+    /// it's a fact about the app and hover is only about the pointer.
+    var selected = false
+    /// Off for the rows that say something instead of doing something
+    /// ("No matches", "Loading…"). A highlight on those promises a click
+    /// that leads nowhere, which is worse than no feedback at all.
+    var hoverable = true
     @ViewBuilder var content: () -> Content
+
+    @State private var hovering = false
+    @State private var pressed = false
 
     var body: some View {
         // firstTextBaseline, not center: on a two-line row the icon
@@ -922,11 +954,54 @@ struct SidebarRow<Content: View>: View {
         }
         .padding(.leading, CGFloat(depth) * SidebarMetrics.indent * zoom)
         .padding(.trailing, SidebarMetrics.trailing * zoom)
+        .padding(.vertical, SidebarMetrics.rowPad * zoom)
         .frame(maxWidth: .infinity, minHeight: SidebarMetrics.row * zoom, alignment: .leading)
+        // Behind the padding, not inside it: the highlight is the row, so
+        // it runs the full width of the list — including under an indented
+        // child, the way every macOS source list draws it.
+        .background(
+            RoundedRectangle(cornerRadius: SidebarMetrics.corner * zoom)
+                .fill(fill)
+        )
+        .background {
+            if hoverable { PressCatcher { pressed = $0 } }
+        }
         // Full width, so the empty space to the right of a short branch
         // name is as clickable as the name itself — it wasn't on half the
         // rows before, which made the list feel arbitrary.
         .contentShape(Rectangle())
+        .onHover {
+            if hoverable { hovering = $0 }
+            // The mouse-up that would clear the press can land outside this
+            // window, and then it never reaches the monitor. Leaving the row
+            // is the backstop.
+            if !$0 { pressed = false }
+        }
+        // Asymmetric on purpose. Arriving is the answer to the pointer and
+        // has to be immediate — a fade there is latency you can see, and
+        // this list is crossed dozens of times a day. Leaving is the app
+        // talking to itself, so it fades: sweeping down twenty branches
+        // would otherwise be twenty hard flashes.
+        .animation(hovering ? nil : .easeOut(duration: 0.12), value: hovering)
+        // Same asymmetry, and here it's the whole point: the press cue has
+        // to be on screen before the click is finished, or it isn't feedback
+        // — it's a report. The release can afford the 120ms.
+        .animation(pressed ? nil : .easeOut(duration: 0.12), value: pressed)
+    }
+
+    /// Three states on one channel, deepest first. Selection beats hover —
+    /// while a stash is open, the pointer passing over it must not make it
+    /// look *less* selected — and a press deepens whichever it lands on.
+    ///
+    /// Colour only: `rowPressEffect` shrinks the HEAD chip by 1.5%, which on
+    /// a 400pt row is 6pt of text sliding under a stationary pointer, in a
+    /// list where the next row is 26pt away. A wide target dims, it doesn't
+    /// move — the same reasoning that sized that style in the first place,
+    /// taken one step further.
+    private var fill: Color {
+        if selected { return Color.accentColor.opacity(pressed ? 0.24 : 0.15) }
+        if pressed { return Color.primary.opacity(0.12) }
+        return hovering ? Color.primary.opacity(0.06) : .clear
     }
 }
 
@@ -982,7 +1057,7 @@ struct FolderRow: View {
             guard !forceExpanded else { return }
             withAnimation(.easeOut(duration: 0.15)) { repo.toggleExpanded(node.id) }
         }
-        .contextTarget("node:" + node.id, repo)
+        .contextTarget("node:" + node.id, repo, corner: SidebarMetrics.corner)
         .contextMenu {
             if isRemoteRoot {
                 Button("Fetch \(node.name) only") { repo.fetchRemoteOnly(node.name) }
@@ -1021,7 +1096,7 @@ struct PullRequestRow: View {
             iconColor: pr.isDraft ? Color.secondary : .green
         ) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                VStack(alignment: .leading, spacing: 1) {
+                VStack(alignment: .leading, spacing: SidebarMetrics.lineGap) {
                     HStack(spacing: 4) {
                         Text(forge.label(pr.number))
                             .zoomFont(10, weight: .semibold, design: .monospaced)
@@ -1050,7 +1125,7 @@ struct PullRequestRow: View {
         }
         .opacity(pr.isDraft ? 0.75 : 1)
         .help("\(forge.label(pr.number)) \(pr.title)\n\(pr.branch)\n\nDouble-click to open in the browser.")
-        .contextTarget("pr:\(pr.number)", repo)
+        .contextTarget("pr:\(pr.number)", repo, corner: SidebarMetrics.corner)
         .contextMenu {
             Button("Open in Browser") { repo.openPullRequestInBrowser(pr) }
             Button("Checkout \(forge.label(pr.number))") { repo.checkoutPullRequest(pr) }
@@ -1121,7 +1196,11 @@ struct BranchRow: View {
         SidebarRow(
             depth: depth,
             icon: "arrow.triangle.branch",
-            iconColor: branch.isCurrent ? Color.accentColor : .secondary
+            iconColor: branch.isCurrent ? Color.accentColor : .secondary,
+            // No animation on the drop highlight: it rides the row's fill,
+            // and that fill only animates on hover changes — during a drag
+            // the pointer is moving fast and a fade reads as lag.
+            selected: targeted
         ) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(label ?? branch.name)
@@ -1160,10 +1239,7 @@ struct BranchRow: View {
                 }
             }
         }
-        // No animation on the highlight: during a drag the pointer is
-        // moving fast and a fade reads as lag, not polish.
-        .background(targeted ? Color.accentColor.opacity(0.15) : .clear)
-        .contextTarget("branch:" + branch.name, repo)
+        .contextTarget("branch:" + branch.name, repo, corner: SidebarMetrics.corner)
         .contextMenu { menuItems }
         .onTapGesture(count: 2) {
             if !branch.isCurrent { repo.checkout(branch) }

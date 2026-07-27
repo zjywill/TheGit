@@ -1076,6 +1076,13 @@ final class RepoState: ObservableObject, Identifiable {
         await loadPullRequests()
     }
 
+    /// Deliberately not animated. Fading the arriving rows in was tried and
+    /// reverted: thirty rows appearing is a ~500pt layout change, and inside
+    /// an animated transaction every section below (worktrees, tags, stashes)
+    /// slides that whole distance and cross-fades through the PR list on the
+    /// way. For the length of the animation the sidebar shows two overlapping
+    /// versions of itself, which is a worse jolt than the pop it was meant to
+    /// soften. The pop is one frame; the reflow was visible.
     func loadPullRequests() async {
         guard let forge else { return }
         loadingPullRequests = true

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// System font whose size multiplies by the UI zoom factor. Every fixed
@@ -47,6 +48,75 @@ extension ButtonStyle where Self == PressEffectButtonStyle {
     /// answering, so a wide target moves far less and dims instead.
     static var rowPressEffect: PressEffectButtonStyle {
         PressEffectButtonStyle(scale: 0.985, pressedOpacity: 0.85)
+    }
+}
+
+/// Reports whether the left button is down inside a view's bounds, without
+/// touching the event.
+///
+/// A list row can't be a Button: it carries a single click, a double click,
+/// a drag source, a drop target and a context menu, and a Button swallows
+/// most of that. A gesture can't do it either — the zero-distance
+/// DragGesture that would report the press is exactly the recogniser
+/// `.draggable` needs, and the two fight over it. So: the same trick as
+/// `RightClickCatcher`, watch the events and consume nothing. Nothing that
+/// already works on a row can break, because nothing is intercepted.
+struct PressCatcher: NSViewRepresentable {
+    let onPress: (Bool) -> Void
+
+    final class Coordinator {
+        var onPress: ((Bool) -> Void)?
+        weak var view: NSView?
+        var monitor: Any?
+        private var pressed = false
+
+        func install() {
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(
+                matching: [.leftMouseDown, .leftMouseUp, .leftMouseDragged]
+            ) { [weak self] event in
+                guard let self, let view = self.view, let window = view.window,
+                      event.window === window
+                else { return event }
+                if event.type == .leftMouseDown {
+                    let point = view.convert(event.locationInWindow, from: nil)
+                    if view.bounds.contains(point) { self.set(true) }
+                } else {
+                    // Release on the mouse-up — and on the first drag too: a
+                    // drag that becomes a real drag session never delivers its
+                    // mouse-up here, and a row that stays lit after the pointer
+                    // has left with a branch in hand is worse than no cue.
+                    self.set(false)
+                }
+                return event // never consumed
+            }
+        }
+
+        func set(_ value: Bool) {
+            guard pressed != value else { return }
+            pressed = value
+            onPress?(value)
+        }
+
+        deinit {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        context.coordinator.view = view
+        context.coordinator.onPress = onPress
+        context.coordinator.install()
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        context.coordinator.view = view
+        context.coordinator.onPress = onPress
+        context.coordinator.install()
     }
 }
 
