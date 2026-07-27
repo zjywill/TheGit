@@ -222,6 +222,82 @@ actor GitClient {
         try await run(["submodule", "update", "--init", "--recursive"])
     }
 
+    /// Clones the repo into `path` and records it in `.gitmodules`. Both
+    /// are left staged, the way git leaves them.
+    func addSubmodule(url: String, path: String) async throws {
+        try await run(["submodule", "add", "--", url, path])
+    }
+
+    /// `deinit` unregisters it and empties the working copy; `git rm` drops
+    /// the gitlink and its `.gitmodules` section (staged, not committed).
+    ///
+    /// The submodule's own clone under `.git/modules` is what `purgeGitDir`
+    /// decides about. git keeps it deliberately — it holds anything
+    /// committed inside the submodule but never pushed — but while it is
+    /// there, adding a submodule at the same path again fails with
+    /// "a git directory is found locally", with no way out from the GUI.
+    func removeSubmodule(_ path: String, purgeGitDir: Bool = false) async throws {
+        // Resolve the clone before deinit empties the working copy.
+        var moduleDir: String?
+        if purgeGitDir {
+            moduleDir = (try? await run(["-C", path, "rev-parse", "--absolute-git-dir"]))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        try await run(["submodule", "deinit", "-f", "--", path])
+        try await run(["rm", "-f", "--", path])
+        try await dropEmptyGitmodules()
+        guard purgeGitDir else { return }
+        // Both sides go through resolvingSymlinksInPath: git answers with
+        // the real path, and a repo under /var or /tmp on macOS is a
+        // symlink into /private, so the guard below would never match.
+        let modulesRoot = resolved(absolute(try await run(["rev-parse", "--git-common-dir"])) + "/modules")
+        // An uninitialized submodule has no working copy to ask, but a
+        // clone left by an earlier `deinit` can still be sitting there.
+        // git names it after the path unless it was added with --name,
+        // which we never do.
+        let dir = resolved(moduleDir ?? (modulesRoot + "/" + path))
+        // Never delete outside .git/modules, whatever git handed back.
+        guard dir.hasPrefix(modulesRoot + "/") else { return }
+        try? FileManager.default.removeItem(atPath: dir)
+    }
+
+    /// A `.gitmodules` with no sections left is pure noise — but deleting
+    /// it is only safe while HEAD has no copy of it: with one in HEAD and
+    /// none in the working tree, git refuses every later `submodule add`
+    /// until the removal is committed.
+    private func dropEmptyGitmodules() async throws {
+        let file = repoPath + "/.gitmodules"
+        guard let text = try? String(contentsOfFile: file, encoding: .utf8),
+              !text.contains("[submodule"),
+              (try? await run(["cat-file", "-e", "HEAD:.gitmodules"])) == nil
+        else { return }
+        try await run(["rm", "-f", "--ignore-unmatch", "--", ".gitmodules"])
+        // Never staged in the first place, so git rm matched nothing. Only
+        // ours to delete when git left it truly empty — a hand-written file
+        // with comments in it stays.
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            try? FileManager.default.removeItem(atPath: file)
+        }
+    }
+
+    /// git reports paths relative to the repo root unless they escape it.
+    private func absolute(_ path: String) -> String {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.hasPrefix("/") ? trimmed : repoPath + "/" + trimmed
+    }
+
+    private func resolved(_ path: String) -> String {
+        URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+    }
+
+    // MARK: - Ignore files
+
+    /// Absolute path of `.git/info/exclude`. Resolved through git because
+    /// `.git` is a file, not a directory, in worktrees and submodules.
+    func excludeFilePath() async throws -> String {
+        absolute(try await run(["rev-parse", "--git-path", "info/exclude"]))
+    }
+
     func merge(_ branch: String) async throws {
         try await run(["merge", "--no-edit", branch])
     }

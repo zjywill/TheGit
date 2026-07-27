@@ -180,39 +180,17 @@ struct SidebarView: View {
                     }
                 }
             }
-            if !repo.snapshot.submodules.isEmpty {
-                Group {
-                    SectionHeader(title: "Submodules", count: repo.snapshot.submodules.count)
-                        .padding(.top, 14)
-                    ForEach(repo.snapshot.submodules) { sub in
-                        HStack(spacing: 6) {
-                            Image(systemName: "shippingbox")
-                                .zoomFont(11)
-                                .foregroundStyle(sub.state == " " ? Color.secondary : .orange)
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(sub.displayName)
-                                    .zoomFont(12)
-                                    .lineLimit(1)
-                                if sub.state != " " {
-                                    Text(sub.stateDescription)
-                                        .zoomFont(10)
-                                        .foregroundStyle(.orange)
-                                        .lineLimit(1)
-                                }
-                            }
-                        }
-                        .help("\(sub.path) @ \(String(sub.sha.prefix(7))) — \(sub.stateDescription)")
-                        .contextTarget("sub:" + sub.path, repo)
-                        .contextMenu {
-                            Button("Open as Tab") {
-                                appState.open(path: repo.path + "/" + sub.path)
-                            }
-                            Button("Update (init, recursive)") { repo.updateSubmodules() }
-                        }
-                        .onTapGesture(count: 2) {
-                            appState.open(path: repo.path + "/" + sub.path)
-                        }
-                    }
+            // Always shown, empty or not: the + is the only way in to
+            // "Add Submodule…", and a repo with none is where you add one.
+            Group {
+                SectionHeader(
+                    title: "Submodules",
+                    count: repo.snapshot.submodules.count,
+                    actionHelp: "Add submodule"
+                ) { repo.promptAddSubmodule() }
+                .padding(.top, 14)
+                ForEach(repo.snapshot.submodules) { sub in
+                    SubmoduleRow(sub: sub, repo: repo)
                 }
             }
             }
@@ -224,6 +202,7 @@ struct SidebarView: View {
         .contextMenu {
             Button("Create Branch at HEAD…") { repo.promptNewBranch() }
             Button("Add Remote…") { repo.promptAddRemote() }
+            Button("Add Submodule…") { repo.promptAddSubmodule() }
             // The whole repo caught up at once — the multi-branch version
             // of the gap pull leaves behind.
             let behind = repo.fastForwardableBranches
@@ -279,6 +258,32 @@ struct SidebarView: View {
                 }
             }
             .padding(20)
+        }
+        .sheet(isPresented: $repo.showAddSubmodule) {
+            AddSubmoduleSheet(repo: repo)
+        }
+        .alert(
+            "Remove submodule \(repo.submoduleToRemove?.displayName ?? "")?",
+            isPresented: Binding(
+                get: { repo.submoduleToRemove != nil },
+                set: { if !$0 { repo.submoduleToRemove = nil } }
+            )
+        ) {
+            Button("Remove", role: .destructive) {
+                repo.confirmRemoveSubmodule(purgeLocalClone: false)
+            }
+            Button("Remove and Delete Local Clone", role: .destructive) {
+                repo.confirmRemoveSubmodule(purgeLocalClone: true)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "The folder and its .gitmodules entry are removed and staged for you to commit.\n\n"
+                    + "Remove keeps the submodule's own clone in .git/modules, so anything "
+                    + "committed inside it but never pushed survives — but no submodule can be "
+                    + "added at this path again until that clone is gone. "
+                    + "Delete Local Clone removes it too."
+            )
         }
         .alert(
             "Remove remote \(repo.remoteToRemove ?? "")?",
@@ -359,6 +364,99 @@ struct SidebarView: View {
                 + "\(pending.branch.name) on the remote. Others using it will lose it."
         }
         return "The branch will be force-deleted, including unmerged commits."
+    }
+}
+
+/// One submodule: a gitlink in this repo, and a whole repository of its
+/// own — double-click opens it in its own tab.
+struct SubmoduleRow: View {
+    let sub: Submodule
+    @ObservedObject var repo: RepoState
+    @EnvironmentObject var appState: AppState
+
+    /// "-" means the gitlink is registered but never checked out: the
+    /// folder is empty, so there is no repo to open yet.
+    private var initialized: Bool { sub.state != "-" }
+    private var fullPath: String { repo.path + "/" + sub.path }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "shippingbox")
+                .zoomFont(11)
+                .foregroundStyle(sub.state == " " ? Color.secondary : .orange)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(sub.displayName)
+                    .zoomFont(12)
+                    .lineLimit(1)
+                if sub.state != " " {
+                    Text(sub.stateDescription)
+                        .zoomFont(10)
+                        .foregroundStyle(.orange)
+                        .lineLimit(1)
+                }
+            }
+        }
+        .contentShape(Rectangle())
+        .help("\(sub.path) @ \(String(sub.sha.prefix(7))) — \(sub.stateDescription)")
+        .contextTarget("sub:" + sub.path, repo)
+        .contextMenu {
+            Button("Open as Tab") { appState.open(path: fullPath) }
+                .disabled(!initialized)
+            Button("Update (init, recursive)") { repo.updateSubmodules() }
+            Button("Show in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: fullPath)])
+            }
+            Button("Copy path") { RepoState.copyToPasteboard(fullPath) }
+            Divider()
+            Button("Remove Submodule…", role: .destructive) { repo.submoduleToRemove = sub }
+        }
+        // Checking it out is the only useful thing to do with an
+        // uninitialized submodule, so that's what the double-click does.
+        .onTapGesture(count: 2) {
+            if initialized {
+                appState.open(path: fullPath)
+            } else {
+                repo.updateSubmodules()
+            }
+        }
+    }
+}
+
+/// URL + path, the two arguments of `git submodule add`. The path field
+/// keeps up with the URL until the user types in it themselves.
+struct AddSubmoduleSheet: View {
+    @ObservedObject var repo: RepoState
+    @State private var pathEdited = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Add Submodule")
+                .font(.headline)
+            TextField("URL (https://… or git@…)", text: $repo.newSubmoduleURL)
+                .frame(minWidth: 360)
+                .onChange(of: repo.newSubmoduleURL) { _, url in
+                    if !pathEdited { repo.newSubmodulePath = RepoState.defaultSubmodulePath(for: url) }
+                }
+            TextField("Path in repo (e.g. vendor/lib)", text: Binding(
+                get: { repo.newSubmodulePath },
+                set: { repo.newSubmodulePath = $0; pathEdited = true }
+            ))
+            Text("Clones the repository into that path and records it in .gitmodules. Both are staged for you to commit.")
+                .zoomFont(11)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                Button("Cancel") { repo.showAddSubmodule = false }
+                    .keyboardShortcut(.escape, modifiers: [])
+                Button("Add") { repo.confirmAddSubmodule() }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.return, modifiers: [])
+                    .disabled(repo.newSubmoduleURL.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: 460)
     }
 }
 

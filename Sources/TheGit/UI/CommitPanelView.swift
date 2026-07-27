@@ -336,8 +336,6 @@ struct FileMenu: View {
     let file: FileChange
     @ObservedObject var repo: RepoState
 
-    private var ext: String { (file.fileName as NSString).pathExtension }
-
     var body: some View {
         if file.area == .staged {
             Button("Unstage") { repo.unstage(file) }
@@ -349,13 +347,18 @@ struct FileMenu: View {
                 Button("Discard changes…", role: .destructive) { repo.fileToDiscard = file }
             }
         }
-        Menu("Ignore") {
-            Button("Ignore \"\(file.fileName)\"") { repo.ignore(pattern: "/" + file.path) }
-            if !ext.isEmpty {
-                Button("Ignore all \"*.\(ext)\" files") { repo.ignore(pattern: "*.\(ext)") }
-            }
-            if !file.directory.isEmpty {
-                Button("Ignore everything in \"\(file.directory)\"") { repo.ignore(pattern: "/" + file.directory) }
+        // Untracked only: git ignores nothing that is already in the index,
+        // so offering it on a tracked file would be a menu item that does
+        // nothing. Those files need "Stop tracking" instead.
+        if file.status == "?" {
+            Menu("Ignore") {
+                IgnoreButtons(file: file, repo: repo, local: false)
+                Divider()
+                // .git/info/exclude — same effect, but private to this
+                // clone: nothing to commit, nothing pushed to the team.
+                Menu("Ignore for me only") {
+                    IgnoreButtons(file: file, repo: repo, local: true)
+                }
             }
         }
         Button("Stash file") { repo.stashFile(file) }
@@ -369,6 +372,32 @@ struct FileMenu: View {
         Button("Create patch from file changes…") { repo.savePatch(forFile: file) }
         Divider()
         Button("Delete file…", role: .destructive) { repo.fileToDelete = file }
+    }
+}
+
+/// The three ignore granularities — this file, this extension, this
+/// directory — shared by the shared and the local (`info/exclude`) menus.
+struct IgnoreButtons: View {
+    let file: FileChange
+    @ObservedObject var repo: RepoState
+    let local: Bool
+
+    private var ext: String { (file.fileName as NSString).pathExtension }
+
+    var body: some View {
+        Button("Ignore \"\(file.fileName)\"") {
+            repo.ignore(pattern: GitIgnore.filePattern(file.path), local: local)
+        }
+        if !ext.isEmpty {
+            Button("Ignore all \"*.\(ext)\" files") {
+                repo.ignore(pattern: GitIgnore.extensionPattern(ext), local: local)
+            }
+        }
+        if !file.directory.isEmpty {
+            Button("Ignore everything in \"\(file.directory)\"") {
+                repo.ignore(pattern: GitIgnore.directoryPattern(file.directory), local: local)
+            }
+        }
     }
 }
 

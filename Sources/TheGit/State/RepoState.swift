@@ -771,6 +771,49 @@ final class RepoState: ObservableObject, Identifiable {
         perform { try await $0.removeRemote(name) }
     }
 
+    // MARK: - Submodule management
+
+    @Published var showAddSubmodule = false
+    @Published var newSubmoduleURL = ""
+    @Published var newSubmodulePath = ""
+    @Published var submoduleToRemove: Submodule?
+
+    func promptAddSubmodule() {
+        newSubmoduleURL = ""
+        newSubmodulePath = ""
+        showAddSubmodule = true
+    }
+
+    /// The folder git itself would clone into: the URL's last component
+    /// minus `.git`. The sheet fills the path field with it while the user
+    /// types the URL, and stops as soon as they edit the path themselves.
+    static func defaultSubmodulePath(for url: String) -> String {
+        var name = url.trimmingCharacters(in: .whitespaces)
+        while name.hasSuffix("/") { name.removeLast() }
+        // scp-style "git@host:owner/repo.git" separates on ':' as well as '/'.
+        name = name.split(whereSeparator: { $0 == "/" || $0 == ":" }).last.map(String.init) ?? ""
+        if name.hasSuffix(".git") { name.removeLast(4) }
+        return name
+    }
+
+    func confirmAddSubmodule() {
+        let url = newSubmoduleURL.trimmingCharacters(in: .whitespaces)
+        var destination = newSubmodulePath.trimmingCharacters(in: .whitespaces)
+        if destination.isEmpty { destination = Self.defaultSubmodulePath(for: url) }
+        showAddSubmodule = false
+        guard !url.isEmpty, !destination.isEmpty else { return }
+        perform { try await $0.addSubmodule(url: url, path: destination) }
+    }
+
+    /// `purgeLocalClone` also deletes `.git/modules/<path>`: it drops any
+    /// commit made inside the submodule that was never pushed, and it is
+    /// the only way to later add a submodule at that same path again.
+    func confirmRemoveSubmodule(purgeLocalClone: Bool) {
+        guard let sub = submoduleToRemove else { return }
+        submoduleToRemove = nil
+        perform { try await $0.removeSubmodule(sub.path, purgeGitDir: purgeLocalClone) }
+    }
+
     // MARK: - Pull requests (gh / glab)
 
     private var forgeDetected = false
@@ -1068,15 +1111,28 @@ final class RepoState: ObservableObject, Identifiable {
         perform { try await $0.stashFile(file.path) }
     }
 
-    /// Append a pattern to the repo's root .gitignore.
-    func ignore(pattern: String) {
+    /// Append a pattern to the repo's root `.gitignore` — or, when `local`
+    /// is set, to `.git/info/exclude`, which ignores the file for this
+    /// clone only and never shows up in a commit.
+    func ignore(pattern: String, local: Bool = false) {
         Task {
-            let url = URL(fileURLWithPath: path + "/.gitignore")
-            var content = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-            if !content.isEmpty && !content.hasSuffix("\n") { content += "\n" }
-            content += pattern + "\n"
             do {
-                try content.write(to: url, atomically: true, encoding: .utf8)
+                let url: URL
+                if local {
+                    url = URL(fileURLWithPath: try await git.excludeFilePath())
+                    // A repo cloned with an older git may have no info/ dir.
+                    try FileManager.default.createDirectory(
+                        at: url.deletingLastPathComponent(),
+                        withIntermediateDirectories: true
+                    )
+                } else {
+                    url = URL(fileURLWithPath: path + "/.gitignore")
+                }
+                let content = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+                // nil means the pattern is already there — nothing to write.
+                if let updated = GitIgnore.append(pattern, to: content) {
+                    try updated.write(to: url, atomically: true, encoding: .utf8)
+                }
             } catch {
                 errorMessage = error.localizedDescription
             }
