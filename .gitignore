@@ -3,3 +3,5 @@
 xcuserdata/
 DerivedData/
 .DS_Store
+Resources/AppIcon.iconset/
+dist/
