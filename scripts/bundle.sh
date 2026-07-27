@@ -1,30 +1,54 @@
 #!/bin/bash
-# Build TheGit.app (universal), ad-hoc sign it, and wrap it in a DMG.
+# Build TheGit.app, ad-hoc sign it, and (by default) wrap it in a DMG.
 #
 # Ad-hoc (`-s -`) is enough to run the app on this machine and on any Mac
 # you copy it to by hand. It is NOT enough for distribution: a DMG that
 # travels over the network picks up a quarantine flag, and Gatekeeper will
 # refuse an ad-hoc signature. That needs a Developer ID plus notarisation.
+#
+# Env:
+#   VERSION, BUILD   what goes in Info.plist
+#   DEST             output directory                       (default ./dist)
+#   UNIVERSAL=0      build for this Mac only, not arm64+x86_64
+#   DMG=0            assemble the .app and stop
+#
+# The Homebrew formula runs this with UNIVERSAL=0 DMG=0, so the bundle it
+# installs and the bundle in the DMG are assembled by the same code. The
+# Info.plist in particular has to stay in one place: a second copy in the
+# formula is a second thing to forget when a UTI or a version key changes.
 set -euo pipefail
 
 VERSION="${VERSION:-0.1.0}"
 BUILD="${BUILD:-1}"
 APP_NAME="TheGit"
 BUNDLE_ID="com.zjywill.TheGit"
+UNIVERSAL="${UNIVERSAL:-1}"
+DMG="${DMG:-1}"
 
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
-DIST="$ROOT/dist"
+DIST="${DEST:-$ROOT/dist}"
 APP="$DIST/$APP_NAME.app"
 
-echo "==> Building universal release binary"
-swift build -c release --arch arm64 --arch x86_64
+# --disable-sandbox: Homebrew builds inside its own sandbox, which SwiftPM's
+# nests badly within; the build only ever writes to .build here.
+# Built as one flat list rather than by splicing a second array: /bin/bash on
+# macOS is 3.2, where an empty array under `set -u` counts as unbound.
+if [ "$UNIVERSAL" = "1" ]; then
+    BUILD_ARGS=(-c release --disable-sandbox --arch arm64 --arch x86_64)
+    echo "==> Building release binary (universal)"
+else
+    BUILD_ARGS=(-c release --disable-sandbox)
+    echo "==> Building release binary (this Mac only)"
+fi
 
-BIN="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)/$APP_NAME"
+swift build "${BUILD_ARGS[@]}"
+
+BIN="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)/$APP_NAME"
 [ -f "$BIN" ] || { echo "no binary at $BIN"; exit 1; }
 
 echo "==> Assembling $APP_NAME.app"
-rm -rf "$DIST"
+rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/$APP_NAME"
 
@@ -80,8 +104,17 @@ echo "==> Ad-hoc signing"
 codesign --force --sign - --identifier "$BUNDLE_ID" --timestamp=none "$APP"
 codesign --verify --strict "$APP" && echo "    signature verifies"
 
+if [ "$DMG" != "1" ]; then
+    echo
+    echo "Built:"
+    echo "  $APP"
+    lipo -archs "$APP/Contents/MacOS/$APP_NAME" | sed 's/^/  archs: /'
+    exit 0
+fi
+
 echo "==> Building DMG"
 STAGE="$DIST/dmg"
+rm -rf "$STAGE"
 mkdir -p "$STAGE"
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
