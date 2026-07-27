@@ -152,6 +152,8 @@ final class RepoState: ObservableObject, Identifiable {
     @Published var editingRemote: String?
     /// A drop that landed and is waiting for the user to pick its meaning.
     @Published var dropIntent: DropIntent?
+    /// Row id whose context menu is currently open, so it can be marked.
+    @Published var contextTarget: String?
     /// Set once we know the repo's host has a CLI we can drive; nil keeps
     /// the whole pull-request feature invisible.
     @Published var forge: Forge?

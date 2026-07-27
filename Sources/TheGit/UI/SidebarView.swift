@@ -85,6 +85,7 @@ struct SidebarView: View {
                         }
                     }
                     .help(wt.path)
+                    .contextTarget("wt:" + wt.path, repo)
                     .contextMenu {
                         Button("Open as Tab") { appState.open(path: wt.path) }
                         Button("Show in Finder") {
@@ -115,6 +116,7 @@ struct SidebarView: View {
                         .contentShape(Rectangle())
                         .onTapGesture { repo.locate(tag.hash) }
                         .help("\(tag.name) @ \(String(tag.hash.prefix(7))) — click to locate")
+                        .contextTarget("tag:" + tag.name, repo)
                         .contextMenu {
                             Button("Checkout \(tag.name) (detached)") { repo.checkoutTag(tag) }
                             Divider()
@@ -156,6 +158,7 @@ struct SidebarView: View {
                         }
                         .contentShape(Rectangle())
                         .help(stash.message)
+                        .contextTarget("stash:" + stash.ref, repo)
                         .contextMenu {
                             Button("Apply (keep stash)") { repo.applyStash(stash) }
                             Button("Pop (apply and remove)") { repo.popStash(stash) }
@@ -193,6 +196,7 @@ struct SidebarView: View {
                             }
                         }
                         .help("\(sub.path) @ \(String(sub.sha.prefix(7))) — \(sub.stateDescription)")
+                        .contextTarget("sub:" + sub.path, repo)
                         .contextMenu {
                             Button("Open as Tab") {
                                 appState.open(path: repo.path + "/" + sub.path)
@@ -442,6 +446,7 @@ struct FolderDisclosure: View {
             .onTapGesture {
                 withAnimation(.easeOut(duration: 0.15)) { expanded.toggle() }
             }
+            .contextTarget("node:" + node.id, repo)
             .contextMenu {
                 if isRemoteRoot {
                     Button("Fetch \(node.name) only") { repo.fetchRemoteOnly(node.name) }
@@ -504,6 +509,7 @@ struct PullRequestRow: View {
         .opacity(pr.isDraft ? 0.75 : 1)
         .contentShape(Rectangle())
         .help("\(forge.label(pr.number)) \(pr.title)\n\(pr.branch)")
+        .contextTarget("pr:\(pr.number)", repo)
         .contextMenu {
             Button("Checkout \(forge.label(pr.number))") { repo.checkoutPullRequest(pr) }
             Button("Open in Browser") { repo.openPullRequestInBrowser(pr) }
@@ -604,6 +610,7 @@ struct BranchRow: View {
         // No animation on the highlight: during a drag the pointer is
         // moving fast and a fade reads as lag, not polish.
         .background(targeted ? Color.accentColor.opacity(0.15) : .clear)
+        .contextTarget("branch:" + branch.name, repo)
         .contextMenu { menuItems }
         .onTapGesture(count: 2) {
             if !branch.isCurrent { repo.checkout(branch) }

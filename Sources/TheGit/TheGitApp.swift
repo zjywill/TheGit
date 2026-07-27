@@ -158,6 +158,7 @@ struct RepoTab: View {
         .contentShape(Rectangle())
         // Tab switching is a many-times-a-day action: no animation, instant.
         .onTapGesture { appState.activeRepoID = repo.id }
+        .contextTarget("tab:" + repo.id, repo)
         .contextMenu {
             Button("Close Tab") { appState.close(repo: repo) }
             Button("Close Other Tabs") {

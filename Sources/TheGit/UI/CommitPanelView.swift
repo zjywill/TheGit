@@ -256,6 +256,7 @@ struct ConflictRow: View {
         }
         .contentShape(Rectangle())
         .onTapGesture { repo.selectFile(file) }
+        .contextTarget("conflict:" + file.id, repo)
         .contextMenu {
             Button("Accept Ours (current branch)") { repo.acceptOurs(file) }
             Button("Accept Theirs (incoming)") { repo.acceptTheirs(file) }
@@ -310,6 +311,7 @@ struct FileSection: View {
                         action: { action(file) },
                         select: { repo.selectFile(file) }
                     )
+                    .contextTarget("file:" + file.id, repo)
                     .contextMenu { FileMenu(file: file, repo: repo) }
                     .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 12))
                 }

@@ -61,6 +61,11 @@ struct RepoView: View {
             for: NSApplication.didBecomeActiveNotification)) { _ in
             Task { await repo.refresh(quiet: true) }
         }
+        // The mark lives exactly as long as the menu does.
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSMenu.didEndTrackingNotification)) { _ in
+            repo.contextTarget = nil
+        }
         .alert(
             "Git Error",
             isPresented: Binding(

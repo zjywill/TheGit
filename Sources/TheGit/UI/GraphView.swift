@@ -221,6 +221,11 @@ struct GraphRowView: View {
         )
     }
 
+    /// This commit carries a ref label in the pinned column.
+    private var hasBadge: Bool {
+        badgeWidth > 0 && !RefBadge.infos(for: row.commit.refs).isEmpty
+    }
+
     /// True when this commit is the tip of the checked-out branch.
     private var isHead: Bool {
         row.commit.refs.contains { $0.hasPrefix("HEAD") }
@@ -233,15 +238,23 @@ struct GraphRowView: View {
     }
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 0) {
             if badgeWidth > 0 {
                 BadgeColumn(
                     refs: row.commit.refs,
                     localBranches: repo.snapshot.localBranches,
                     repo: repo,
-                    maxBadgeWidth: max(40, badgeWidth - 34)
+                    maxBadgeWidth: max(40, badgeWidth - 34),
+                    // The connector starts at the badge and is finished by
+                    // the lane canvas, so the two halves read as one line
+                    // running from the pinned label to its node.
+                    connector: hasBadge ? LaneCanvas.color(row.columnColor) : nil,
+                    dimmed: !onCurrentBranch
                 )
-                .frame(width: badgeWidth, alignment: .trailing)
+                // Pinned hard left, GitKraken-style: a label that keeps the
+                // same x on every row is scannable; one that floats with
+                // its own width is not.
+                .frame(width: badgeWidth + 8, alignment: .leading)
             }
 
             LaneCanvas(
@@ -255,7 +268,7 @@ struct GraphRowView: View {
                     )
                     : nil,
                 scrollX: scrollX,
-                hasBadge: badgeWidth > 0 && !RefBadge.infos(for: row.commit.refs).isEmpty
+                hasBadge: hasBadge
             )
             .frame(width: graphWidth, height: GraphView.rowHeight)
                 .mask(
@@ -309,6 +322,7 @@ struct GraphRowView: View {
         )
         .contentShape(Rectangle())
         .onTapGesture { repo.selectedCommit = row.commit.hash }
+        .contextTarget(row.commit.hash, repo)
         .contextMenu { menuItems }
         // Drag a commit onto a branch to cherry-pick it there. The WIP row
         // isn't a real commit, so it isn't draggable.
@@ -454,13 +468,15 @@ struct LaneCanvas: View {
                 var p = Path()
                 p.move(to: CGPoint(x: scrollX, y: midY))
                 p.addLine(to: CGPoint(x: dotX, y: midY))
-                // Barely dimmed on purpose: this line is wayfinding, not
-                // branch emphasis, and the rows that need it most are
+                // Solid, matching the half drawn in the badge column so the
+                // two read as one line. It can't be confused with a lane:
+                // lanes are vertical, this is the only horizontal run.
+                // Barely dimmed on purpose — the rows that need it most are
                 // exactly the dimmed ones whose node sits far to the right.
                 context.stroke(
                     p,
                     with: .color(Self.color(row.columnColor).opacity(dimmed ? 0.45 : 0.7)),
-                    style: StrokeStyle(lineWidth: 1.5, dash: [4, 3])
+                    style: StrokeStyle(lineWidth: 1.5)
                 )
             }
 
@@ -638,6 +654,9 @@ struct BadgeColumn: View {
     var repo: RepoState?
     /// Widest a single badge may get before its label truncates.
     var maxBadgeWidth: CGFloat = 130
+    /// Branch colour of the row, when this commit has a label to connect.
+    var connector: Color?
+    var dimmed = false
     @State private var showOverflow = false
 
     /// ahead/behind of the local branch a badge represents, if any.
@@ -652,12 +671,14 @@ struct BadgeColumn: View {
     var body: some View {
         let infos = RefBadge.infos(for: refs)
         HStack(spacing: 4) {
-            Spacer(minLength: 0)
             if let first = infos.first {
                 // Constrain rather than let it overflow: an unbounded badge
                 // grows past its column and gets sliced by the window edge.
                 RefBadge(info: first, track: track(first), repo: repo)
-                    .frame(maxWidth: maxBadgeWidth, alignment: .trailing)
+                    .frame(maxWidth: maxBadgeWidth, alignment: .leading)
+                    // The label claims its width first; the connector is
+                    // greedy and would otherwise squeeze it to nothing.
+                    .layoutPriority(1)
             }
             if infos.count > 1 {
                 Button {
@@ -680,6 +701,17 @@ struct BadgeColumn: View {
                     }
                     .padding(10)
                 }
+            }
+            // Runs from the label to the edge of this column; the lane
+            // canvas picks it up on the other side and carries it to the
+            // node, so the two halves read as one line.
+            if let connector, !infos.isEmpty {
+                Rectangle()
+                    .fill(connector.opacity(dimmed ? 0.45 : 0.7))
+                    .frame(height: 1.5)
+                    .frame(maxWidth: .infinity)
+            } else {
+                Spacer(minLength: 0)
             }
         }
     }
