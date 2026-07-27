@@ -137,6 +137,15 @@ final class RepoState: ObservableObject, Identifiable {
     /// Graph visibility filters (GitKraken Solo / Hide). Session-only.
     @Published var soloRev: String?
     @Published var hiddenRefs: Set<String> = []
+    /// Expanded sidebar folders, by node id. Lives here rather than in the
+    /// row's @State because the sidebar is a LazyVStack: rows that scroll
+    /// out of view are destroyed, and with them any state they owned — a
+    /// folder would silently re-collapse the moment you scrolled past it.
+    @Published var expandedNodes: Set<String> = []
+
+    func toggleExpanded(_ id: String) {
+        if expandedNodes.contains(id) { expandedNodes.remove(id) } else { expandedNodes.insert(id) }
+    }
     /// History of one file, shown over the graph.
     @Published var fileHistory: (path: String, commits: [Commit])?
     /// Commits loaded so far; grows when the list scrolls to the bottom.

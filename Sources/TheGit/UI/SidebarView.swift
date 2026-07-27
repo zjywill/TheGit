@@ -11,7 +11,11 @@ struct SidebarView: View {
         // exceptions (reentrant-delegate asserts, fatal under zoom changes).
         // Same reasoning as the graph column.
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 7) {
+            // spacing 0: every row carries its own height (SidebarMetrics.row),
+            // so the vertical rhythm is a property of the rows rather than of
+            // the gaps between them — which is what lets one-line and two-line
+            // rows sit on the same grid.
+            LazyVStack(alignment: .leading, spacing: 0) {
             Group {
                 SectionHeader(
                     title: "Local",
@@ -33,14 +37,12 @@ struct SidebarView: View {
                     BranchNodeRow(node: node, repo: repo)
                 }
                 if repo.snapshot.remoteBranches.isEmpty {
-                    Button {
-                        repo.promptAddRemote()
-                    } label: {
-                        Label("Add Remote…", systemImage: "plus.circle")
+                    SidebarRow(icon: "plus.circle", iconColor: Color.accentColor) {
+                        Text("Add Remote…")
                             .zoomFont(12)
+                            .foregroundStyle(Color.accentColor)
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(Color.accentColor)
+                    .onTapGesture { repo.promptAddRemote() }
                 }
             }
             // Only present when the repo's host has a CLI installed —
@@ -55,15 +57,19 @@ struct SidebarView: View {
                     ) { repo.refreshPullRequests() }
                     .padding(.top, 14)
                     if let error = repo.forgeError {
-                        Text(error)
-                            .zoomFont(10)
-                            .foregroundStyle(.orange)
-                            .lineLimit(3)
-                            .help(error)
+                        SidebarRow(icon: "exclamationmark.triangle", iconColor: .orange) {
+                            Text(error)
+                                .zoomFont(10)
+                                .foregroundStyle(.orange)
+                                .lineLimit(3)
+                        }
+                        .help(error)
                     } else if repo.pullRequests.isEmpty {
-                        Text(repo.loadingPullRequests ? "Loading…" : "No open \(forge.itemNoun.lowercased())s")
-                            .zoomFont(11)
-                            .foregroundStyle(.tertiary)
+                        SidebarRow(icon: nil) {
+                            Text(repo.loadingPullRequests ? "Loading…" : "No open \(forge.itemNoun.lowercased())s")
+                                .zoomFont(11)
+                                .foregroundStyle(.tertiary)
+                        }
                     }
                     ForEach(repo.pullRequests) { pr in
                         PullRequestRow(pr: pr, forge: forge, repo: repo)
@@ -74,10 +80,7 @@ struct SidebarView: View {
                 SectionHeader(title: "Worktrees", count: repo.snapshot.worktrees.count)
                     .padding(.top, 14)
                 ForEach(repo.snapshot.worktrees) { wt in
-                    HStack(spacing: 6) {
-                        Image(systemName: "folder")
-                            .zoomFont(11)
-                            .foregroundStyle(.secondary)
+                    SidebarRow(icon: "folder") {
                         VStack(alignment: .leading, spacing: 1) {
                             Text(wt.displayName)
                                 .zoomFont(12)
@@ -110,16 +113,15 @@ struct SidebarView: View {
                     SectionHeader(title: "Tags", count: repo.snapshot.tags.count)
                         .padding(.top, 14)
                     ForEach(repo.snapshot.tags) { tag in
-                        HStack(spacing: 6) {
-                            Image(systemName: "tag")
-                                .zoomFont(11)
-                                .foregroundStyle(.orange)
+                        // Secondary, not orange: orange is this sidebar's
+                        // "needs attention" colour (behind, gone, LFS
+                        // missing, dirty submodule). A tag is just a tag.
+                        SidebarRow(icon: "tag") {
                             Text(tag.name)
                                 .zoomFont(12)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                         }
-                        .contentShape(Rectangle())
                         .onTapGesture { repo.locate(tag.hash) }
                         .help("\(tag.name) @ \(String(tag.hash.prefix(7))) — click to locate")
                         .contextTarget("tag:" + tag.name, repo)
@@ -147,10 +149,7 @@ struct SidebarView: View {
                     SectionHeader(title: "Stashes", count: repo.snapshot.stashes.count)
                         .padding(.top, 14)
                     ForEach(repo.snapshot.stashes) { stash in
-                        HStack(spacing: 6) {
-                            Image(systemName: "tray.full")
-                                .zoomFont(11)
-                                .foregroundStyle(.secondary)
+                        SidebarRow(icon: "tray.full") {
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(stash.message)
                                     .zoomFont(12)
@@ -162,7 +161,6 @@ struct SidebarView: View {
                                     .lineLimit(1)
                             }
                         }
-                        .contentShape(Rectangle())
                         .help(stash.message)
                         .contextTarget("stash:" + stash.ref, repo)
                         .contextMenu {
@@ -194,30 +192,25 @@ struct SidebarView: View {
                     .padding(.top, 14)
                     let missing = repo.snapshot.lfsMissing.count
                     if missing > 0 {
-                        HStack(spacing: 6) {
-                            Image(systemName: "arrow.down.circle.dotted")
-                                .zoomFont(11)
-                                .foregroundStyle(.orange)
+                        SidebarRow(icon: "arrow.down.circle.dotted", iconColor: .orange) {
                             Text("\(missing) not downloaded")
                                 .zoomFont(11)
                                 .foregroundStyle(.orange)
                                 .lineLimit(1)
                         }
-                        .contentShape(Rectangle())
                         .help("These files are pointers only — click to run git lfs pull")
                         .onTapGesture { repo.pullLFSObjects() }
                     }
                     ForEach(repo.snapshot.lfs.patterns, id: \.self) { pattern in
-                        HStack(spacing: 6) {
-                            Image(systemName: "shippingbox.and.arrow.backward")
-                                .zoomFont(11)
-                                .foregroundStyle(.secondary)
+                        // externaldrive, not a second shippingbox: the box is
+                        // the submodule icon, and two unrelated things wearing
+                        // the same glyph read as one kind at a glance.
+                        SidebarRow(icon: "externaldrive") {
                             Text(pattern)
                                 .zoomFont(12, design: .monospaced)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                         }
-                        .contentShape(Rectangle())
                         .help("\(pattern) — tracked by Git LFS (.gitattributes)")
                         .contextTarget("lfs:" + pattern, repo)
                         .contextMenu {
@@ -427,10 +420,10 @@ struct SubmoduleRow: View {
     private var fullPath: String { repo.path + "/" + sub.path }
 
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "shippingbox")
-                .zoomFont(11)
-                .foregroundStyle(sub.state == " " ? Color.secondary : .orange)
+        SidebarRow(
+            icon: "shippingbox",
+            iconColor: sub.state == " " ? Color.secondary : .orange
+        ) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(sub.displayName)
                     .zoomFont(12)
@@ -443,7 +436,6 @@ struct SubmoduleRow: View {
                 }
             }
         }
-        .contentShape(Rectangle())
         .help("\(sub.path) @ \(String(sub.sha.prefix(7))) — \(sub.stateDescription)")
         .contextTarget("sub:" + sub.path, repo)
         .contextMenu {
@@ -516,6 +508,7 @@ struct SectionHeader: View {
     var actionHelp: String?
     var action: (() -> Void)?
     @State private var hovering = false
+    @Environment(\.uiZoom) private var zoom
 
     var body: some View {
         HStack(spacing: 6) {
@@ -553,73 +546,149 @@ struct SectionHeader: View {
             }
             .frame(minWidth: 22, minHeight: 22, maxHeight: 22, alignment: .center)
         }
-        .padding(.trailing, 10)
+        // Same trailing inset as the rows, so the counts and the branch
+        // ahead/behind badges share one right-hand baseline.
+        .padding(.trailing, SidebarMetrics.trailing * zoom)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
     }
 }
 
+/// The sidebar's layout grid, at zoom 1. Everything multiplies by
+/// `\.uiZoom`, so the columns hold at all five zoom levels.
+enum SidebarMetrics {
+    /// One row's height. One-line rows are exactly this tall; two-line
+    /// rows (worktrees, stashes, PRs) grow past it but keep the same
+    /// leading columns.
+    static let row: CGFloat = 22
+    /// Disclosure-chevron column, at the TRAILING edge. Kept off the
+    /// leading edge on purpose: only folders have a chevron, so a leading
+    /// gutter would be dead space on every branch, PR, tag and stash row
+    /// — visible as a hole in front of whole sections that contain no
+    /// folders at all. On the right it costs nothing, because the rows
+    /// that carry one (folders) are the only rows with no trailing badge.
+    static let chevron: CGFloat = 14
+    /// Icon column, and now the row's first column. SF Symbols have wildly
+    /// different intrinsic widths at the same point size (`cloud` ≈ 15pt
+    /// against `arrow.triangle.branch` ≈ 10pt), and without a fixed column
+    /// that difference is handed straight to the text, so no two rows
+    /// start in the same place.
+    static let icon: CGFloat = 16
+    static let gap: CGFloat = 6
+    /// One nesting level: icon + gap, so a child's icon sits exactly under
+    /// its parent's text. With the chevron gone from the leading edge,
+    /// indentation is the only thing carrying depth, so it has to land on
+    /// a column the eye already knows.
+    static let indent: CGFloat = icon + gap
+    static let trailing: CGFloat = 10
+}
+
+/// Every row in the sidebar: `[icon][content][chevron]`, fixed columns.
+/// Going through one primitive is what makes alignment a structural
+/// property instead of something each section has to remember.
+struct SidebarRow<Content: View>: View {
+    @Environment(\.uiZoom) private var zoom
+    var depth = 0
+    var chevron = false
+    var expanded = false
+    /// nil reserves the column without drawing anything, for rows that
+    /// are text only ("No open pull requests") but still have to line up.
+    var icon: String?
+    var iconColor: Color = .secondary
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        // firstTextBaseline, not center: on a two-line row the icon
+        // belongs to the title, and centring it against title+subtitle
+        // floats it into the gap between them.
+        HStack(alignment: .firstTextBaseline, spacing: 0) {
+            Group {
+                if let icon {
+                    Image(systemName: icon)
+                        .zoomFont(11)
+                        .foregroundStyle(iconColor)
+                }
+            }
+            .frame(width: SidebarMetrics.icon * zoom)
+            .padding(.trailing, SidebarMetrics.gap * zoom)
+            content()
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if chevron {
+                Image(systemName: "chevron.right")
+                    .zoomFont(9, weight: .semibold)
+                    .foregroundStyle(.tertiary)
+                    .rotationEffect(.degrees(expanded ? 90 : 0))
+                    .frame(width: SidebarMetrics.chevron * zoom)
+            }
+        }
+        .padding(.leading, CGFloat(depth) * SidebarMetrics.indent * zoom)
+        .padding(.trailing, SidebarMetrics.trailing * zoom)
+        .frame(maxWidth: .infinity, minHeight: SidebarMetrics.row * zoom, alignment: .leading)
+        // Full width, so the empty space to the right of a short branch
+        // name is as clickable as the name itself — it wasn't on half the
+        // rows before, which made the list feel arbitrary.
+        .contentShape(Rectangle())
+    }
+}
+
 /// One sidebar tree row: a folder (git-flow prefix or a remote) or a branch.
 struct BranchNodeRow: View {
     let node: BranchNode
+    var depth = 0
     @ObservedObject var repo: RepoState
 
     var body: some View {
         if let branch = node.branch {
-            BranchRow(branch: branch, label: node.name, repo: repo)
+            BranchRow(branch: branch, label: node.name, depth: depth, repo: repo)
         } else {
-            FolderDisclosure(node: node, repo: repo)
+            FolderRow(node: node, depth: depth, repo: repo)
         }
     }
 }
 
 /// Folder row where clicking ANYWHERE on the row toggles expansion,
-/// not just the chevron.
-struct FolderDisclosure: View {
+/// not just the chevron. Children are emitted as siblings at depth + 1
+/// rather than nested in a padded container, so every row is a full-width
+/// row on the same grid no matter how deep it sits.
+struct FolderRow: View {
     let node: BranchNode
+    var depth = 0
     @ObservedObject var repo: RepoState
-    @State private var expanded = false
+
+    private var expanded: Bool { repo.expandedNodes.contains(node.id) }
 
     var body: some View {
-        DisclosureGroup(isExpanded: $expanded) {
-            // Children indent by hand: the List that used to supply the
-            // per-level indent is gone.
-            VStack(alignment: .leading, spacing: 7) {
-                ForEach(node.children ?? []) { child in
-                    BranchNodeRow(node: child, repo: repo)
+        SidebarRow(
+            depth: depth,
+            chevron: true,
+            expanded: expanded,
+            icon: isRemoteRoot ? "cloud" : "folder"
+        ) {
+            Text(node.name)
+                .zoomFont(12)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .onTapGesture {
+            withAnimation(.easeOut(duration: 0.15)) { repo.toggleExpanded(node.id) }
+        }
+        .contextTarget("node:" + node.id, repo)
+        .contextMenu {
+            if isRemoteRoot {
+                Button("Fetch \(node.name) only") { repo.fetchRemoteOnly(node.name) }
+                Button("Edit URL…") { repo.promptEditRemote(node.name) }
+                Button("Rename Remote…") { repo.promptRenameRemote(node.name) }
+                Button("Copy URL") { repo.copyRemoteURL(node.name) }
+                Divider()
+                Button("Remove Remote…", role: .destructive) {
+                    repo.remoteToRemove = node.name
                 }
             }
-            .padding(.leading, 12)
-            .padding(.top, 7)
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: node.id.hasPrefix("remote:") && !node.id.dropFirst(7).contains("/")
-                    ? "cloud" : "folder")
-                    .zoomFont(11)
-                    .foregroundStyle(.secondary)
-                Text(node.name)
-                    .zoomFont(12)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-            }
-            .contentShape(Rectangle())
-            .onTapGesture {
-                withAnimation(.easeOut(duration: 0.15)) { expanded.toggle() }
-            }
-            .contextTarget("node:" + node.id, repo)
-            .contextMenu {
-                if isRemoteRoot {
-                    Button("Fetch \(node.name) only") { repo.fetchRemoteOnly(node.name) }
-                    Button("Edit URL…") { repo.promptEditRemote(node.name) }
-                    Button("Rename Remote…") { repo.promptRenameRemote(node.name) }
-                    Button("Copy URL") { repo.copyRemoteURL(node.name) }
-                    Divider()
-                    Button("Remove Remote…", role: .destructive) {
-                        repo.remoteToRemove = node.name
-                    }
-                }
+        }
+        if expanded {
+            ForEach(node.children ?? []) { child in
+                BranchNodeRow(node: child, depth: depth + 1, repo: repo)
             }
         }
     }
@@ -638,38 +707,39 @@ struct PullRequestRow: View {
     @ObservedObject var repo: RepoState
 
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "arrow.triangle.pull")
-                .zoomFont(11)
-                .foregroundStyle(pr.isDraft ? Color.secondary : .green)
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 4) {
-                    Text(forge.label(pr.number))
-                        .zoomFont(10, weight: .semibold, design: .monospaced)
+        SidebarRow(
+            icon: "arrow.triangle.pull",
+            iconColor: pr.isDraft ? Color.secondary : .green
+        ) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 4) {
+                        Text(forge.label(pr.number))
+                            .zoomFont(10, weight: .semibold, design: .monospaced)
+                            .foregroundStyle(.tertiary)
+                        Text(pr.title)
+                            .zoomFont(12)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    Text(pr.author.isEmpty ? pr.branch : "\(pr.branch) · \(pr.author)")
+                        .zoomFont(10)
                         .foregroundStyle(.tertiary)
-                    Text(pr.title)
-                        .zoomFont(12)
                         .lineLimit(1)
-                        .truncationMode(.tail)
+                        .truncationMode(.middle)
                 }
-                Text(pr.author.isEmpty ? pr.branch : "\(pr.branch) · \(pr.author)")
-                    .zoomFont(10)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            Spacer(minLength: 0)
-            if pr.isDraft {
-                Text("draft")
-                    .zoomFont(9, weight: .medium)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1)
-                    .background(Capsule().fill(Color.secondary.opacity(0.18)))
-                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                if pr.isDraft {
+                    Text("draft")
+                        .zoomFont(9, weight: .medium)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Color.secondary.opacity(0.18)))
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .opacity(pr.isDraft ? 0.75 : 1)
-        .contentShape(Rectangle())
         .help("\(forge.label(pr.number)) \(pr.title)\n\(pr.branch)")
         .contextTarget("pr:\(pr.number)", repo)
         .contextMenu {
@@ -726,49 +796,58 @@ struct BranchDropTarget: ViewModifier {
 struct BranchRow: View {
     let branch: Branch
     var label: String?
+    var depth = 0
     @ObservedObject var repo: RepoState
     @State private var targeted = false
 
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: branch.isCurrent ? "checkmark.circle.fill" : "arrow.triangle.branch")
-                .zoomFont(11)
-                .foregroundStyle(branch.isCurrent ? Color.accentColor : .secondary)
-            Text(label ?? branch.name)
-                .zoomFont(12, weight: branch.isCurrent ? .semibold : .regular)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            if repo.soloRev == branch.name {
-                Text("SOLO")
-                    .zoomFont(8, weight: .bold)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1)
-                    .background(Capsule().fill(Color.accentColor.opacity(0.2)))
-                    .foregroundStyle(Color.accentColor)
-            }
-            Spacer()
-            if branch.upstreamGone {
-                Text("gone")
-                    .zoomFont(9, weight: .medium)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1)
-                    .background(Capsule().fill(Color.orange.opacity(0.18)))
-                    .foregroundStyle(.orange)
-                    .help("Upstream \(branch.upstream ?? "") no longer exists")
-            } else if branch.ahead > 0 || branch.behind > 0 {
-                HStack(spacing: 3) {
-                    if branch.ahead > 0 {
-                        Text("↑\(branch.ahead)").foregroundStyle(.teal)
-                    }
-                    if branch.behind > 0 {
-                        Text("↓\(branch.behind)").foregroundStyle(.orange)
-                    }
+        // The current branch keeps the branch glyph and says so in colour
+        // and weight. Swapping in checkmark.circle.fill made one row
+        // optically ~1.5× heavier than every other icon at the same point
+        // size, so it broke out of the column instead of sitting in it —
+        // a state change should move one channel, not replace identity.
+        SidebarRow(
+            depth: depth,
+            icon: "arrow.triangle.branch",
+            iconColor: branch.isCurrent ? Color.accentColor : .secondary
+        ) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(label ?? branch.name)
+                    .zoomFont(12, weight: branch.isCurrent ? .semibold : .regular)
+                    .foregroundStyle(branch.isCurrent ? Color.accentColor : .primary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if repo.soloRev == branch.name {
+                    Text("SOLO")
+                        .zoomFont(8, weight: .bold)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.2)))
+                        .foregroundStyle(Color.accentColor)
                 }
-                .zoomFont(10, weight: .semibold, design: .monospaced)
-                .help("\(branch.ahead) ahead, \(branch.behind) behind \(branch.upstream ?? "upstream")")
+                Spacer(minLength: 0)
+                if branch.upstreamGone {
+                    Text("gone")
+                        .zoomFont(9, weight: .medium)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Color.orange.opacity(0.18)))
+                        .foregroundStyle(.orange)
+                        .help("Upstream \(branch.upstream ?? "") no longer exists")
+                } else if branch.ahead > 0 || branch.behind > 0 {
+                    HStack(spacing: 3) {
+                        if branch.ahead > 0 {
+                            Text("↑\(branch.ahead)").foregroundStyle(.teal)
+                        }
+                        if branch.behind > 0 {
+                            Text("↓\(branch.behind)").foregroundStyle(.orange)
+                        }
+                    }
+                    .zoomFont(10, weight: .semibold, design: .monospaced)
+                    .help("\(branch.ahead) ahead, \(branch.behind) behind \(branch.upstream ?? "upstream")")
+                }
             }
         }
-        .contentShape(Rectangle())
         // No animation on the highlight: during a drag the pointer is
         // moving fast and a fade reads as lag, not polish.
         .background(targeted ? Color.accentColor.opacity(0.15) : .clear)
