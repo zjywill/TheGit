@@ -4,250 +4,46 @@ import SwiftUI
 struct SidebarView: View {
     @ObservedObject var repo: RepoState
     @EnvironmentObject var appState: AppState
+    @Environment(\.uiZoom) private var zoom
+    /// Local, not on RepoState: a filter is a way of looking at the repo,
+    /// not a fact about it — it should die with the view, and each repo tab
+    /// keeps its own.
+    @State private var filter = ""
+    @FocusState private var filterFocused: Bool
 
     var body: some View {
-        // ScrollView + LazyVStack instead of List: List is NSTableView
-        // underneath, and it was the app's one source of AppKit layout
-        // exceptions (reentrant-delegate asserts, fatal under zoom changes).
-        // Same reasoning as the graph column.
-        ScrollView {
-            // spacing 0: every row carries its own height (SidebarMetrics.row),
-            // so the vertical rhythm is a property of the rows rather than of
-            // the gaps between them — which is what lets one-line and two-line
-            // rows sit on the same grid.
-            LazyVStack(alignment: .leading, spacing: 0) {
-            Group {
-                SectionHeader(
-                    title: "Local",
-                    count: repo.snapshot.localBranches.count,
-                    actionHelp: "Create branch at HEAD"
-                ) { repo.promptNewBranch() }
-                ForEach(BranchTree.build(repo.snapshot.localBranches, path: \.name)) { node in
-                    BranchNodeRow(node: node, repo: repo)
-                }
-            }
-            Group {
-                SectionHeader(
-                    title: "Remote",
-                    count: repo.snapshot.remoteNames.count,
-                    actionHelp: "Add remote"
-                ) { repo.promptAddRemote() }
-                .padding(.top, 14)
-                ForEach(BranchTree.remoteTree(repo.snapshot.remoteBranches)) { node in
-                    BranchNodeRow(node: node, repo: repo)
-                }
-                if repo.snapshot.remoteBranches.isEmpty {
-                    SidebarRow(icon: "plus.circle", iconColor: Color.accentColor) {
-                        Text("Add Remote…")
-                            .zoomFont(12)
-                            .foregroundStyle(Color.accentColor)
-                    }
-                    .onTapGesture { repo.promptAddRemote() }
-                }
-            }
-            // Only present when the repo's host has a CLI installed —
-            // otherwise the feature leaves no trace at all.
-            if let forge = repo.forge {
-                Group {
-                    SectionHeader(
-                        title: forge.sectionTitle,
-                        count: repo.pullRequests.count,
-                        actionIcon: "arrow.clockwise",
-                        actionHelp: "Refresh \(forge.sectionTitle.lowercased())"
-                    ) { repo.refreshPullRequests() }
-                    .padding(.top, 14)
-                    if let error = repo.forgeError {
-                        SidebarRow(icon: "exclamationmark.triangle", iconColor: .orange) {
-                            Text(error)
-                                .zoomFont(10)
-                                .foregroundStyle(.orange)
-                                .lineLimit(3)
-                        }
-                        .help(error)
-                    } else if repo.pullRequests.isEmpty {
-                        SidebarRow(icon: nil) {
-                            Text(repo.loadingPullRequests ? "Loading…" : "No open \(forge.itemNoun.lowercased())s")
+        VStack(spacing: 0) {
+            filterField
+            // ScrollView + LazyVStack instead of List: List is NSTableView
+            // underneath, and it was the app's one source of AppKit layout
+            // exceptions (reentrant-delegate asserts, fatal under zoom changes).
+            // Same reasoning as the graph column.
+            ScrollView {
+                // spacing 0: every row carries its own height (SidebarMetrics.row),
+                // so the vertical rhythm is a property of the rows rather than of
+                // the gaps between them — which is what lets one-line and two-line
+                // rows sit on the same grid.
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    localSection
+                    remoteSection
+                    forgeSection
+                    worktreeSection
+                    tagSection
+                    stashSection
+                    lfsSection
+                    submoduleSection
+                    if filtering, !hasAnyMatch {
+                        SidebarRow(icon: "magnifyingglass") {
+                            Text("No matches for “\(query)”")
                                 .zoomFont(11)
                                 .foregroundStyle(.tertiary)
-                        }
-                    }
-                    ForEach(repo.pullRequests) { pr in
-                        PullRequestRow(pr: pr, forge: forge, repo: repo)
-                    }
-                }
-            }
-            Group {
-                SectionHeader(title: "Worktrees", count: repo.snapshot.worktrees.count)
-                    .padding(.top, 14)
-                ForEach(repo.snapshot.worktrees) { wt in
-                    SidebarRow(icon: "folder") {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(wt.displayName)
-                                .zoomFont(12)
-                                .lineLimit(1)
-                            if let branch = wt.branch {
-                                Text(branch)
-                                    .zoomFont(10)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                            }
-                        }
-                    }
-                    .help(wt.path)
-                    .contextTarget("wt:" + wt.path, repo)
-                    .contextMenu {
-                        Button("Open as Tab") { appState.open(path: wt.path) }
-                        Button("Show in Finder") {
-                            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: wt.path)])
-                        }
-                        Divider()
-                        Button("Remove Worktree…", role: .destructive) {
-                            repo.worktreeToRemove = wt
-                        }
-                    }
-                    .onTapGesture(count: 2) { appState.open(path: wt.path) }
-                }
-            }
-            if !repo.snapshot.tags.isEmpty {
-                Group {
-                    SectionHeader(title: "Tags", count: repo.snapshot.tags.count)
-                        .padding(.top, 14)
-                    ForEach(repo.snapshot.tags) { tag in
-                        // Secondary, not orange: orange is this sidebar's
-                        // "needs attention" colour (behind, gone, LFS
-                        // missing, dirty submodule). A tag is just a tag.
-                        SidebarRow(icon: "tag") {
-                            Text(tag.name)
-                                .zoomFont(12)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-                        .onTapGesture { repo.locate(tag.hash) }
-                        .help("\(tag.name) @ \(String(tag.hash.prefix(7))) — click to locate")
-                        .contextTarget("tag:" + tag.name, repo)
-                        .contextMenu {
-                            Button("Checkout \(tag.name) (detached)") { repo.checkoutTag(tag) }
-                            Divider()
-                            if repo.snapshot.remoteNames.count > 1 {
-                                Menu("Push tag to") {
-                                    ForEach(repo.snapshot.remoteNames, id: \.self) { remote in
-                                        Button(remote) { repo.pushTag(tag, to: remote) }
-                                    }
-                                }
-                            } else {
-                                Button("Push tag to \(repo.snapshot.defaultRemote)") { repo.pushTag(tag) }
-                            }
-                            Button("Copy tag name") { RepoState.copyToPasteboard(tag.name) }
-                            Divider()
-                            Button("Delete tag…", role: .destructive) { repo.tagToDelete = tag }
+                                .lineLimit(2)
                         }
                     }
                 }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 10)
             }
-            if !repo.snapshot.stashes.isEmpty {
-                Group {
-                    SectionHeader(title: "Stashes", count: repo.snapshot.stashes.count)
-                        .padding(.top, 14)
-                    ForEach(repo.snapshot.stashes) { stash in
-                        SidebarRow(icon: "tray.full") {
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(stash.message)
-                                    .zoomFont(12)
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
-                                Text("\(stash.ref) · \(stash.date.formatted(.relative(presentation: .named)))")
-                                    .zoomFont(10)
-                                    .foregroundStyle(.tertiary)
-                                    .lineLimit(1)
-                            }
-                        }
-                        // Lights up when the stash's graph node is clicked.
-                        .background(
-                            repo.selectedStashRef == stash.ref
-                                ? Color.accentColor.opacity(0.15)
-                                : .clear
-                        )
-                        .help(stash.message)
-                        .contextTarget("stash:" + stash.ref, repo)
-                        .contextMenu {
-                            Button("Apply (keep stash)") { repo.applyStash(stash) }
-                            Button("Pop (apply and remove)") { repo.popStash(stash) }
-                            Divider()
-                            Button("Create branch from stash…") {
-                                repo.promptText = ""
-                                repo.branchPrompt = .branchFromStash(stash)
-                            }
-                            Divider()
-                            Button("Drop…", role: .destructive) { repo.stashToDrop = stash }
-                        }
-                        .onTapGesture(count: 2) { repo.applyStash(stash) }
-                        // Single click mirrors the graph node: select, and
-                        // jump the graph to the commit the stash sits on.
-                        .onTapGesture {
-                            repo.selectedStashRef = stash.ref
-                            if !stash.baseHash.isEmpty { repo.locate(stash.baseHash) }
-                        }
-                    }
-                }
-            }
-            // Only in repos that actually use LFS — and only when the
-            // binary is installed, which is what makes the status readable
-            // in the first place.
-            if repo.snapshot.lfs.isEnabled {
-                Group {
-                    SectionHeader(
-                        title: "Git LFS",
-                        count: repo.snapshot.lfs.files.count,
-                        actionIcon: "arrow.down.circle",
-                        actionHelp: "Download LFS objects (git lfs pull)"
-                    ) { repo.pullLFSObjects() }
-                    .padding(.top, 14)
-                    let missing = repo.snapshot.lfsMissing.count
-                    if missing > 0 {
-                        SidebarRow(icon: "arrow.down.circle.dotted", iconColor: .orange) {
-                            Text("\(missing) not downloaded")
-                                .zoomFont(11)
-                                .foregroundStyle(.orange)
-                                .lineLimit(1)
-                        }
-                        .help("These files are pointers only — click to run git lfs pull")
-                        .onTapGesture { repo.pullLFSObjects() }
-                    }
-                    ForEach(repo.snapshot.lfs.patterns, id: \.self) { pattern in
-                        // externaldrive, not a second shippingbox: the box is
-                        // the submodule icon, and two unrelated things wearing
-                        // the same glyph read as one kind at a glance.
-                        SidebarRow(icon: "externaldrive") {
-                            Text(pattern)
-                                .zoomFont(12, design: .monospaced)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-                        .help("\(pattern) — tracked by Git LFS (.gitattributes)")
-                        .contextTarget("lfs:" + pattern, repo)
-                        .contextMenu {
-                            Button("Copy pattern") { RepoState.copyToPasteboard(pattern) }
-                            Button("Download LFS objects") { repo.pullLFSObjects() }
-                        }
-                    }
-                }
-            }
-            // Always shown, empty or not: the + is the only way in to
-            // "Add Submodule…", and a repo with none is where you add one.
-            Group {
-                SectionHeader(
-                    title: "Submodules",
-                    count: repo.snapshot.submodules.count,
-                    actionHelp: "Add submodule"
-                ) { repo.promptAddSubmodule() }
-                .padding(.top, 14)
-                ForEach(repo.snapshot.submodules) { sub in
-                    SubmoduleRow(sub: sub, repo: repo)
-                }
-            }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 10)
         }
         // Right-click on empty sidebar space: the actions that belong to
         // the repo rather than to any one row.
@@ -396,6 +192,383 @@ struct SidebarView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(deleteMessage)
+        }
+    }
+
+    // MARK: - Filter
+
+    /// Pinned above the scroller, not inside it: a filter that scrolls away
+    /// stops explaining why the list is short.
+    private var filterField: some View {
+        HStack(spacing: 6 * zoom) {
+            Image(systemName: "magnifyingglass")
+                .zoomFont(11)
+                .foregroundStyle(filterFocused ? Color.accentColor : .secondary)
+            TextField("Filter", text: $filter)
+                .textFieldStyle(.plain)
+                .zoomFont(12)
+                .focused($filterFocused)
+                // Esc clears first and only gives up focus once it's empty,
+                // so one key both undoes the filter and leaves the field.
+                .onExitCommand {
+                    if filter.isEmpty {
+                        filterFocused = false
+                    } else {
+                        filter = ""
+                    }
+                }
+            if !filter.isEmpty {
+                Button {
+                    filter = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .zoomFont(11)
+                }
+                .buttonStyle(.pressEffect)
+                .foregroundStyle(.secondary)
+                .help("Clear filter")
+            }
+            // Hidden ⇧⌘F target. ⌘F belongs to the toolbar's commit search;
+            // this is the sidebar's own field, so it takes the shifted one.
+            Button("") { filterFocused = true }
+                .keyboardShortcut("f", modifiers: [.command, .shift])
+                .frame(width: 0)
+                .opacity(0)
+        }
+        .padding(.horizontal, 8 * zoom)
+        .frame(height: 24 * zoom)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.primary.opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(
+                    filterFocused ? Color.accentColor.opacity(0.7) : Color.primary.opacity(0.1),
+                    lineWidth: 1
+                )
+        )
+        .animation(.easeOut(duration: 0.12), value: filterFocused)
+        .padding(.horizontal, 10)
+        .padding(.top, 10)
+        .padding(.bottom, 4)
+        .help("Filter branches, tags, stashes, worktrees and submodules (⇧⌘F)")
+    }
+
+    private var query: String { filter.trimmingCharacters(in: .whitespaces) }
+    private var filtering: Bool { !query.isEmpty }
+
+    /// Substring match on whatever the row actually shows. Deliberately not
+    /// fuzzy: a branch list is something you already know the name of, and
+    /// fuzzy matching turns "fix" into half the repo.
+    private func matching<T>(_ items: [T], _ text: (T) -> String) -> [T] {
+        guard filtering else { return items }
+        return items.filter { text($0).localizedCaseInsensitiveContains(query) }
+    }
+
+    // Matching happens on the flat lists, before the folder tree is built,
+    // so folders with no surviving children disappear on their own.
+    private var matchedLocal: [Branch] { matching(repo.snapshot.localBranches) { $0.name } }
+    /// Full name, prefix included: typing "origin" is how you ask for one
+    /// remote's branches.
+    private var matchedRemote: [Branch] { matching(repo.snapshot.remoteBranches) { $0.name } }
+    private var matchedPRs: [PullRequest] {
+        matching(repo.pullRequests) { "#\($0.number) \($0.title) \($0.branch) \($0.author)" }
+    }
+    private var matchedWorktrees: [Worktree] {
+        matching(repo.snapshot.worktrees) { "\($0.displayName) \($0.branch ?? "") \($0.path)" }
+    }
+    private var matchedTags: [Tag] { matching(repo.snapshot.tags) { $0.name } }
+    private var matchedStashes: [Stash] { matching(repo.snapshot.stashes) { "\($0.ref) \($0.message)" } }
+    private var matchedLFS: [String] { matching(repo.snapshot.lfs.patterns) { $0 } }
+    private var matchedSubmodules: [Submodule] {
+        matching(repo.snapshot.submodules) { "\($0.displayName) \($0.path)" }
+    }
+
+    private var hasAnyMatch: Bool {
+        !matchedLocal.isEmpty || !matchedRemote.isEmpty || !matchedPRs.isEmpty
+            || !matchedWorktrees.isEmpty || !matchedTags.isEmpty || !matchedStashes.isEmpty
+            || !matchedLFS.isEmpty || !matchedSubmodules.isEmpty
+    }
+
+    // MARK: - Sections
+
+    // Each section is its own property: the body used to be one expression
+    // large enough to be slow to type-check, and filtering adds a condition
+    // to every branch of it.
+
+    @ViewBuilder
+    private var localSection: some View {
+        let branches = matchedLocal
+        // While filtering, a section with nothing in it is noise — the
+        // header would claim a "Local" group that isn't there.
+        if !filtering || !branches.isEmpty {
+            SectionHeader(
+                title: "Local",
+                count: branches.count,
+                actionHelp: "Create branch at HEAD"
+            ) { repo.promptNewBranch() }
+            ForEach(BranchTree.build(branches, path: \.name)) { node in
+                BranchNodeRow(node: node, repo: repo, forceExpanded: filtering)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var remoteSection: some View {
+        let branches = matchedRemote
+        if !filtering || !branches.isEmpty {
+            SectionHeader(
+                title: "Remote",
+                // Unfiltered, this section's unit is the remote — that's
+                // what the rows collapse to. Filtering counts branches,
+                // because that's what the user is looking at.
+                count: filtering ? branches.count : repo.snapshot.remoteNames.count,
+                actionHelp: "Add remote"
+            ) { repo.promptAddRemote() }
+            .padding(.top, 14)
+            ForEach(BranchTree.remoteTree(branches)) { node in
+                BranchNodeRow(node: node, repo: repo, forceExpanded: filtering)
+            }
+            if repo.snapshot.remoteBranches.isEmpty {
+                SidebarRow(icon: "plus.circle", iconColor: Color.accentColor) {
+                    Text("Add Remote…")
+                        .zoomFont(12)
+                        .foregroundStyle(Color.accentColor)
+                }
+                .onTapGesture { repo.promptAddRemote() }
+            }
+        }
+    }
+
+    /// Only present when the repo's host has a CLI installed — otherwise
+    /// the feature leaves no trace at all.
+    @ViewBuilder
+    private var forgeSection: some View {
+        if let forge = repo.forge {
+            let prs = matchedPRs
+            if !filtering || !prs.isEmpty {
+                SectionHeader(
+                    title: forge.sectionTitle,
+                    count: prs.count,
+                    actionIcon: "arrow.clockwise",
+                    actionHelp: "Refresh \(forge.sectionTitle.lowercased())"
+                ) { repo.refreshPullRequests() }
+                .padding(.top, 14)
+                // Both of these explain an empty section, so they'd be a
+                // second, contradictory answer while a filter is on.
+                if !filtering {
+                    if let error = repo.forgeError {
+                        SidebarRow(icon: "exclamationmark.triangle", iconColor: .orange) {
+                            Text(error)
+                                .zoomFont(10)
+                                .foregroundStyle(.orange)
+                                .lineLimit(3)
+                        }
+                        .help(error)
+                    } else if repo.pullRequests.isEmpty {
+                        SidebarRow(icon: nil) {
+                            Text(repo.loadingPullRequests ? "Loading…" : "No open \(forge.itemNoun.lowercased())s")
+                                .zoomFont(11)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                }
+                ForEach(prs) { pr in
+                    PullRequestRow(pr: pr, forge: forge, repo: repo)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var worktreeSection: some View {
+        let worktrees = matchedWorktrees
+        if !filtering || !worktrees.isEmpty {
+            SectionHeader(title: "Worktrees", count: worktrees.count)
+                .padding(.top, 14)
+            ForEach(worktrees) { wt in
+                SidebarRow(icon: "folder") {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(wt.displayName)
+                            .zoomFont(12)
+                            .lineLimit(1)
+                        if let branch = wt.branch {
+                            Text(branch)
+                                .zoomFont(10)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                }
+                .help(wt.path)
+                .contextTarget("wt:" + wt.path, repo)
+                .contextMenu {
+                    Button("Open as Tab") { appState.open(path: wt.path) }
+                    Button("Show in Finder") {
+                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: wt.path)])
+                    }
+                    Divider()
+                    Button("Remove Worktree…", role: .destructive) {
+                        repo.worktreeToRemove = wt
+                    }
+                }
+                .onTapGesture(count: 2) { appState.open(path: wt.path) }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var tagSection: some View {
+        let tags = matchedTags
+        if !tags.isEmpty {
+            SectionHeader(title: "Tags", count: tags.count)
+                .padding(.top, 14)
+            ForEach(tags) { tag in
+                // Secondary, not orange: orange is this sidebar's
+                // "needs attention" colour (behind, gone, LFS
+                // missing, dirty submodule). A tag is just a tag.
+                SidebarRow(icon: "tag") {
+                    Text(tag.name)
+                        .zoomFont(12)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .onTapGesture { repo.locate(tag.hash) }
+                .help("\(tag.name) @ \(String(tag.hash.prefix(7))) — click to locate")
+                .contextTarget("tag:" + tag.name, repo)
+                .contextMenu {
+                    Button("Checkout \(tag.name) (detached)") { repo.checkoutTag(tag) }
+                    Divider()
+                    if repo.snapshot.remoteNames.count > 1 {
+                        Menu("Push tag to") {
+                            ForEach(repo.snapshot.remoteNames, id: \.self) { remote in
+                                Button(remote) { repo.pushTag(tag, to: remote) }
+                            }
+                        }
+                    } else {
+                        Button("Push tag to \(repo.snapshot.defaultRemote)") { repo.pushTag(tag) }
+                    }
+                    Button("Copy tag name") { RepoState.copyToPasteboard(tag.name) }
+                    Divider()
+                    Button("Delete tag…", role: .destructive) { repo.tagToDelete = tag }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var stashSection: some View {
+        let stashes = matchedStashes
+        if !stashes.isEmpty {
+            SectionHeader(title: "Stashes", count: stashes.count)
+                .padding(.top, 14)
+            ForEach(stashes) { stash in
+                SidebarRow(icon: "tray.full") {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(stash.message)
+                            .zoomFont(12)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Text("\(stash.ref) · \(stash.date.formatted(.relative(presentation: .named)))")
+                            .zoomFont(10)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
+                }
+                // Lights up when the stash's graph node is clicked.
+                .background(
+                    repo.selectedStashRef == stash.ref
+                        ? Color.accentColor.opacity(0.15)
+                        : .clear
+                )
+                .help(stash.message)
+                .contextTarget("stash:" + stash.ref, repo)
+                .contextMenu {
+                    Button("Apply (keep stash)") { repo.applyStash(stash) }
+                    Button("Pop (apply and remove)") { repo.popStash(stash) }
+                    Divider()
+                    Button("Create branch from stash…") {
+                        repo.promptText = ""
+                        repo.branchPrompt = .branchFromStash(stash)
+                    }
+                    Divider()
+                    Button("Drop…", role: .destructive) { repo.stashToDrop = stash }
+                }
+                .onTapGesture(count: 2) { repo.applyStash(stash) }
+                // Single click mirrors the graph node: select, and
+                // jump the graph to the commit the stash sits on.
+                .onTapGesture {
+                    repo.selectedStashRef = stash.ref
+                    if !stash.baseHash.isEmpty { repo.locate(stash.baseHash) }
+                }
+            }
+        }
+    }
+
+    /// Only in repos that actually use LFS — and only when the binary is
+    /// installed, which is what makes the status readable in the first place.
+    @ViewBuilder
+    private var lfsSection: some View {
+        if repo.snapshot.lfs.isEnabled {
+            let patterns = matchedLFS
+            if !filtering || !patterns.isEmpty {
+                SectionHeader(
+                    title: "Git LFS",
+                    count: filtering ? patterns.count : repo.snapshot.lfs.files.count,
+                    actionIcon: "arrow.down.circle",
+                    actionHelp: "Download LFS objects (git lfs pull)"
+                ) { repo.pullLFSObjects() }
+                .padding(.top, 14)
+                let missing = repo.snapshot.lfsMissing.count
+                // A repo-wide total has nothing to do with the filter, so
+                // it would read as a match that it isn't.
+                if missing > 0, !filtering {
+                    SidebarRow(icon: "arrow.down.circle.dotted", iconColor: .orange) {
+                        Text("\(missing) not downloaded")
+                            .zoomFont(11)
+                            .foregroundStyle(.orange)
+                            .lineLimit(1)
+                    }
+                    .help("These files are pointers only — click to run git lfs pull")
+                    .onTapGesture { repo.pullLFSObjects() }
+                }
+                ForEach(patterns, id: \.self) { pattern in
+                    // externaldrive, not a second shippingbox: the box is
+                    // the submodule icon, and two unrelated things wearing
+                    // the same glyph read as one kind at a glance.
+                    SidebarRow(icon: "externaldrive") {
+                        Text(pattern)
+                            .zoomFont(12, design: .monospaced)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .help("\(pattern) — tracked by Git LFS (.gitattributes)")
+                    .contextTarget("lfs:" + pattern, repo)
+                    .contextMenu {
+                        Button("Copy pattern") { RepoState.copyToPasteboard(pattern) }
+                        Button("Download LFS objects") { repo.pullLFSObjects() }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Always shown when unfiltered, empty or not: the + is the only way in
+    /// to "Add Submodule…", and a repo with none is where you add one.
+    @ViewBuilder
+    private var submoduleSection: some View {
+        let submodules = matchedSubmodules
+        if !filtering || !submodules.isEmpty {
+            SectionHeader(
+                title: "Submodules",
+                count: submodules.count,
+                actionHelp: "Add submodule"
+            ) { repo.promptAddSubmodule() }
+            .padding(.top, 14)
+            ForEach(submodules) { sub in
+                SubmoduleRow(sub: sub, repo: repo)
+            }
         }
     }
 
@@ -649,12 +822,15 @@ struct BranchNodeRow: View {
     let node: BranchNode
     var depth = 0
     @ObservedObject var repo: RepoState
+    /// Set while the sidebar is filtered: a match buried in a collapsed
+    /// folder is a match the filter failed to show.
+    var forceExpanded = false
 
     var body: some View {
         if let branch = node.branch {
             BranchRow(branch: branch, label: node.name, depth: depth, repo: repo)
         } else {
-            FolderRow(node: node, depth: depth, repo: repo)
+            FolderRow(node: node, depth: depth, repo: repo, forceExpanded: forceExpanded)
         }
     }
 }
@@ -667,8 +843,12 @@ struct FolderRow: View {
     let node: BranchNode
     var depth = 0
     @ObservedObject var repo: RepoState
+    var forceExpanded = false
 
-    private var expanded: Bool { repo.expandedNodes.contains(node.id) }
+    /// Filtering opens every folder without touching the user's own
+    /// expansion state, so clearing the filter puts the tree back exactly
+    /// as they left it.
+    private var expanded: Bool { forceExpanded || repo.expandedNodes.contains(node.id) }
 
     var body: some View {
         SidebarRow(
@@ -683,6 +863,10 @@ struct FolderRow: View {
                 .lineLimit(1)
         }
         .onTapGesture {
+            // Collapsing is off while filtering: the row can't close, so a
+            // tap would only silently rearrange the tree the filter is
+            // hiding — noticed later, as a folder that changed by itself.
+            guard !forceExpanded else { return }
             withAnimation(.easeOut(duration: 0.15)) { repo.toggleExpanded(node.id) }
         }
         .contextTarget("node:" + node.id, repo)
@@ -700,7 +884,7 @@ struct FolderRow: View {
         }
         if expanded {
             ForEach(node.children ?? []) { child in
-                BranchNodeRow(node: child, depth: depth + 1, repo: repo)
+                BranchNodeRow(node: child, depth: depth + 1, repo: repo, forceExpanded: forceExpanded)
             }
         }
     }
