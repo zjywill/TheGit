@@ -415,6 +415,17 @@ struct GraphRowView: View {
             repo.branchPrompt = .createBranchAtCommit(commit)
         }
         Button("Cherry pick commit") { repo.cherryPick(commit) }
+        // The branch row offers merge/rebase as a pair; the commit menu had
+        // only rebase. Merging HEAD into itself is a no-op, so that row —
+        // and only that row — leaves the item out. A branch tip here names
+        // itself in the label, the way the sidebar does.
+        if !isHead {
+            if let tip = tips.first(where: { !$0.isCurrent }) {
+                Button("Merge \(tip.name) into \(current)") { repo.merge(tip) }
+            } else {
+                Button("Merge this commit into \(current)") { repo.merge(commit) }
+            }
+        }
         Button("Rebase \(current) onto this commit") { repo.rebaseOntoCommit(commit) }
         Menu("Reset \(current) to this commit") {
             Button("Soft — keep all changes staged") { repo.reset(to: commit, mode: .soft) }

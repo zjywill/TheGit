@@ -664,4 +664,27 @@ final class RepoIntegrationTests: XCTestCase {
         let remoteSide = try await git(origin, ["log", "-1", "--format=%s", "side"])
         XCTAssertEqual(remoteSide.trimmingCharacters(in: .whitespacesAndNewlines), "side work")
     }
+
+    /// Merge straight from a commit row in the graph: git takes the sha, so
+    /// the commit's work lands on the current branch even though no branch
+    /// name was involved.
+    func testMergingACommitBringsItsWorkOntoTheCurrentBranch() async throws {
+        let path = try await makeRepo("merge-commit")
+        try await git(path, ["checkout", "-q", "-b", "side"])
+        try write("side\n", to: path + "/side.txt")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "side work"])
+        try await git(path, ["checkout", "-q", "main"])
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        let commit = try XCTUnwrap(repo.snapshot.commits.first { $0.subject == "side work" })
+        repo.merge(commit)
+
+        try await waitUntil("the merge to land", {
+            FileManager.default.fileExists(atPath: path + "/side.txt")
+        }, refreshing: { await repo.refresh() })
+        XCTAssertNil(repo.errorMessage)
+        XCTAssertEqual(repo.snapshot.currentBranch, "main")
+    }
 }

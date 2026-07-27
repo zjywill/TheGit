@@ -1567,6 +1567,13 @@ final class RepoState: ObservableObject, Identifiable {
         perform { try await $0.rebase(onto: commit.hash) }
     }
 
+    /// Merge a commit rather than a branch — the graph's version of the
+    /// branch row's Merge. git takes any commit-ish, and a merge of a bare
+    /// sha records it by hash, which is exactly what the row means.
+    func merge(_ commit: Commit) {
+        perform { try await $0.merge(commit.hash) }
+    }
+
     func reset(to commit: Commit, mode: GitClient.ResetMode) {
         perform { try await $0.reset(to: commit.hash, mode: mode) }
     }
