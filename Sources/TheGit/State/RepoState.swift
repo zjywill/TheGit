@@ -474,12 +474,18 @@ final class RepoState: ObservableObject, Identifiable {
         snapshot.commits.first { $0.refs.contains { $0.hasPrefix("HEAD") } }?.subject
     }
 
-    func stashChanges() {
+    /// `paths` empty means the whole working tree. A subset goes through a
+    /// pathspec rather than `git stash push --staged`: --staged refuses any
+    /// file that has both staged and unstaged changes, and it fails *after*
+    /// writing the stash entry, leaving a stash whose changes are still in
+    /// the working tree. A pathspec push takes those files whole, which is
+    /// what picking them in the panel means anyway.
+    func stashChanges(only paths: [String] = []) {
         let message = commitMessage.trimmingCharacters(in: .whitespacesAndNewlines)
         Task {
             isBusy = true
             do {
-                try await git.stashPush(message: message.isEmpty ? nil : message)
+                try await git.stashPush(message: message.isEmpty ? nil : message, paths: paths)
                 commitMessage = ""
                 panelMode = .commit
             } catch {

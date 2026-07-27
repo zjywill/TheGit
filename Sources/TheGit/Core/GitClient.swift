@@ -509,9 +509,10 @@ actor GitClient {
         try await run(["pull"] + extraArgs)
     }
 
-    func stashPush(message: String? = nil) async throws {
+    func stashPush(message: String? = nil, paths: [String] = []) async throws {
         var args = ["stash", "push", "-u"]
         if let message, !message.isEmpty { args += ["-m", message] }
+        if !paths.isEmpty { args += ["--"] + paths }
         try await run(args)
     }
 

@@ -687,4 +687,77 @@ final class RepoIntegrationTests: XCTestCase {
         XCTAssertNil(repo.errorMessage)
         XCTAssertEqual(repo.snapshot.currentBranch, "main")
     }
+
+    // MARK: - Stash
+
+    /// "Stash n Staged Files" takes the staged ones and nothing else — the
+    /// rest of the working tree is still there afterwards.
+    func testStashingOnlyStagedFilesLeavesTheRestInTheWorkingTree() async throws {
+        let path = try await makeRepo("stash-staged")
+        try write("keep\n", to: path + "/keep.txt")      // untracked, stays
+        try write("new\n", to: path + "/new.png")        // staged, goes
+        try await git(path, ["add", "new.png"])
+        try write("seed\nedited\n", to: path + "/seed.txt")  // unstaged, stays
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        XCTAssertEqual(repo.snapshot.staged.map(\.path), ["new.png"])
+
+        repo.stashChanges(only: repo.snapshot.staged.map(\.path))
+        try await waitUntil("the staged file to be stashed", {
+            repo.snapshot.staged.isEmpty && repo.snapshot.stashes.count == 1
+        }, refreshing: { await repo.refresh() })
+        XCTAssertNil(repo.errorMessage)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path + "/new.png"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path + "/keep.txt"))
+        XCTAssertEqual(read(path + "/seed.txt"), "seed\nedited\n")
+        XCTAssertEqual(untrackedPaths(repo), ["keep.txt"])
+    }
+
+    /// The mirror image: the unstaged half goes, and what was staged is
+    /// still staged and ready to commit.
+    func testStashingOnlyUnstagedFilesKeepsTheIndex() async throws {
+        let path = try await makeRepo("stash-unstaged")
+        try write("new\n", to: path + "/new.png")
+        try await git(path, ["add", "new.png"])
+        try write("seed\nedited\n", to: path + "/seed.txt")
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        let unstaged = repo.snapshot.unstaged.map(\.path)
+        XCTAssertEqual(unstaged, ["seed.txt"])
+
+        repo.stashChanges(only: unstaged)
+        try await waitUntil("the unstaged file to be stashed", {
+            repo.snapshot.unstaged.isEmpty && repo.snapshot.stashes.count == 1
+        }, refreshing: { await repo.refresh() })
+        XCTAssertNil(repo.errorMessage)
+
+        XCTAssertEqual(read(path + "/seed.txt"), "seed\n")
+        XCTAssertEqual(repo.snapshot.staged.map(\.path), ["new.png"])
+    }
+
+    /// A file with both staged and unstaged edits is what makes
+    /// `git stash push --staged` fail halfway, leaving a stash entry whose
+    /// changes are still in the tree. The pathspec push takes it whole.
+    func testStashingAFileStagedAndEditedAgainTakesItWhole() async throws {
+        let path = try await makeRepo("stash-mixed")
+        try write("one\n", to: path + "/seed.txt")
+        try await git(path, ["add", "seed.txt"])
+        try write("one\ntwo\n", to: path + "/seed.txt")   // staged + unstaged
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        repo.stashChanges(only: ["seed.txt"])
+        try await waitUntil("the mixed file to be stashed", {
+            repo.snapshot.stashes.count == 1
+        }, refreshing: { await repo.refresh() })
+        XCTAssertNil(repo.errorMessage)
+
+        // Both halves left: back to the committed content, nothing pending.
+        XCTAssertEqual(read(path + "/seed.txt"), "seed\n")
+        XCTAssertTrue(repo.snapshot.staged.isEmpty)
+        XCTAssertTrue(repo.snapshot.unstaged.isEmpty)
+    }
 }

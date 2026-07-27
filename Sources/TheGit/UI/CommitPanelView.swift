@@ -123,12 +123,29 @@ struct CommitPanelView: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(!canCommit)
                 } else {
-                    Button {
-                        repo.stashChanges()
+                    // Split button: the whole tree stays the primary action,
+                    // but staging a file first is a statement of intent, and
+                    // the arrow is where that intent gets honoured. A menu
+                    // rather than a second button so the panel keeps its
+                    // height whatever is staged.
+                    let staged = repo.snapshot.staged.map(\.path)
+                    let unstaged = (repo.snapshot.unstaged + repo.snapshot.conflicted).map(\.path)
+                    Menu {
+                        Button("Stash \(staged.count) Staged File\(staged.count == 1 ? "" : "s")") {
+                            repo.stashChanges(only: staged)
+                        }
+                        .disabled(staged.isEmpty)
+                        Button("Stash \(unstaged.count) Unstaged File\(unstaged.count == 1 ? "" : "s")") {
+                            repo.stashChanges(only: unstaged)
+                        }
+                        .disabled(unstaged.isEmpty)
                     } label: {
                         Text("Stash All Changes")
                             .frame(maxWidth: .infinity)
+                    } primaryAction: {
+                        repo.stashChanges()
                     }
+                    .menuStyle(.button)
                     .controlSize(.large)
                     .buttonStyle(.borderedProminent)
                     .disabled(!hasAnyChanges || repo.isBusy)
