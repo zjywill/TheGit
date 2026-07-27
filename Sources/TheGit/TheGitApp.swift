@@ -1,10 +1,75 @@
 import AppKit
 import SwiftUI
 
+/// Five UI zoom levels, browser-style: content lays out at the inverse-scaled
+/// logical size and is then scaled up to fill the window exactly, so
+/// everything grows uniformly and text reflows naturally.
+enum UIZoom {
+    static let levels: [CGFloat] = [0.8, 0.9, 1.0, 1.15, 1.3]
+    static let defaultLevel = 2
+}
+
+/// Applies one zoom level to its content. Zoom is a keyboard-driven,
+/// many-times-a-day action, so switching levels is instant — no animation.
+///
+/// The scaling happens at the AppKit level (a bounds transform on a plain
+/// NSView wrapping an NSHostingView), NOT via SwiftUI's scaleEffect: a
+/// transform imposed by SwiftUI on AppKit-backed views (every List is an
+/// NSTableView) makes their layout and geometry disagree, and rapid zoom
+/// changes crashed inside NSTableView's constraint update. With a bounds
+/// transform the whole hierarchy shares one coherent coordinate space, and
+/// a zoom change is just a resize as far as AppKit is concerned.
+struct ZoomContainer<Content: View>: NSViewRepresentable {
+    let zoom: CGFloat
+    let content: Content
+
+    final class ZoomView: NSView {
+        var zoom: CGFloat = 1 { didSet { applyZoom() } }
+        var hosting: NSView?
+
+        override func setFrameSize(_ newSize: NSSize) {
+            super.setFrameSize(newSize)
+            applyZoom()
+        }
+
+        func applyZoom() {
+            guard frame.width > 0, frame.height > 0 else { return }
+            setBoundsSize(NSSize(width: frame.width / zoom, height: frame.height / zoom))
+            hosting?.frame = bounds
+        }
+    }
+
+    func makeNSView(context: Context) -> ZoomView {
+        let view = ZoomView()
+        let hosting = NSHostingView(rootView: content)
+        hosting.sizingOptions = []
+        view.addSubview(hosting)
+        view.hosting = hosting
+        view.zoom = zoom
+        return view
+    }
+
+    func updateNSView(_ view: ZoomView, context: Context) {
+        (view.hosting as? NSHostingView<Content>)?.rootView = content
+        view.zoom = zoom
+    }
+}
+
 @main
 struct TheGitApp: App {
     @StateObject private var appState = AppState()
     @ObservedObject private var avatars = AvatarStore.shared
+    @AppStorage("uiZoomLevel") private var zoomLevel = UIZoom.defaultLevel
+
+    private var zoom: CGFloat {
+        UIZoom.levels[max(0, min(zoomLevel, UIZoom.levels.count - 1))]
+    }
+
+    private func setZoom(_ level: Int) {
+        DispatchQueue.main.async {
+            zoomLevel = max(0, min(level, UIZoom.levels.count - 1))
+        }
+    }
 
     init() {
         // Needed when launched via `swift run` (no app bundle).
@@ -18,8 +83,9 @@ struct TheGitApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView()
-                .environmentObject(appState)
+            // Min size constrains the window (outside the zoom), not the
+            // zoomed-down layout — otherwise zooming in would fight it.
+            ZoomContainer(zoom: zoom, content: RootView().environmentObject(appState))
                 .frame(minWidth: 1000, minHeight: 620)
         }
         .windowStyle(.hiddenTitleBar)
@@ -33,6 +99,20 @@ struct TheGitApp: App {
                 // feature that reaches a server the user didn't configure.
                 Toggle("Author Avatars", isOn: $avatars.isEnabled)
                     .help("Fetch author avatars from Gravatar and GitHub")
+                Divider()
+                // ⌘= rather than ⌘⇧= : matches what browsers actually bind.
+                // The level change is deferred out of the key-event cycle:
+                // re-laying out the whole window (the sidebar's NSTableView
+                // included) mid-cycle trips AppKit's reentrant-layout assert.
+                Button("Zoom In") { setZoom(zoomLevel + 1) }
+                    .keyboardShortcut("=")
+                    .disabled(zoomLevel >= UIZoom.levels.count - 1)
+                Button("Zoom Out") { setZoom(zoomLevel - 1) }
+                    .keyboardShortcut("-")
+                    .disabled(zoomLevel <= 0)
+                Button("Actual Size") { setZoom(UIZoom.defaultLevel) }
+                    .keyboardShortcut("0")
+                    .disabled(zoomLevel == UIZoom.defaultLevel)
             }
         }
     }
