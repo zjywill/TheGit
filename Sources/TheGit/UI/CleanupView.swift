@@ -58,9 +58,9 @@ struct CleanupView: View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Clean up")
-                    .font(.system(size: 14, weight: .semibold))
+                    .zoomFont(14, weight: .semibold)
                 Text(subtitle)
-                    .font(.system(size: 11))
+                    .zoomFont(11)
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -72,7 +72,7 @@ struct CleanupView: View {
                     Task { await repo.scanCleanup() }
                 } label: {
                     Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 11, weight: .semibold))
+                        .zoomFont(11, weight: .semibold)
                         .frame(width: 22, height: 22)
                         .contentShape(Rectangle())
                 }
@@ -92,7 +92,7 @@ struct CleanupView: View {
         if repo.scanningCleanup && repo.cleanupCandidates.isEmpty {
             centered {
                 Text("Scanning…")
-                    .font(.system(size: 12))
+                    .zoomFont(12)
                     .foregroundStyle(.secondary)
             }
         } else if repo.cleanupCandidates.isEmpty {
@@ -128,12 +128,12 @@ struct CleanupView: View {
     private var allClear: some View {
         VStack(spacing: 6) {
             Image(systemName: "checkmark.circle")
-                .font(.system(size: 22, weight: .light))
+                .zoomFont(22, weight: .light)
                 .foregroundStyle(.green)
             Text("Nothing to clean")
-                .font(.system(size: 12, weight: .medium))
+                .zoomFont(12, weight: .medium)
             Text("Every local branch is either active or unmerged.")
-                .font(.system(size: 11))
+                .zoomFont(11)
                 .foregroundStyle(.secondary)
         }
         .transition(.opacity.combined(with: .scale(scale: 0.96)))
@@ -158,7 +158,7 @@ struct CleanupView: View {
             }
             if let error = repo.cleanupError {
                 Text(error)
-                    .font(.system(size: 10))
+                    .zoomFont(10)
                     .foregroundStyle(.orange)
                     .lineLimit(2)
                     .help(error)
@@ -191,12 +191,12 @@ struct CleanupRow: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: candidate.isWorktree ? "folder" : "arrow.triangle.branch")
-                .font(.system(size: 11))
+                .zoomFont(11)
                 .foregroundStyle(candidate.isSafe ? Color.secondary : .orange)
                 .frame(width: 14)
             VStack(alignment: .leading, spacing: 2) {
                 Text(candidate.name)
-                    .font(.system(size: 12, weight: .medium))
+                    .zoomFont(12, weight: .medium)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 HStack(spacing: 4) {
@@ -207,7 +207,7 @@ struct CleanupRow: View {
                         Text(risk).foregroundStyle(.orange)
                     }
                 }
-                .font(.system(size: 10))
+                .zoomFont(10)
                 .lineLimit(1)
             }
             Spacer(minLength: 8)

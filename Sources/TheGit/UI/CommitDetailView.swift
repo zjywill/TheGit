@@ -10,14 +10,14 @@ struct CommitDetailView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text("Commit Details")
-                    .font(.system(size: 11, weight: .semibold))
+                    .zoomFont(11, weight: .semibold)
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button {
                     repo.selectedCommit = nil
                 } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 10, weight: .bold))
+                        .zoomFont(10, weight: .bold)
                 }
                 .buttonStyle(.pressEffect)
                 .foregroundStyle(.secondary)
@@ -30,28 +30,28 @@ struct CommitDetailView: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 Text(commit.subject)
-                    .font(.system(size: 12, weight: .semibold))
+                    .zoomFont(12, weight: .semibold)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
 
                 HStack(spacing: 6) {
                     Text(commit.author)
-                        .font(.system(size: 11))
+                        .zoomFont(11)
                         .foregroundStyle(.secondary)
                     Text(commit.date.formatted(date: .abbreviated, time: .shortened))
-                        .font(.system(size: 11))
+                        .zoomFont(11)
                         .foregroundStyle(.tertiary)
                 }
 
                 HStack(spacing: 6) {
                     Text(commit.shortHash)
-                        .font(.system(size: 11, design: .monospaced))
+                        .zoomFont(11, design: .monospaced)
                         .foregroundStyle(.tertiary)
                     Button {
                         RepoState.copyToPasteboard(commit.hash)
                     } label: {
                         Image(systemName: "doc.on.doc")
-                            .font(.system(size: 9))
+                            .zoomFont(9)
                     }
                     .buttonStyle(.pressEffect)
                     .foregroundStyle(.secondary)
@@ -64,23 +64,27 @@ struct CommitDetailView: View {
 
             HStack {
                 Text("Changed Files (\(repo.commitFiles.count))")
-                    .font(.system(size: 11, weight: .semibold))
+                    .zoomFont(11, weight: .semibold)
                     .foregroundStyle(.secondary)
                 Spacer()
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
 
-            List(repo.commitFiles) { file in
-                CommitFileRow(
-                    file: file,
-                    isSelected: repo.selectedFile?.id == file.id && repo.diffCommit != nil
-                ) {
-                    repo.selectCommitFile(file)
+            ScrollView {
+                LazyVStack(spacing: 4) {
+                    ForEach(repo.commitFiles) { file in
+                        CommitFileRow(
+                            file: file,
+                            isSelected: repo.selectedFile?.id == file.id && repo.diffCommit != nil
+                        ) {
+                            repo.selectCommitFile(file)
+                        }
+                        .padding(.horizontal, 12)
+                    }
                 }
-                .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 12))
+                .padding(.vertical, 2)
             }
-            .listStyle(.plain)
         }
         .background(.background)
     }
@@ -104,7 +108,7 @@ struct CommitFileRow: View {
     var body: some View {
         HStack(spacing: 6) {
             Text(String(file.status))
-                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .zoomFont(10, weight: .bold, design: .monospaced)
                 .foregroundStyle(statusColor)
                 .frame(width: 14)
 
@@ -114,7 +118,7 @@ struct CommitFileRow: View {
                 }
                 Text(file.fileName)
             }
-            .font(.system(size: 12))
+            .zoomFont(12)
             .lineLimit(1)
             .truncationMode(.head)
 

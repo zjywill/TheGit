@@ -3,7 +3,9 @@ import SwiftUI
 /// Middle panel: commit graph with lane rendering.
 struct GraphView: View {
     @ObservedObject var repo: RepoState
+    @Environment(\.uiZoom) private var zoom
 
+    /// Base metrics at zoom 1; multiply by the environment's uiZoom.
     static let rowHeight: CGFloat = 32
     static let laneWidth: CGFloat = 18
     static let defaultVisibleLanes = 8
@@ -33,12 +35,14 @@ struct GraphView: View {
             }
             : allRows
         let totalLanes = GraphLayout.maxLanes(of: rows)
-        let neededWidth = CGFloat(totalLanes) * Self.laneWidth + 8
-        let autoWidth = CGFloat(min(totalLanes, Self.defaultVisibleLanes)) * Self.laneWidth + 8
+        let laneW = Self.laneWidth * zoom
+        let rowH = Self.rowHeight * zoom
+        let neededWidth = CGFloat(totalLanes) * laneW + 8
+        let autoWidth = CGFloat(min(totalLanes, Self.defaultVisibleLanes)) * laneW + 8
         let graphWidth = searching
-            ? Self.laneWidth * 2
+            ? laneW * 2
             : storedWidth > 0
-                ? min(max(CGFloat(storedWidth), Self.laneWidth * 2), neededWidth)
+                ? min(max(CGFloat(storedWidth), laneW * 2), neededWidth)
                 : autoWidth
         // How far the lanes can slide before their right edge is reached.
         let maxScroll = max(0, neededWidth - graphWidth)
@@ -51,7 +55,7 @@ struct GraphView: View {
         // Dedicated BRANCH/TAG column left of the graph (GitKraken layout):
         // zero width when the loaded range has no refs at all.
         let hasBadges = rows.contains { !RefBadge.infos(for: $0.commit.refs).isEmpty }
-        let badgeWidth: CGFloat = hasBadges ? 150 : 0
+        let badgeWidth: CGFloat = hasBadges ? 150 * zoom : 0
 
         let changeCount = repo.snapshot.staged.count + repo.snapshot.unstaged.count
             + repo.snapshot.conflicted.count
@@ -107,7 +111,7 @@ struct GraphView: View {
                             .onAppear { repo.loadMoreIfNeeded(row) }
                         }
                     }
-                    .frame(height: Self.rowHeight)
+                    .frame(height: rowH)
                     // Leading-aligned even when the row's fixed columns
                     // exceed the window: an overflowing HStack is centered
                     // by default, which shifts each row left by half its
@@ -163,7 +167,7 @@ struct GraphView: View {
                         .onChanged { value in
                             let base = dragBaseWidth ?? graphWidth
                             dragBaseWidth = base
-                            storedWidth = Double(min(max(base + value.translation.width, Self.laneWidth * 2), neededWidth))
+                            storedWidth = Double(min(max(base + value.translation.width, laneW * 2), neededWidth))
                         }
                         .onEnded { _ in dragBaseWidth = nil }
                 )
@@ -181,6 +185,7 @@ struct WipGraphRow: View {
     var scrollX: CGFloat = 0
     var fadeLeading = false
     var fadeTrailing = false
+    @Environment(\.uiZoom) private var zoom
 
     var body: some View {
         HStack(spacing: 8) {
@@ -194,21 +199,21 @@ struct WipGraphRow: View {
                 fadeLeading: fadeLeading,
                 fadeTrailing: fadeTrailing
             )
-            .frame(width: graphWidth, height: GraphView.rowHeight)
+            .frame(width: graphWidth, height: GraphView.rowHeight * zoom)
 
             RoundedRectangle(cornerRadius: 1)
                 .fill(Color.secondary.opacity(0.5))
-                .frame(width: 3, height: 16)
+                .frame(width: 3, height: 16 * zoom)
 
             Text("// WIP")
-                .font(.system(size: 12, design: .monospaced))
+                .zoomFont(12, design: .monospaced)
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 2) {
                 Image(systemName: "plus")
-                    .font(.system(size: 9, weight: .bold))
+                    .zoomFont(9, weight: .bold)
                 Text("\(changeCount)")
-                    .font(.system(size: 11, weight: .semibold))
+                    .zoomFont(11, weight: .semibold)
                     .contentTransition(.numericText(value: Double(changeCount)))
                     .animation(.easeOut(duration: 0.2), value: changeCount)
             }
@@ -230,6 +235,7 @@ struct GraphRowView: View {
     @ObservedObject var repo: RepoState
     var scrollX: CGFloat = 0
     @ObservedObject private var avatars = AvatarStore.shared
+    @Environment(\.uiZoom) private var zoom
 
     /// In search mode lane lines are meaningless (rows are filtered),
     /// so each row shows just its node in column 0.
@@ -283,17 +289,17 @@ struct GraphRowView: View {
                 fadeLeading: fadeLeading,
                 fadeTrailing: faded
             )
-            .frame(width: graphWidth, height: GraphView.rowHeight)
+            .frame(width: graphWidth, height: GraphView.rowHeight * zoom)
                 .clipped()
 
             // Branch-colored tick before the message, GitKraken-style.
             RoundedRectangle(cornerRadius: 1)
                 .fill(LaneCanvas.color(row.columnColor))
-                .frame(width: 3, height: 16)
+                .frame(width: 3, height: 16 * zoom)
                 .opacity(onCurrentBranch ? 1 : 0.45)
 
             Text(row.commit.subject)
-                .font(.system(size: 12))
+                .zoomFont(12)
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .opacity(onCurrentBranch ? 1 : 0.55)
@@ -303,16 +309,16 @@ struct GraphRowView: View {
             // Fixed-width trailing columns: the message truncates,
             // author/hash never wrap or shrink.
             Text(row.commit.author)
-                .font(.system(size: 11))
+                .zoomFont(11)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
-                .frame(width: 90, alignment: .trailing)
+                .frame(width: 90 * zoom, alignment: .trailing)
                 .help(row.commit.author)
                 .opacity(onCurrentBranch ? 1 : 0.55)
 
             Text(row.commit.shortHash)
-                .font(.system(size: 11, design: .monospaced))
+                .zoomFont(11, design: .monospaced)
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
                 .fixedSize()
@@ -413,6 +419,7 @@ struct LaneCanvas: View {
     /// the lines only, in-canvas — a pinned node must not fade with them.
     var fadeLeading = false
     var fadeTrailing = false
+    @Environment(\.uiZoom) private var zoom
 
     static let palette: [Color] = [
         .blue, .purple, .teal, .orange, .pink, .green, .indigo, .red, .cyan, .yellow,
@@ -438,7 +445,7 @@ struct LaneCanvas: View {
 
     var body: some View {
         Canvas { context, size in
-            let laneW = GraphView.laneWidth
+            let laneW = GraphView.laneWidth * zoom
             let midY = size.height / 2
             let dotX = x(row.column, laneW)
             let isWip = row.commit.isWip
@@ -489,12 +496,13 @@ struct LaneCanvas: View {
                 lineContext.stroke(
                     path,
                     with: .color(Self.color(edge.color).opacity(lineAlpha(edge.color))),
-                    // Dash period must divide the row height (32): each row
+                    // Dash period must divide the row height: each row
                     // strokes its own segment from phase 0, and a pattern
                     // that doesn't tile fuses into blobs at row boundaries.
+                    // Both scale by zoom together, so tiling is preserved.
                     style: edge.dashed
-                        ? StrokeStyle(lineWidth: 2, dash: [4, 4])
-                        : StrokeStyle(lineWidth: 2)
+                        ? StrokeStyle(lineWidth: 2 * zoom, dash: [4 * zoom, 4 * zoom])
+                        : StrokeStyle(lineWidth: 2 * zoom)
                 )
             }
 
@@ -570,7 +578,7 @@ struct LaneCanvas: View {
             let nodeX = pinned ? scrollX + pinX : dotX
 
             // Avatar-style node: branch-colored ring around author initials.
-            let r: CGFloat = 8
+            let r: CGFloat = 8 * zoom
             let nodeRect = CGRect(x: nodeX - r, y: midY - r, width: r * 2, height: r * 2)
             nodeContext.fill(
                 Path(ellipseIn: nodeRect),
@@ -579,13 +587,13 @@ struct LaneCanvas: View {
             if isWip {
                 // Empty dashed circle, GitKraken-style uncommitted node.
                 nodeContext.stroke(
-                    Path(ellipseIn: nodeRect.insetBy(dx: 1, dy: 1)),
+                    Path(ellipseIn: nodeRect.insetBy(dx: 1 * zoom, dy: 1 * zoom)),
                     with: .color(Self.color(row.columnColor).opacity(0.9)),
-                    style: StrokeStyle(lineWidth: 1.5, dash: [3, 2.5])
+                    style: StrokeStyle(lineWidth: 1.5 * zoom, dash: [3 * zoom, 2.5 * zoom])
                 )
                 return
             }
-            let inner = nodeRect.insetBy(dx: 1.5, dy: 1.5)
+            let inner = nodeRect.insetBy(dx: 1.5 * zoom, dy: 1.5 * zoom)
             nodeContext.fill(
                 Path(ellipseIn: inner),
                 with: .color(Self.color(row.columnColor).opacity(dimmed ? 0.1 : 0.22))
@@ -604,12 +612,14 @@ struct LaneCanvas: View {
             nodeContext.stroke(
                 Path(ellipseIn: nodeRect),
                 with: .color(Self.color(row.columnColor).opacity(dimmed ? 0.45 : 1)),
-                lineWidth: 2
+                lineWidth: 2 * zoom
             )
             if avatar == nil {
+                // Plain Font here, not the zoomFont modifier:
+                // GraphicsContext.draw takes a Text value, not a View.
                 nodeContext.draw(
                     Text(Self.initials(row.commit.author))
-                        .font(.system(size: 7, weight: .bold))
+                        .font(.system(size: 7 * zoom, weight: .bold))
                         .foregroundColor(Self.color(row.columnColor).opacity(dimmed ? 0.5 : 1)),
                     at: CGPoint(x: nodeX, y: midY)
                 )
@@ -726,7 +736,7 @@ struct BadgeColumn: View {
                     showOverflow.toggle()
                 } label: {
                     Text("+\(infos.count - 1)")
-                        .font(.system(size: 10, weight: .medium))
+                        .zoomFont(10, weight: .medium)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 2)
                         .background(Capsule().fill(Color.primary.opacity(0.1)))
@@ -842,20 +852,20 @@ struct RefBadge: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
             if info.isTag {
-                Image(systemName: "tag").font(.system(size: 8))
+                Image(systemName: "tag").zoomFont(8)
             }
             if info.hasLocal && !info.isTag {
-                Image(systemName: "laptopcomputer").font(.system(size: 8))
+                Image(systemName: "laptopcomputer").zoomFont(8)
             }
             if info.hasRemote {
-                Image(systemName: "cloud").font(.system(size: 8))
+                Image(systemName: "cloud").zoomFont(8)
             }
             if let track {
                 Text("\(track.ahead > 0 ? "↑\(track.ahead)" : "")\(track.behind > 0 ? "↓\(track.behind)" : "")")
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .zoomFont(9, weight: .bold, design: .monospaced)
             }
         }
-        .font(.system(size: 10, weight: .medium))
+        .zoomFont(10, weight: .medium)
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
         .background(Capsule().fill(color.opacity(0.18)))

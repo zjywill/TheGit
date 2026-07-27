@@ -11,7 +11,7 @@ struct FileDiffView: View {
             Divider()
             if repo.diffLines.isEmpty {
                 Text("No textual changes to show")
-                    .font(.system(size: 12))
+                    .zoomFont(12)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -48,7 +48,7 @@ struct FileDiffView: View {
                     }
                     Text(file.fileName).fontWeight(.semibold)
                 }
-                .font(.system(size: 12))
+                .zoomFont(12)
                 .lineLimit(1)
                 .truncationMode(.head)
 
@@ -57,7 +57,7 @@ struct FileDiffView: View {
                 if let commitHash = repo.diffCommit {
                     // Diff of a historical commit — nothing to stage.
                     Text("@ \(String(commitHash.prefix(7)))")
-                        .font(.system(size: 11, design: .monospaced))
+                        .zoomFont(11, design: .monospaced)
                         .foregroundStyle(.tertiary)
                 } else {
                     Button(file.area == .staged ? "Unstage File" : "Stage File") {
@@ -75,7 +75,7 @@ struct FileDiffView: View {
                     repo.closeDiff()
                 } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 10, weight: .bold))
+                        .zoomFont(10, weight: .bold)
                 }
                 .buttonStyle(.pressEffect)
                 .foregroundStyle(.secondary)
@@ -120,7 +120,7 @@ struct DiffLineRow: View {
                 if let hunkAction {
                     Button(hunkAction.title, action: hunkAction.run)
                         .buttonStyle(.plain)
-                        .font(.system(size: 10, weight: .medium))
+                        .zoomFont(10, weight: .medium)
                         .foregroundStyle(Color.accentColor)
                         .padding(.trailing, 10)
                 }
@@ -139,7 +139,7 @@ struct DiffLineRow: View {
                 Spacer(minLength: 0)
             }
         }
-        .font(.system(size: 11, design: .monospaced))
+        .zoomFont(11, design: .monospaced)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(background)
         .textSelection(.enabled)

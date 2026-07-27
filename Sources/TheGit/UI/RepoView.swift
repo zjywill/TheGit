@@ -213,11 +213,11 @@ struct RepoToolbar: ToolbarContent {
         ToolbarItem {
             HStack(spacing: 4) {
                 Image(systemName: "magnifyingglass")
-                    .font(.system(size: 11))
+                    .zoomFont(11)
                     .foregroundStyle(.secondary)
                 TextField("Search commits", text: $repo.searchText)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 12))
+                    .zoomFont(12)
                     .frame(width: 150)
                     .focused($searchFocused)
                     .onExitCommand {
@@ -229,7 +229,7 @@ struct RepoToolbar: ToolbarContent {
                         repo.searchText = ""
                     } label: {
                         Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 11))
+                            .zoomFont(11)
                     }
                     .buttonStyle(.pressEffect)
                     .foregroundStyle(.secondary)

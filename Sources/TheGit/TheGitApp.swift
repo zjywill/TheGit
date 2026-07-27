@@ -1,57 +1,27 @@
 import AppKit
 import SwiftUI
 
-/// Five UI zoom levels, browser-style: content lays out at the inverse-scaled
-/// logical size and is then scaled up to fill the window exactly, so
-/// everything grows uniformly and text reflows naturally.
+/// Five UI zoom levels. Zoom multiplies font sizes and the key layout
+/// metrics through the `\.uiZoom` environment value — plain state-driven
+/// relayout, no scale transforms and no nested hosting views. Every
+/// transform-based approach that was tried (SwiftUI scaleEffect, an AppKit
+/// bounds transform, a wrapped NSHostingView with scene bridging off)
+/// tripped macOS 26's reentrant-layout assert in the window's toolbar
+/// bridge when zoom changed while a layout pass was in flight.
 enum UIZoom {
-    static let levels: [CGFloat] = [0.8, 0.9, 1.0, 1.15, 1.3]
+    static let levels: [CGFloat] = [0.85, 0.95, 1.0, 1.15, 1.3]
     static let defaultLevel = 2
 }
 
-/// Applies one zoom level to its content. Zoom is a keyboard-driven,
-/// many-times-a-day action, so switching levels is instant — no animation.
-///
-/// The scaling happens at the AppKit level (a bounds transform on a plain
-/// NSView wrapping an NSHostingView), NOT via SwiftUI's scaleEffect: a
-/// transform imposed by SwiftUI on AppKit-backed views (every List is an
-/// NSTableView) makes their layout and geometry disagree, and rapid zoom
-/// changes crashed inside NSTableView's constraint update. With a bounds
-/// transform the whole hierarchy shares one coherent coordinate space, and
-/// a zoom change is just a resize as far as AppKit is concerned.
-struct ZoomContainer<Content: View>: NSViewRepresentable {
-    let zoom: CGFloat
-    let content: Content
+private struct UIZoomKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 1
+}
 
-    final class ZoomView: NSView {
-        var zoom: CGFloat = 1 { didSet { applyZoom() } }
-        var hosting: NSView?
-
-        override func setFrameSize(_ newSize: NSSize) {
-            super.setFrameSize(newSize)
-            applyZoom()
-        }
-
-        func applyZoom() {
-            guard frame.width > 0, frame.height > 0 else { return }
-            setBoundsSize(NSSize(width: frame.width / zoom, height: frame.height / zoom))
-            hosting?.frame = bounds
-        }
-    }
-
-    func makeNSView(context: Context) -> ZoomView {
-        let view = ZoomView()
-        let hosting = NSHostingView(rootView: content)
-        hosting.sizingOptions = []
-        view.addSubview(hosting)
-        view.hosting = hosting
-        view.zoom = zoom
-        return view
-    }
-
-    func updateNSView(_ view: ZoomView, context: Context) {
-        (view.hosting as? NSHostingView<Content>)?.rootView = content
-        view.zoom = zoom
+extension EnvironmentValues {
+    /// Current UI zoom factor; font sizes and layout metrics multiply by it.
+    var uiZoom: CGFloat {
+        get { self[UIZoomKey.self] }
+        set { self[UIZoomKey.self] = newValue }
     }
 }
 
@@ -83,9 +53,9 @@ struct TheGitApp: App {
 
     var body: some Scene {
         WindowGroup {
-            // Min size constrains the window (outside the zoom), not the
-            // zoomed-down layout — otherwise zooming in would fight it.
-            ZoomContainer(zoom: zoom, content: RootView().environmentObject(appState))
+            RootView()
+                .environmentObject(appState)
+                .environment(\.uiZoom, zoom)
                 .frame(minWidth: 1000, minHeight: 620)
         }
         .windowStyle(.hiddenTitleBar)
@@ -101,9 +71,8 @@ struct TheGitApp: App {
                     .help("Fetch author avatars from Gravatar and GitHub")
                 Divider()
                 // ⌘= rather than ⌘⇧= : matches what browsers actually bind.
-                // The level change is deferred out of the key-event cycle:
-                // re-laying out the whole window (the sidebar's NSTableView
-                // included) mid-cycle trips AppKit's reentrant-layout assert.
+                // The level change is deferred out of the key-event cycle
+                // so the whole-window relayout starts from a clean turn.
                 Button("Zoom In") { setZoom(zoomLevel + 1) }
                     .keyboardShortcut("=")
                     .disabled(zoomLevel >= UIZoom.levels.count - 1)
@@ -163,7 +132,7 @@ struct EmptyStateView: View {
     var body: some View {
         VStack(spacing: 16) {
             Image(systemName: "arrow.triangle.branch")
-                .font(.system(size: 48))
+                .zoomFont(48)
                 .foregroundStyle(.secondary)
             Text("No repository open")
                 .font(.title3)
@@ -178,6 +147,7 @@ struct EmptyStateView: View {
 /// Top tab bar: one tab per open repository, like a browser.
 struct RepoTabsBar: View {
     @EnvironmentObject var appState: AppState
+    @Environment(\.uiZoom) private var zoom
 
     var body: some View {
         HStack(spacing: 2) {
@@ -188,7 +158,7 @@ struct RepoTabsBar: View {
                 appState.openRepoPanel()
             } label: {
                 Image(systemName: "plus")
-                    .frame(width: 28, height: 28)
+                    .frame(width: 28 * zoom, height: 28 * zoom)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.pressEffect)
@@ -198,7 +168,7 @@ struct RepoTabsBar: View {
             Spacer()
         }
         .padding(.horizontal, 80) // leave room for traffic lights
-        .frame(height: 38)
+        .frame(height: 38 * zoom)
         .background(.bar)
     }
 }
@@ -208,20 +178,21 @@ struct RepoTab: View {
     @ObservedObject var repo: RepoState
     let isActive: Bool
     @State private var hovering = false
+    @Environment(\.uiZoom) private var zoom
 
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "arrow.triangle.branch")
-                .font(.system(size: 10))
+                .zoomFont(10)
                 .foregroundStyle(isActive ? Color.accentColor : .secondary)
             Text(repo.displayName)
-                .font(.system(size: 12, weight: isActive ? .semibold : .regular))
+                .zoomFont(12, weight: isActive ? .semibold : .regular)
                 .lineLimit(1)
             Button {
                 appState.close(repo: repo)
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 8, weight: .bold))
+                    .zoomFont(8, weight: .bold)
             }
             .buttonStyle(.pressEffect)
             .foregroundStyle(.secondary)
@@ -229,7 +200,7 @@ struct RepoTab: View {
             .animation(.easeOut(duration: 0.12), value: hovering)
         }
         .padding(.horizontal, 10)
-        .frame(height: 28)
+        .frame(height: 28 * zoom)
         .background(
             RoundedRectangle(cornerRadius: 6)
                 .fill(isActive ? Color.primary.opacity(0.08) : hovering ? Color.primary.opacity(0.04) : .clear)

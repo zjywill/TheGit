@@ -58,7 +58,7 @@ struct CommitPanelView: View {
                 // Always in the layout — hidden in stash mode instead of
                 // removed, so switching tabs never changes the panel height.
                 Toggle("Amend previous commit", isOn: $repo.amend)
-                    .font(.system(size: 11))
+                    .zoomFont(11)
                     .toggleStyle(.checkbox)
                     .opacity(repo.panelMode == .commit ? 1 : 0)
                     .disabled(repo.panelMode != .commit)
@@ -70,7 +70,7 @@ struct CommitPanelView: View {
                     }
 
                 TextEditor(text: $repo.commitMessage)
-                    .font(.system(size: 12))
+                    .zoomFont(12)
                     .scrollContentBackground(.hidden)
                     .padding(6)
                     .frame(height: 90)
@@ -169,13 +169,13 @@ struct OperationBanner: View {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
                 Text("\(op.rawValue) in progress")
-                    .font(.system(size: 12, weight: .semibold))
+                    .zoomFont(12, weight: .semibold)
                 Spacer()
             }
             Text(conflicts > 0
                 ? "\(conflicts) conflicted file\(conflicts == 1 ? "" : "s") — resolve them, then continue."
                 : "All conflicts resolved. Continue to finish the \(op.rawValue.lowercased()).")
-                .font(.system(size: 11))
+                .zoomFont(11)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             HStack {
@@ -201,18 +201,22 @@ struct ConflictSection: View {
         VStack(spacing: 0) {
             HStack {
                 Text("Conflicted Files (\(repo.snapshot.conflicted.count))")
-                    .font(.system(size: 11, weight: .semibold))
+                    .zoomFont(11, weight: .semibold)
                     .foregroundStyle(.orange)
                 Spacer()
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
 
-            List(repo.snapshot.conflicted) { file in
-                ConflictRow(file: file, repo: repo)
-                    .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 12))
+            ScrollView {
+                LazyVStack(spacing: 4) {
+                    ForEach(repo.snapshot.conflicted) { file in
+                        ConflictRow(file: file, repo: repo)
+                            .padding(.horizontal, 12)
+                    }
+                }
+                .padding(.vertical, 2)
             }
-            .listStyle(.plain)
             .frame(minHeight: 60, maxHeight: 160)
         }
     }
@@ -225,7 +229,7 @@ struct ConflictRow: View {
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "exclamationmark.circle.fill")
-                .font(.system(size: 11))
+                .zoomFont(11)
                 .foregroundStyle(.orange)
 
             HStack(spacing: 0) {
@@ -234,7 +238,7 @@ struct ConflictRow: View {
                 }
                 Text(file.fileName)
             }
-            .font(.system(size: 12))
+            .zoomFont(12)
             .lineLimit(1)
             .truncationMode(.head)
 
@@ -247,7 +251,7 @@ struct ConflictRow: View {
                 Button("Mark Resolved (keep file as-is)") { repo.markResolved(file) }
             } label: {
                 Image(systemName: "ellipsis.circle")
-                    .font(.system(size: 13))
+                    .zoomFont(13)
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
@@ -281,7 +285,7 @@ struct FileSection: View {
         VStack(spacing: 0) {
             HStack {
                 Text("\(title) (\(files.count))")
-                    .font(.system(size: 11, weight: .semibold))
+                    .zoomFont(11, weight: .semibold)
                     .foregroundStyle(.secondary)
                     .contentTransition(.numericText(value: Double(files.count)))
                     .animation(.easeOut(duration: 0.2), value: files.count)
@@ -289,7 +293,7 @@ struct FileSection: View {
                 if !files.isEmpty {
                     Button(bulkTitle) { bulkAction() }
                         .buttonStyle(.pressEffect)
-                        .font(.system(size: 11))
+                        .zoomFont(11)
                         .foregroundStyle(Color.accentColor)
                 }
             }
@@ -298,24 +302,28 @@ struct FileSection: View {
 
             if files.isEmpty {
                 Text(emptyText)
-                    .font(.system(size: 11))
+                    .zoomFont(11)
                     .foregroundStyle(.tertiary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(files) { file in
-                    FileRow(
-                        file: file,
-                        actionIcon: actionIcon,
-                        actionHelp: actionHelp,
-                        isSelected: repo.selectedFile?.id == file.id,
-                        action: { action(file) },
-                        select: { repo.selectFile(file) }
-                    )
-                    .contextTarget("file:" + file.id, repo)
-                    .contextMenu { FileMenu(file: file, repo: repo) }
-                    .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 12))
+                ScrollView {
+                    LazyVStack(spacing: 4) {
+                        ForEach(files) { file in
+                            FileRow(
+                                file: file,
+                                actionIcon: actionIcon,
+                                actionHelp: actionHelp,
+                                isSelected: repo.selectedFile?.id == file.id,
+                                action: { action(file) },
+                                select: { repo.selectFile(file) }
+                            )
+                            .contextTarget("file:" + file.id, repo)
+                            .contextMenu { FileMenu(file: file, repo: repo) }
+                            .padding(.horizontal, 12)
+                        }
+                    }
+                    .padding(.vertical, 2)
                 }
-                .listStyle(.plain)
             }
         }
         .frame(maxHeight: .infinity)
@@ -387,7 +395,7 @@ struct FileRow: View {
     var body: some View {
         HStack(spacing: 6) {
             Text(String(file.status))
-                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .zoomFont(10, weight: .bold, design: .monospaced)
                 .foregroundStyle(statusColor)
                 .frame(width: 14)
 
@@ -398,7 +406,7 @@ struct FileRow: View {
                 }
                 Text(file.fileName)
             }
-            .font(.system(size: 12))
+            .zoomFont(12)
             .lineLimit(1)
             .truncationMode(.head)
 
@@ -406,7 +414,7 @@ struct FileRow: View {
 
             Button(action: action) {
                 Image(systemName: actionIcon)
-                    .font(.system(size: 13))
+                    .zoomFont(13)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.pressEffect)

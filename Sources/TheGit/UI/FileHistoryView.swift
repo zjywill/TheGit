@@ -11,21 +11,21 @@ struct FileHistoryView: View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "clock.arrow.circlepath")
-                    .font(.system(size: 11))
+                    .zoomFont(11)
                     .foregroundStyle(.secondary)
                 Text(path)
-                    .font(.system(size: 12, weight: .semibold))
+                    .zoomFont(12, weight: .semibold)
                     .lineLimit(1)
                     .truncationMode(.head)
                 Text("\(commits.count) commits")
-                    .font(.system(size: 11))
+                    .zoomFont(11)
                     .foregroundStyle(.tertiary)
                 Spacer()
                 Button {
                     repo.closeFileHistory()
                 } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 10, weight: .bold))
+                        .zoomFont(10, weight: .bold)
                 }
                 .buttonStyle(.pressEffect)
                 .foregroundStyle(.secondary)
@@ -37,30 +37,35 @@ struct FileHistoryView: View {
 
             Divider()
 
-            List(commits) { commit in
-                HStack(spacing: 8) {
-                    Text(commit.subject)
-                        .font(.system(size: 12))
-                        .lineLimit(1)
-                    Spacer(minLength: 12)
-                    Text(commit.author)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .frame(width: 90, alignment: .trailing)
-                    Text(commit.date.formatted(date: .abbreviated, time: .omitted))
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                        .frame(width: 76, alignment: .trailing)
-                    Text(commit.shortHash)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.tertiary)
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(commits) { commit in
+                        HStack(spacing: 8) {
+                            Text(commit.subject)
+                                .zoomFont(12)
+                                .lineLimit(1)
+                            Spacer(minLength: 12)
+                            Text(commit.author)
+                                .zoomFont(11)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .frame(width: 90, alignment: .trailing)
+                            Text(commit.date.formatted(date: .abbreviated, time: .omitted))
+                                .zoomFont(11)
+                                .foregroundStyle(.tertiary)
+                                .frame(width: 76, alignment: .trailing)
+                            Text(commit.shortHash)
+                                .zoomFont(11, design: .monospaced)
+                                .foregroundStyle(.tertiary)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 5)
+                        .contentShape(Rectangle())
+                        .onTapGesture { repo.selectHistoryEntry(commit, path: path) }
+                    }
                 }
-                .contentShape(Rectangle())
-                .onTapGesture { repo.selectHistoryEntry(commit, path: path) }
-                .listRowSeparator(.hidden)
+                .padding(.vertical, 4)
             }
-            .listStyle(.plain)
         }
         .background(Color(nsColor: .textBackgroundColor))
     }

@@ -6,19 +6,29 @@ struct SidebarView: View {
     @EnvironmentObject var appState: AppState
 
     var body: some View {
-        List {
-            Section {
-                ForEach(BranchTree.build(repo.snapshot.localBranches, path: \.name)) { node in
-                    BranchNodeRow(node: node, repo: repo)
-                }
-            } header: {
+        // ScrollView + LazyVStack instead of List: List is NSTableView
+        // underneath, and it was the app's one source of AppKit layout
+        // exceptions (reentrant-delegate asserts, fatal under zoom changes).
+        // Same reasoning as the graph column.
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 7) {
+            Group {
                 SectionHeader(
                     title: "Local",
                     count: repo.snapshot.localBranches.count,
                     actionHelp: "Create branch at HEAD"
                 ) { repo.promptNewBranch() }
+                ForEach(BranchTree.build(repo.snapshot.localBranches, path: \.name)) { node in
+                    BranchNodeRow(node: node, repo: repo)
+                }
             }
-            Section {
+            Group {
+                SectionHeader(
+                    title: "Remote",
+                    count: repo.snapshot.remoteNames.count,
+                    actionHelp: "Add remote"
+                ) { repo.promptAddRemote() }
+                .padding(.top, 14)
                 ForEach(BranchTree.remoteTree(repo.snapshot.remoteBranches)) { node in
                     BranchNodeRow(node: node, repo: repo)
                 }
@@ -27,58 +37,54 @@ struct SidebarView: View {
                         repo.promptAddRemote()
                     } label: {
                         Label("Add Remote…", systemImage: "plus.circle")
-                            .font(.system(size: 12))
+                            .zoomFont(12)
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(Color.accentColor)
                 }
-            } header: {
-                SectionHeader(
-                    title: "Remote",
-                    count: repo.snapshot.remoteNames.count,
-                    actionHelp: "Add remote"
-                ) { repo.promptAddRemote() }
             }
             // Only present when the repo's host has a CLI installed —
             // otherwise the feature leaves no trace at all.
             if let forge = repo.forge {
-                Section {
-                    if let error = repo.forgeError {
-                        Text(error)
-                            .font(.system(size: 10))
-                            .foregroundStyle(.orange)
-                            .lineLimit(3)
-                            .help(error)
-                    } else if repo.pullRequests.isEmpty {
-                        Text(repo.loadingPullRequests ? "Loading…" : "No open \(forge.itemNoun.lowercased())s")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.tertiary)
-                    }
-                    ForEach(repo.pullRequests) { pr in
-                        PullRequestRow(pr: pr, forge: forge, repo: repo)
-                    }
-                } header: {
+                Group {
                     SectionHeader(
                         title: forge.sectionTitle,
                         count: repo.pullRequests.count,
                         actionIcon: "arrow.clockwise",
                         actionHelp: "Refresh \(forge.sectionTitle.lowercased())"
                     ) { repo.refreshPullRequests() }
+                    .padding(.top, 14)
+                    if let error = repo.forgeError {
+                        Text(error)
+                            .zoomFont(10)
+                            .foregroundStyle(.orange)
+                            .lineLimit(3)
+                            .help(error)
+                    } else if repo.pullRequests.isEmpty {
+                        Text(repo.loadingPullRequests ? "Loading…" : "No open \(forge.itemNoun.lowercased())s")
+                            .zoomFont(11)
+                            .foregroundStyle(.tertiary)
+                    }
+                    ForEach(repo.pullRequests) { pr in
+                        PullRequestRow(pr: pr, forge: forge, repo: repo)
+                    }
                 }
             }
-            Section {
+            Group {
+                SectionHeader(title: "Worktrees", count: repo.snapshot.worktrees.count)
+                    .padding(.top, 14)
                 ForEach(repo.snapshot.worktrees) { wt in
                     HStack(spacing: 6) {
                         Image(systemName: "folder")
-                            .font(.system(size: 11))
+                            .zoomFont(11)
                             .foregroundStyle(.secondary)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(wt.displayName)
-                                .font(.system(size: 12))
+                                .zoomFont(12)
                                 .lineLimit(1)
                             if let branch = wt.branch {
                                 Text(branch)
-                                    .font(.system(size: 10))
+                                    .zoomFont(10)
                                     .foregroundStyle(.secondary)
                                     .lineLimit(1)
                             }
@@ -98,18 +104,18 @@ struct SidebarView: View {
                     }
                     .onTapGesture(count: 2) { appState.open(path: wt.path) }
                 }
-            } header: {
-                SectionHeader(title: "Worktrees", count: repo.snapshot.worktrees.count)
             }
             if !repo.snapshot.tags.isEmpty {
-                Section {
+                Group {
+                    SectionHeader(title: "Tags", count: repo.snapshot.tags.count)
+                        .padding(.top, 14)
                     ForEach(repo.snapshot.tags) { tag in
                         HStack(spacing: 6) {
                             Image(systemName: "tag")
-                                .font(.system(size: 11))
+                                .zoomFont(11)
                                 .foregroundStyle(.orange)
                             Text(tag.name)
-                                .font(.system(size: 12))
+                                .zoomFont(12)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                         }
@@ -134,24 +140,24 @@ struct SidebarView: View {
                             Button("Delete tag…", role: .destructive) { repo.tagToDelete = tag }
                         }
                     }
-                } header: {
-                    SectionHeader(title: "Tags", count: repo.snapshot.tags.count)
                 }
             }
             if !repo.snapshot.stashes.isEmpty {
-                Section {
+                Group {
+                    SectionHeader(title: "Stashes", count: repo.snapshot.stashes.count)
+                        .padding(.top, 14)
                     ForEach(repo.snapshot.stashes) { stash in
                         HStack(spacing: 6) {
                             Image(systemName: "tray.full")
-                                .font(.system(size: 11))
+                                .zoomFont(11)
                                 .foregroundStyle(.secondary)
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(stash.message)
-                                    .font(.system(size: 12))
+                                    .zoomFont(12)
                                     .lineLimit(1)
                                     .truncationMode(.tail)
                                 Text("\(stash.ref) · \(stash.date.formatted(.relative(presentation: .named)))")
-                                    .font(.system(size: 10))
+                                    .zoomFont(10)
                                     .foregroundStyle(.tertiary)
                                     .lineLimit(1)
                             }
@@ -172,24 +178,24 @@ struct SidebarView: View {
                         }
                         .onTapGesture(count: 2) { repo.applyStash(stash) }
                     }
-                } header: {
-                    SectionHeader(title: "Stashes", count: repo.snapshot.stashes.count)
                 }
             }
             if !repo.snapshot.submodules.isEmpty {
-                Section {
+                Group {
+                    SectionHeader(title: "Submodules", count: repo.snapshot.submodules.count)
+                        .padding(.top, 14)
                     ForEach(repo.snapshot.submodules) { sub in
                         HStack(spacing: 6) {
                             Image(systemName: "shippingbox")
-                                .font(.system(size: 11))
+                                .zoomFont(11)
                                 .foregroundStyle(sub.state == " " ? Color.secondary : .orange)
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(sub.displayName)
-                                    .font(.system(size: 12))
+                                    .zoomFont(12)
                                     .lineLimit(1)
                                 if sub.state != " " {
                                     Text(sub.stateDescription)
-                                        .font(.system(size: 10))
+                                        .zoomFont(10)
                                         .foregroundStyle(.orange)
                                         .lineLimit(1)
                                 }
@@ -207,12 +213,12 @@ struct SidebarView: View {
                             appState.open(path: repo.path + "/" + sub.path)
                         }
                     }
-                } header: {
-                    SectionHeader(title: "Submodules", count: repo.snapshot.submodules.count)
                 }
             }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 10)
         }
-        .listStyle(.sidebar)
         // Right-click on empty sidebar space: the actions that belong to
         // the repo rather than to any one row.
         .contextMenu {
@@ -368,19 +374,24 @@ struct SectionHeader: View {
 
     var body: some View {
         HStack(spacing: 6) {
+            // Explicit header styling: these used to sit in a List section
+            // header, which supplied the font; in a plain LazyVStack the
+            // header must style itself.
             Text(title)
+                .zoomFont(11, weight: .semibold)
+                .foregroundStyle(.secondary)
             Spacer()
             // Count and + button share one centered slot, so the swap on
             // hover never shifts anything.
             ZStack {
                 Text("\(count)")
-                    .font(.system(size: 11, weight: .semibold))
+                    .zoomFont(11, weight: .semibold)
                     .foregroundStyle(Color.accentColor.opacity(0.8))
                     .opacity(action != nil && hovering ? 0 : 1)
                 if let action {
                     Button(action: action) {
                         Image(systemName: actionIcon)
-                            .font(.system(size: 11, weight: .semibold))
+                            .zoomFont(11, weight: .semibold)
                             .frame(width: 22, height: 22)
                             .contentShape(Rectangle())
                     }
@@ -427,17 +438,23 @@ struct FolderDisclosure: View {
 
     var body: some View {
         DisclosureGroup(isExpanded: $expanded) {
-            ForEach(node.children ?? []) { child in
-                BranchNodeRow(node: child, repo: repo)
+            // Children indent by hand: the List that used to supply the
+            // per-level indent is gone.
+            VStack(alignment: .leading, spacing: 7) {
+                ForEach(node.children ?? []) { child in
+                    BranchNodeRow(node: child, repo: repo)
+                }
             }
+            .padding(.leading, 12)
+            .padding(.top, 7)
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: node.id.hasPrefix("remote:") && !node.id.dropFirst(7).contains("/")
                     ? "cloud" : "folder")
-                    .font(.system(size: 11))
+                    .zoomFont(11)
                     .foregroundStyle(.secondary)
                 Text(node.name)
-                    .font(.system(size: 12))
+                    .zoomFont(12)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Spacer(minLength: 0)
@@ -478,20 +495,20 @@ struct PullRequestRow: View {
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "arrow.triangle.pull")
-                .font(.system(size: 11))
+                .zoomFont(11)
                 .foregroundStyle(pr.isDraft ? Color.secondary : .green)
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 4) {
                     Text(forge.label(pr.number))
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .zoomFont(10, weight: .semibold, design: .monospaced)
                         .foregroundStyle(.tertiary)
                     Text(pr.title)
-                        .font(.system(size: 12))
+                        .zoomFont(12)
                         .lineLimit(1)
                         .truncationMode(.tail)
                 }
                 Text(pr.author.isEmpty ? pr.branch : "\(pr.branch) · \(pr.author)")
-                    .font(.system(size: 10))
+                    .zoomFont(10)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -499,7 +516,7 @@ struct PullRequestRow: View {
             Spacer(minLength: 0)
             if pr.isDraft {
                 Text("draft")
-                    .font(.system(size: 9, weight: .medium))
+                    .zoomFont(9, weight: .medium)
                     .padding(.horizontal, 4)
                     .padding(.vertical, 1)
                     .background(Capsule().fill(Color.secondary.opacity(0.18)))
@@ -570,15 +587,15 @@ struct BranchRow: View {
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: branch.isCurrent ? "checkmark.circle.fill" : "arrow.triangle.branch")
-                .font(.system(size: 11))
+                .zoomFont(11)
                 .foregroundStyle(branch.isCurrent ? Color.accentColor : .secondary)
             Text(label ?? branch.name)
-                .font(.system(size: 12, weight: branch.isCurrent ? .semibold : .regular))
+                .zoomFont(12, weight: branch.isCurrent ? .semibold : .regular)
                 .lineLimit(1)
                 .truncationMode(.middle)
             if repo.soloRev == branch.name {
                 Text("SOLO")
-                    .font(.system(size: 8, weight: .bold))
+                    .zoomFont(8, weight: .bold)
                     .padding(.horizontal, 4)
                     .padding(.vertical, 1)
                     .background(Capsule().fill(Color.accentColor.opacity(0.2)))
@@ -587,7 +604,7 @@ struct BranchRow: View {
             Spacer()
             if branch.upstreamGone {
                 Text("gone")
-                    .font(.system(size: 9, weight: .medium))
+                    .zoomFont(9, weight: .medium)
                     .padding(.horizontal, 4)
                     .padding(.vertical, 1)
                     .background(Capsule().fill(Color.orange.opacity(0.18)))
@@ -602,7 +619,7 @@ struct BranchRow: View {
                         Text("↓\(branch.behind)").foregroundStyle(.orange)
                     }
                 }
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .zoomFont(10, weight: .semibold, design: .monospaced)
                 .help("\(branch.ahead) ahead, \(branch.behind) behind \(branch.upstream ?? "upstream")")
             }
         }
