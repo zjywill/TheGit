@@ -121,6 +121,8 @@ final class RepoState: ObservableObject, Identifiable {
     @Published var isBusy = false
     @Published var errorMessage: String?
     @Published var selectedCommit: String?
+    /// Stash highlighted from its graph node; the sidebar row lights up.
+    @Published var selectedStashRef: String?
     @Published var branchPrompt: BranchPrompt?
     @Published var promptText = ""
     @Published var branchToDelete: PendingBranchDelete?
@@ -252,10 +254,15 @@ final class RepoState: ObservableObject, Identifiable {
         if !quiet { isBusy = true }
         defer { if !quiet { isBusy = false } }
         do {
+            // Stashes first: their base commits feed the log as extra start
+            // points, so a stash taken on a since-rebased branch still has
+            // a row in the graph to anchor and locate to.
+            let stashList = (try? await git.stashes()) ?? []
             async let commits = git.log(
                 limit: logLimit,
                 solo: soloRev,
-                hiddenPatterns: Array(hiddenRefs)
+                hiddenPatterns: Array(hiddenRefs),
+                extraRevs: stashList.map(\.baseHash).filter { !$0.isEmpty }
             )
             async let branches = git.branches()
             async let worktrees = git.worktrees()
@@ -263,7 +270,6 @@ final class RepoState: ObservableObject, Identifiable {
             async let operation = git.operationState()
             async let submodules = git.submodules()
             async let lfs = git.lfsStatus()
-            async let stashes = git.stashes()
             async let tags = git.tags()
 
             var snap = RepoSnapshot()
@@ -307,7 +313,8 @@ final class RepoState: ObservableObject, Identifiable {
             snap.worktrees = try await worktrees
             snap.submodules = try await submodules
             snap.lfs = await lfs
-            snap.stashes = try await stashes
+            snap.stashes = stashList
+            snap.stashesByBase = Dictionary(grouping: stashList, by: \.baseHash)
             snap.tags = try await tags
             snap.staged = s0.staged
             snap.unstaged = s0.unstaged

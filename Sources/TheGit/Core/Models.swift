@@ -123,6 +123,9 @@ struct Stash: Identifiable, Hashable {
     let ref: String      // "stash@{0}"
     let date: Date
     let message: String  // "WIP on main: abc123 subject" or custom -m text
+    /// The commit the stash was taken on (first parent of the stash
+    /// commit) — anchors the stash node in the graph.
+    var baseHash: String = ""
 
     var id: String { ref }
 }
@@ -156,6 +159,9 @@ struct RepoSnapshot: Equatable {
     var submodules: [Submodule] = []
     var lfs = LFSStatus()
     var stashes: [Stash] = []
+    /// Stashes grouped by the commit they were taken on, for the graph's
+    /// stash nodes. Empty when there are no stashes — zero cost then.
+    var stashesByBase: [String: [Stash]] = [:]
     var tags: [Tag] = []
     var staged: [FileChange] = []
     var unstaged: [FileChange] = []

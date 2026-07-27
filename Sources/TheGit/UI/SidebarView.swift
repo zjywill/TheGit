@@ -161,6 +161,12 @@ struct SidebarView: View {
                                     .lineLimit(1)
                             }
                         }
+                        // Lights up when the stash's graph node is clicked.
+                        .background(
+                            repo.selectedStashRef == stash.ref
+                                ? Color.accentColor.opacity(0.15)
+                                : .clear
+                        )
                         .help(stash.message)
                         .contextTarget("stash:" + stash.ref, repo)
                         .contextMenu {
@@ -175,6 +181,12 @@ struct SidebarView: View {
                             Button("Drop…", role: .destructive) { repo.stashToDrop = stash }
                         }
                         .onTapGesture(count: 2) { repo.applyStash(stash) }
+                        // Single click mirrors the graph node: select, and
+                        // jump the graph to the commit the stash sits on.
+                        .onTapGesture {
+                            repo.selectedStashRef = stash.ref
+                            if !stash.baseHash.isEmpty { repo.locate(stash.baseHash) }
+                        }
                     }
                 }
             }

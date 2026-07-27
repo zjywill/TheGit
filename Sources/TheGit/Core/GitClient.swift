@@ -43,7 +43,15 @@ actor GitClient {
 
     /// - solo: show only history reachable from this rev (GitKraken Solo).
     /// - hiddenPatterns: full ref paths to exclude (GitKraken Hide).
-    func log(limit: Int = 500, solo: String? = nil, hiddenPatterns: [String] = []) async throws -> [Commit] {
+    /// - extraRevs: additional start points — stash base commits, whose
+    ///   history may be unreachable from any ref after a rebase, and would
+    ///   otherwise have no row for the stash node to anchor to.
+    func log(
+        limit: Int = 500,
+        solo: String? = nil,
+        hiddenPatterns: [String] = [],
+        extraRevs: [String] = []
+    ) async throws -> [Commit] {
         // --date-order interleaves parallel branches chronologically
         // (GitKraken-style) while still keeping children before parents.
         var args = ["log", "--date-order"]
@@ -52,6 +60,7 @@ actor GitClient {
         } else {
             for pattern in hiddenPatterns { args.append("--exclude=\(pattern)") }
             args += ["--branches", "--remotes", "--tags", "HEAD"]
+            args += extraRevs
         }
         args += ["--format=\(Self.logFormat)", "-n", String(limit)]
         let out = try await run(args)
@@ -492,14 +501,17 @@ actor GitClient {
     }
 
     func stashes() async throws -> [Stash] {
-        let out = try await run(["stash", "list", "--format=%gd%x09%at%x09%gs"])
+        // %P: parents of the stash commit — the first is the commit the
+        // stash was taken on, which anchors its node in the graph.
+        let out = try await run(["stash", "list", "--format=%gd%x09%at%x09%P%x09%gs"])
         return out.split(separator: "\n").compactMap { line in
-            let fields = line.split(separator: "\t", maxSplits: 2, omittingEmptySubsequences: false)
-            guard fields.count >= 3 else { return nil }
+            let fields = line.split(separator: "\t", maxSplits: 3, omittingEmptySubsequences: false)
+            guard fields.count >= 4 else { return nil }
             return Stash(
                 ref: String(fields[0]),
                 date: Date(timeIntervalSince1970: TimeInterval(fields[1]) ?? 0),
-                message: String(fields[2])
+                message: String(fields[3]),
+                baseHash: fields[2].split(separator: " ").first.map(String.init) ?? ""
             )
         }
     }
