@@ -18,7 +18,6 @@
 # formula is a second thing to forget when a UTI or a version key changes.
 set -euo pipefail
 
-VERSION="${VERSION:-0.1.0}"
 BUILD="${BUILD:-1}"
 APP_NAME="TheGit"
 BUNDLE_ID="com.zjywill.TheGit"
@@ -26,6 +25,14 @@ UNIVERSAL="${UNIVERSAL:-1}"
 DMG="${DMG:-1}"
 
 cd "$(dirname "$0")/.."
+
+# Default the version off the latest tag rather than a literal, which goes
+# stale the moment it's bumped anywhere else and then silently stamps every
+# later build with the wrong CFBundleShortVersionString. The Homebrew formula
+# passes VERSION explicitly — it builds from a tarball that has no .git, so
+# `git describe` there would find nothing.
+VERSION="${VERSION:-$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')}"
+VERSION="${VERSION:-0.0.0}"
 ROOT="$PWD"
 DIST="${DEST:-$ROOT/dist}"
 APP="$DIST/$APP_NAME.app"
