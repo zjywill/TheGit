@@ -127,6 +127,11 @@ final class RepoState: ObservableObject, Identifiable {
     @Published var commitToHardReset: Commit?
     @Published var selectedFile: FileChange?
     @Published var diffLines: [DiffLine] = []
+    /// Set when the open diff is an LFS pointer diff: the view shows what
+    /// the object is instead of three lines of oid text.
+    @Published var lfsPointer: LFSPointerDiff?
+    /// "Show pointer text" — the raw diff behind that summary.
+    @Published var showRawPointer = false
     /// Raw structure of the current diff, for hunk-level staging.
     private var parsedDiff = ParsedDiff()
     /// Graph visibility filters (GitKraken Solo / Hide). Session-only.
@@ -248,6 +253,7 @@ final class RepoState: ObservableObject, Identifiable {
             async let status = git.status()
             async let operation = git.operationState()
             async let submodules = git.submodules()
+            async let lfs = git.lfsStatus()
             async let stashes = git.stashes()
             async let tags = git.tags()
 
@@ -291,6 +297,7 @@ final class RepoState: ObservableObject, Identifiable {
             snap.remoteBranches = b.remote
             snap.worktrees = try await worktrees
             snap.submodules = try await submodules
+            snap.lfs = await lfs
             snap.stashes = try await stashes
             snap.tags = try await tags
             snap.staged = s0.staged
@@ -771,6 +778,38 @@ final class RepoState: ObservableObject, Identifiable {
         perform { try await $0.removeRemote(name) }
     }
 
+    // MARK: - Git LFS
+
+    /// Hidden entirely when the binary isn't installed, so nothing in the
+    /// UI ever offers something that cannot work.
+    var lfsAvailable: Bool { GitClient.hasLFS }
+
+    /// True when this exact path is already stored in LFS.
+    func isLFSTracked(_ filePath: String) -> Bool {
+        snapshot.lfs.files.contains { $0.path == filePath }
+    }
+
+    /// Tracked by LFS, but the object itself was never downloaded — the
+    /// working tree holds the pointer, not the file.
+    func isLFSObjectMissing(_ filePath: String) -> Bool {
+        snapshot.lfsMissing.contains { $0.path == filePath }
+    }
+
+    /// Write the pattern into `.gitattributes` and, for a file git already
+    /// tracks, rewrite its index entry as a pointer — otherwise nothing
+    /// visibly happens until the file is next edited.
+    func trackWithLFS(_ file: FileChange, pattern: String) {
+        let alreadyTracked = file.status != "?"
+        perform { git in
+            try await git.lfsTrack(pattern)
+            if alreadyTracked { try await git.lfsRenormalize(file.path) }
+        }
+    }
+
+    func pullLFSObjects() {
+        perform { try await $0.lfsPull() }
+    }
+
     // MARK: - Submodule management
 
     @Published var showAddSubmodule = false
@@ -1219,9 +1258,11 @@ final class RepoState: ObservableObject, Identifiable {
         selectedFile = file
         diffCommit = hash
         diffLines = []
+        lfsPointer = nil
         Task {
             do {
                 let text = try await git.commitFileDiff(hash, path: file.path)
+                lfsPointer = LFSParsers.pointerDiff(text)
                 let parsed = DiffParser.parse(text)
                 parsedDiff = parsed
                 diffLines = parsed.lines
@@ -1310,9 +1351,11 @@ final class RepoState: ObservableObject, Identifiable {
         selectedFile = FileChange(path: filePath, status: "M", area: .unstaged)
         diffCommit = commit.hash
         diffLines = []
+        lfsPointer = nil
         Task {
             do {
                 let text = try await git.commitFileDiff(commit.hash, path: filePath)
+                lfsPointer = LFSParsers.pointerDiff(text)
                 let parsed = DiffParser.parse(text)
                 parsedDiff = parsed
                 diffLines = parsed.lines
@@ -1328,6 +1371,7 @@ final class RepoState: ObservableObject, Identifiable {
         selectedFile = file
         diffCommit = nil
         diffLines = []
+        lfsPointer = nil
         Task {
             do {
                 let parsed: ParsedDiff
@@ -1336,6 +1380,7 @@ final class RepoState: ObservableObject, Identifiable {
                     parsed = DiffParser.synthesizeAdded(content)
                 } else {
                     let text = try await git.diff(path: file.path, staged: file.area == .staged)
+                    lfsPointer = LFSParsers.pointerDiff(text)
                     parsed = DiffParser.parse(text)
                 }
                 parsedDiff = parsed
@@ -1375,6 +1420,8 @@ final class RepoState: ObservableObject, Identifiable {
         selectedFile = nil
         diffCommit = nil
         diffLines = []
+        lfsPointer = nil
+        showRawPointer = false
     }
 
     // MARK: - Conflict resolution

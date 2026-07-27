@@ -180,6 +180,53 @@ struct SidebarView: View {
                     }
                 }
             }
+            // Only in repos that actually use LFS — and only when the
+            // binary is installed, which is what makes the status readable
+            // in the first place.
+            if repo.snapshot.lfs.isEnabled {
+                Group {
+                    SectionHeader(
+                        title: "Git LFS",
+                        count: repo.snapshot.lfs.files.count,
+                        actionIcon: "arrow.down.circle",
+                        actionHelp: "Download LFS objects (git lfs pull)"
+                    ) { repo.pullLFSObjects() }
+                    .padding(.top, 14)
+                    let missing = repo.snapshot.lfsMissing.count
+                    if missing > 0 {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.down.circle.dotted")
+                                .zoomFont(11)
+                                .foregroundStyle(.orange)
+                            Text("\(missing) not downloaded")
+                                .zoomFont(11)
+                                .foregroundStyle(.orange)
+                                .lineLimit(1)
+                        }
+                        .contentShape(Rectangle())
+                        .help("These files are pointers only — click to run git lfs pull")
+                        .onTapGesture { repo.pullLFSObjects() }
+                    }
+                    ForEach(repo.snapshot.lfs.patterns, id: \.self) { pattern in
+                        HStack(spacing: 6) {
+                            Image(systemName: "shippingbox.and.arrow.backward")
+                                .zoomFont(11)
+                                .foregroundStyle(.secondary)
+                            Text(pattern)
+                                .zoomFont(12, design: .monospaced)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        .contentShape(Rectangle())
+                        .help("\(pattern) — tracked by Git LFS (.gitattributes)")
+                        .contextTarget("lfs:" + pattern, repo)
+                        .contextMenu {
+                            Button("Copy pattern") { RepoState.copyToPasteboard(pattern) }
+                            Button("Download LFS objects") { repo.pullLFSObjects() }
+                        }
+                    }
+                }
+            }
             // Always shown, empty or not: the + is the only way in to
             // "Add Submodule…", and a repo with none is where you add one.
             Group {

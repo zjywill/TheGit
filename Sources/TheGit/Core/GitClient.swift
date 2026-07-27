@@ -290,6 +290,77 @@ actor GitClient {
         URL(fileURLWithPath: path).resolvingSymlinksInPath().path
     }
 
+    // MARK: - Git LFS
+
+    /// Whether the `git-lfs` binary exists at all. Without it `git lfs` is
+    /// not even a subcommand, and the whole feature stays hidden — the
+    /// same stance ForgeClient takes on `gh`/`glab`.
+    static let hasLFS = Shell.which("git-lfs") != nil
+
+    /// `ls-files` walks the whole index — 180 ms on a 2000-file LFS repo
+    /// against 10 ms for `git status` — and the file watcher fires a
+    /// refresh every time a file is saved. A short time-to-live collapses
+    /// each of those bursts into one call.
+    ///
+    /// Deliberately not keyed on the index or `.gitattributes` mtime:
+    /// editing a tracked file flips its `*` to `-` and `git lfs pull`
+    /// fills the object store, and neither writes the index — a cache
+    /// keyed that way went stale exactly when the user was watching.
+    private var lfsCache: (at: Date, status: LFSStatus)?
+    private static let lfsCacheTTL: TimeInterval = 2
+
+    /// What LFS looks like in this repo. Cheap when it isn't an LFS repo:
+    /// no `.gitattributes`, no process spawned.
+    func lfsStatus() async -> LFSStatus {
+        guard Self.hasLFS,
+              let attributes = try? String(
+                  contentsOfFile: repoPath + "/.gitattributes", encoding: .utf8
+              )
+        else { return LFSStatus() }
+        let patterns = LFSParsers.trackedPatterns(gitattributes: attributes)
+        guard !patterns.isEmpty else { return LFSStatus() }
+        if let cache = lfsCache, Date().timeIntervalSince(cache.at) < Self.lfsCacheTTL {
+            // Patterns come from a file we just read, so they are never stale.
+            return LFSStatus(patterns: patterns, files: cache.status.files)
+        }
+        let files = (try? await run(["lfs", "ls-files"])).map(LFSParsers.lsFiles) ?? []
+        let status = LFSStatus(patterns: patterns, files: files)
+        lfsCache = (Date(), status)
+        return status
+    }
+
+    /// Route a pattern through LFS. `lfs install --local` first: it writes
+    /// the clean/smudge filters into this repo's config, without which
+    /// `.gitattributes` says lfs and git still commits the whole file.
+    /// It only ever touches `.git/config` — never the user's global one.
+    func lfsTrack(_ pattern: String) async throws {
+        try await run(["lfs", "install", "--local"])
+        try await run(["lfs", "track", "--", pattern])
+        try await run(["add", "--", ".gitattributes"])
+        lfsCache = nil
+    }
+
+    /// Re-run the filters over a file already in the index, turning a file
+    /// that was committed whole into a pointer. Without it, tracking an
+    /// existing file changes nothing until the file is edited again.
+    func lfsRenormalize(_ path: String) async throws {
+        try await run(["add", "--renormalize", "--", path])
+        lfsCache = nil
+    }
+
+    /// Download the objects behind the pointers in the working tree.
+    ///
+    /// `lfs install --local` first, and it is not optional: in a repo
+    /// without the filters configured — a fresh clone on a machine that
+    /// never ran `git lfs install` — `git lfs pull` prints "Skipping
+    /// object checkout", exits 0, and leaves every file a pointer. A
+    /// button that silently does nothing is worse than no button.
+    func lfsPull() async throws {
+        try await run(["lfs", "install", "--local"])
+        try await run(["lfs", "pull"])
+        lfsCache = nil
+    }
+
     // MARK: - Ignore files
 
     /// Absolute path of `.git/info/exclude`. Resolved through git because

@@ -154,6 +154,7 @@ struct RepoSnapshot: Equatable {
     var remoteBranches: [Branch] = []
     var worktrees: [Worktree] = []
     var submodules: [Submodule] = []
+    var lfs = LFSStatus()
     var stashes: [Stash] = []
     var tags: [Tag] = []
     var staged: [FileChange] = []
@@ -167,6 +168,16 @@ struct RepoSnapshot: Equatable {
     /// Branch-line color ids that belong to HEAD's history: lines keep
     /// full brightness along their whole run, others dim entirely.
     var brightColors: Set<Int> = []
+
+    /// LFS objects that genuinely have to be downloaded: pointer in the
+    /// working tree, object nowhere on disk. A locally modified LFS file
+    /// also reads as "not in the store" — verified against git-lfs 3.7 —
+    /// but there is nothing to fetch for it, so it is filtered out here.
+    var lfsMissing: [LFSFile] {
+        guard !lfs.files.isEmpty else { return [] }
+        let changed = Set((staged + unstaged + conflicted).map(\.path))
+        return lfs.notInLocalStore.filter { !changed.contains($0.path) }
+    }
 
     /// Remote names in stable order, e.g. ["origin", "upstream"].
     var remoteNames: [String] {

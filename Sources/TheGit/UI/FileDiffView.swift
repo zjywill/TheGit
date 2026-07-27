@@ -9,7 +9,11 @@ struct FileDiffView: View {
         VStack(spacing: 0) {
             header
             Divider()
-            if repo.diffLines.isEmpty {
+            if let pointer = repo.lfsPointer, !repo.showRawPointer {
+                // The diff of an LFS file is three lines of pointer text —
+                // an oid tells nobody anything. Show what the object is.
+                LFSPointerSummary(pointer: pointer, repo: repo)
+            } else if repo.diffLines.isEmpty {
                 Text("No textual changes to show")
                     .zoomFont(12)
                     .foregroundStyle(.secondary)
@@ -52,7 +56,21 @@ struct FileDiffView: View {
                 .lineLimit(1)
                 .truncationMode(.head)
 
+                if repo.lfsPointer != nil {
+                    Text("LFS")
+                        .zoomFont(9, weight: .bold)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.18)))
+                        .foregroundStyle(Color.accentColor)
+                }
+
                 Spacer()
+
+                if repo.lfsPointer != nil, repo.showRawPointer {
+                    Button("LFS Summary") { repo.showRawPointer = false }
+                        .controlSize(.small)
+                }
 
                 if let commitHash = repo.diffCommit {
                     // Diff of a historical commit — nothing to stage.
@@ -85,6 +103,79 @@ struct FileDiffView: View {
         }
         .padding(.horizontal, 12)
         .frame(height: 34)
+    }
+}
+
+/// What a Git LFS pointer diff actually means: which object, how big, and
+/// how much the file grew — instead of two hex strings the user cannot
+/// compare by eye.
+struct LFSPointerSummary: View {
+    let pointer: LFSPointerDiff
+    @ObservedObject var repo: RepoState
+
+    private var delta: String? {
+        guard let delta = pointer.sizeDelta, delta != 0 else { return nil }
+        let size = ByteCountFormatter.string(fromByteCount: abs(delta), countStyle: .file)
+        return delta > 0 ? "+\(size)" : "−\(size)"
+    }
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "shippingbox.and.arrow.backward")
+                .zoomFont(28)
+                .foregroundStyle(.tertiary)
+            Text("Stored in Git LFS")
+                .zoomFont(13, weight: .semibold)
+
+            VStack(spacing: 6) {
+                if let new = pointer.new, let old = pointer.old {
+                    row("Size", "\(old.formattedSize) → \(new.formattedSize)", trailing: delta)
+                    row("Object", "\(old.shortOID) → \(new.shortOID)")
+                } else if let new = pointer.new {
+                    row("Size", new.formattedSize)
+                    row("Object", new.shortOID)
+                } else if let old = pointer.old {
+                    row("Size", old.formattedSize)
+                    row("Object", old.shortOID, trailing: "removed")
+                }
+            }
+
+            HStack(spacing: 10) {
+                Button("Show pointer text") { repo.showRawPointer = true }
+                    .controlSize(.small)
+                if let file = repo.selectedFile, repo.diffCommit == nil {
+                    // Opening a file that was never downloaded hands the
+                    // user a 130-byte text file, so offer the fetch first.
+                    if repo.isLFSObjectMissing(file.path) {
+                        Button("Download LFS Object") { repo.pullLFSObjects() }
+                            .controlSize(.small)
+                    } else {
+                        Button("Open file") { repo.openFile(file) }
+                            .controlSize(.small)
+                    }
+                }
+            }
+            .padding(.top, 2)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(20)
+    }
+
+    private func row(_ label: String, _ value: String, trailing: String? = nil) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .zoomFont(11)
+                .foregroundStyle(.tertiary)
+                .frame(width: 52, alignment: .trailing)
+            Text(value)
+                .zoomFont(11, design: .monospaced)
+                .textSelection(.enabled)
+            if let trailing {
+                Text(trailing)
+                    .zoomFont(10, weight: .medium)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 }
 

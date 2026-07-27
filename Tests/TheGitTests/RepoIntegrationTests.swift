@@ -74,6 +74,22 @@ final class RepoIntegrationTests: XCTestCase {
         XCTFail("timed out waiting for \(description)")
     }
 
+    /// Same, for state that only moves when something re-reads the repo.
+    private func waitUntil(
+        _ description: String,
+        timeout: TimeInterval = 8,
+        _ condition: () -> Bool,
+        refreshing refresh: () async -> Void
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            await refresh()
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        XCTFail("timed out waiting for \(description)")
+    }
+
     private func untrackedPaths(_ repo: RepoState) -> [String] {
         repo.snapshot.unstaged.filter { $0.status == "?" }.map(\.path)
     }
@@ -308,6 +324,241 @@ final class RepoIntegrationTests: XCTestCase {
         let purged = try await removeThenReadd(purge: true, in: "super-purge")
         XCTAssertFalse(purged.kept)
         XCTAssertTrue(purged.readded)
+    }
+
+    // MARK: - Git LFS
+
+    /// Writes `bytes` of deterministic filler — real content, no network.
+    private func writeBinary(_ bytes: Int, to path: String, seed: UInt8 = 7) throws {
+        try Data(repeating: seed, count: bytes).write(to: URL(fileURLWithPath: path))
+    }
+
+    /// Tracking a file that git already has: `.gitattributes` gets the
+    /// pattern, and the file's index entry becomes a pointer.
+    func testTrackWithLFSConvertsAnExistingFile() async throws {
+        try XCTSkipUnless(GitClient.hasLFS, "git-lfs is not installed")
+        let path = try await makeRepo("lfs-track")
+        try writeBinary(120_000, to: path + "/art.psd")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "add art"])
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        XCTAssertFalse(repo.snapshot.lfs.isEnabled)
+        let file = FileChange(path: "art.psd", status: "M", area: .unstaged)
+
+        repo.trackWithLFS(file, pattern: "*.psd")
+        try await waitUntil("the .gitattributes write") {
+            self.read(path + "/.gitattributes").contains("filter=lfs")
+        }
+        try await waitUntil("the refresh after tracking") { repo.snapshot.lfs.isEnabled }
+
+        XCTAssertEqual(repo.snapshot.lfs.patterns, ["*.psd"])
+        XCTAssertEqual(repo.snapshot.lfs.files.map(\.path), ["art.psd"])
+        XCTAssertTrue(repo.snapshot.lfsMissing.isEmpty)
+        XCTAssertNil(repo.errorMessage)
+        // The index entry is a pointer now, not 120 KB of blob.
+        let staged = try await git(path, ["show", ":art.psd"])
+        XCTAssertTrue(staged.hasPrefix("version https://git-lfs.github.com/spec/v1"), staged)
+        // .gitattributes is staged too — LFS is broken for everyone else
+        // until that file is committed.
+        XCTAssertTrue(repo.snapshot.staged.map(\.path).contains(".gitattributes"))
+    }
+
+    /// The diff of an LFS file is three lines of pointer text; the view
+    /// gets a parsed summary instead.
+    func testDiffOfAnLFSFileIsReportedAsAPointer() async throws {
+        try XCTSkipUnless(GitClient.hasLFS, "git-lfs is not installed")
+        let path = try await makeRepo("lfs-diff")
+        try await git(path, ["lfs", "install", "--local"])
+        try await git(path, ["lfs", "track", "*.psd"])
+        try writeBinary(200_000, to: path + "/art.psd")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "add art"])
+        // Change it: 150 KB instead of 200 KB.
+        try writeBinary(150_000, to: path + "/art.psd", seed: 9)
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        guard let file = repo.snapshot.unstaged.first(where: { $0.path == "art.psd" }) else {
+            return XCTFail("expected art.psd to be modified: \(repo.snapshot.unstaged)")
+        }
+        repo.selectFile(file)
+        try await waitUntil("the diff to load") { repo.lfsPointer != nil }
+
+        XCTAssertEqual(repo.lfsPointer?.old?.size, 200_000)
+        XCTAssertEqual(repo.lfsPointer?.new?.size, 150_000)
+        XCTAssertEqual(repo.lfsPointer?.sizeDelta, -50_000)
+        // Closing the diff clears it, so the next file starts clean.
+        repo.closeDiff()
+        XCTAssertNil(repo.lfsPointer)
+        XCTAssertFalse(repo.showRawPointer)
+    }
+
+    /// A plain text file in the very same repo must not be mistaken for
+    /// an LFS object.
+    func testDiffOfANormalFileHasNoPointer() async throws {
+        try XCTSkipUnless(GitClient.hasLFS, "git-lfs is not installed")
+        let path = try await makeRepo("lfs-mixed")
+        try await git(path, ["lfs", "install", "--local"])
+        try await git(path, ["lfs", "track", "*.psd"])
+        try writeBinary(50_000, to: path + "/art.psd")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "add art"])
+        try write("changed\n", to: path + "/seed.txt")
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        XCTAssertTrue(repo.snapshot.lfs.isEnabled)
+        guard let file = repo.snapshot.unstaged.first(where: { $0.path == "seed.txt" }) else {
+            return XCTFail("expected seed.txt to be modified")
+        }
+        repo.selectFile(file)
+        try await waitUntil("the diff to load") { !repo.diffLines.isEmpty }
+        XCTAssertNil(repo.lfsPointer)
+        XCTAssertFalse(repo.isLFSTracked("seed.txt"))
+        XCTAssertTrue(repo.isLFSTracked("art.psd"))
+    }
+
+    /// `git lfs ls-files` marks a locally modified file `-` exactly like a
+    /// file that was never downloaded — its new content is not in the
+    /// object store yet. Reporting that as "not downloaded" would push the
+    /// user to run `git lfs pull` over their own uncommitted work.
+    func testLocallyModifiedLFSFileIsNotReportedAsMissing() async throws {
+        try XCTSkipUnless(GitClient.hasLFS, "git-lfs is not installed")
+        let path = try await makeRepo("lfs-modified")
+        try await git(path, ["lfs", "install", "--local"])
+        try await git(path, ["lfs", "track", "*.psd"])
+        try writeBinary(80_000, to: path + "/art.psd")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "add art"])
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        XCTAssertTrue(repo.snapshot.lfs.files[0].downloaded)
+        XCTAssertTrue(repo.snapshot.lfsMissing.isEmpty)
+
+        // Edit it: git-lfs now says the object is not in the store. The
+        // ls-files cache has a 2 s life, so poll rather than assume.
+        try writeBinary(90_000, to: path + "/art.psd", seed: 3)
+        try await waitUntil("ls-files to see the edit") {
+            repo.snapshot.lfs.notInLocalStore.map(\.path) == ["art.psd"]
+        } refreshing: {
+            await repo.refresh()
+        }
+        // ...but nothing is missing, so the sidebar stays quiet and the
+        // diff offers Open rather than Download.
+        XCTAssertTrue(repo.snapshot.lfsMissing.isEmpty)
+        XCTAssertFalse(repo.isLFSObjectMissing("art.psd"))
+    }
+
+    /// The ls-files cache: a burst of refreshes costs one call, the answer
+    /// catches up once the TTL passes, and patterns are never cached at
+    /// all (they come from a file we read on every call).
+    func testLFSStatusCacheServesBurstsButCatchesUp() async throws {
+        try XCTSkipUnless(GitClient.hasLFS, "git-lfs is not installed")
+        let path = try await makeRepo("lfs-cache")
+        try await git(path, ["lfs", "install", "--local"])
+        try await git(path, ["lfs", "track", "*.psd"])
+        try writeBinary(20_000, to: path + "/one.psd")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "one"])
+
+        let client = GitClient(repoPath: path)
+        var status = await client.lfsStatus()
+        XCTAssertEqual(status.files.map(\.path), ["one.psd"])
+
+        // Added behind the client's back: within the TTL it keeps the
+        // cached list — that is the whole point of it.
+        try writeBinary(30_000, to: path + "/two.psd")
+        try await git(path, ["add", "-A"])
+        status = await client.lfsStatus()
+        XCTAssertEqual(status.files.map(\.path), ["one.psd"])
+
+        // A pattern added meanwhile still shows up immediately.
+        try await git(path, ["lfs", "track", "*.blend"])
+        status = await client.lfsStatus()
+        XCTAssertEqual(status.patterns.sorted(), ["*.blend", "*.psd"])
+
+        // ...and the file list catches up once the TTL is over.
+        try await Task.sleep(for: .milliseconds(2100))
+        status = await client.lfsStatus()
+        XCTAssertEqual(status.files.map(\.path).sorted(), ["one.psd", "two.psd"])
+    }
+
+    /// Our own LFS commands must not wait for the TTL — pressing Download
+    /// and still reading "not downloaded" is the bug this prevents.
+    func testLFSActionsInvalidateTheCacheImmediately() async throws {
+        try XCTSkipUnless(GitClient.hasLFS, "git-lfs is not installed")
+        let path = try await makeRepo("lfs-invalidate")
+        try await git(path, ["lfs", "install", "--local"])
+        try await git(path, ["lfs", "track", "*.psd"])
+        try writeBinary(20_000, to: path + "/one.psd")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "one"])
+
+        let client = GitClient(repoPath: path)
+        var status = await client.lfsStatus()
+        XCTAssertEqual(status.files.count, 1)
+
+        // The flow for a brand-new big file: track the extension, then
+        // stage it. `ls-files` reads the index, so it only counts once
+        // staged — and the status right after that must already show it.
+        try writeBinary(30_000, to: path + "/model.blend")
+        try await client.lfsTrack("*.blend")
+        try await client.stage("model.blend")
+        status = await client.lfsStatus()
+        XCTAssertEqual(status.files.map(\.path).sorted(), ["model.blend", "one.psd"])
+        // Staged as a pointer, not as 30 KB of blob.
+        let staged = try await client.run(["show", ":model.blend"])
+        XCTAssertTrue(staged.hasPrefix("version https://git-lfs.github.com/spec/v1"), staged)
+    }
+
+    /// The state a fresh clone is in when the objects were skipped: real
+    /// pointers in the working tree and nothing in the store. This is what
+    /// the sidebar's "N not downloaded" and its pull button exist for.
+    func testFreshCloneReportsMissingObjectsAndPullFetchesThem() async throws {
+        try XCTSkipUnless(GitClient.hasLFS, "git-lfs is not installed")
+        let origin = try await makeRepo("lfs-origin")
+        try await git(origin, ["lfs", "install", "--local"])
+        try await git(origin, ["lfs", "track", "*.psd"])
+        try writeBinary(64_000, to: origin + "/art.psd")
+        try await git(origin, ["add", "-A"])
+        try await git(origin, ["commit", "-qm", "add art"])
+
+        // GIT_LFS_SKIP_SMUDGE leaves the pointers in place — exactly what
+        // a clone over a slow link, or with lfs.fetchexclude set, gives you.
+        let clone = root.appendingPathComponent("lfs-clone").path
+        try await Shell.run(
+            "/usr/bin/env",
+            ["git", "clone", "-q", origin, clone],
+            env: ["GIT_LFS_SKIP_SMUDGE": "1", "GIT_TERMINAL_PROMPT": "0"]
+        )
+
+        let repo = RepoState(path: clone)
+        await repo.refresh()
+        XCTAssertEqual(repo.snapshot.lfsMissing.map(\.path), ["art.psd"])
+        XCTAssertTrue(repo.isLFSObjectMissing("art.psd"))
+        // The working tree really does hold the pointer, not the picture.
+        XCTAssertLessThan(
+            try Data(contentsOf: URL(fileURLWithPath: clone + "/art.psd")).count, 200
+        )
+
+        repo.pullLFSObjects()
+        try await waitUntil("git lfs pull") { repo.snapshot.lfsMissing.isEmpty }
+        XCTAssertEqual(
+            try Data(contentsOf: URL(fileURLWithPath: clone + "/art.psd")).count, 64_000
+        )
+        XCTAssertNil(repo.errorMessage)
+    }
+
+    /// A repo with no `.gitattributes` must not spawn `git lfs` at all,
+    /// and reports itself as not using LFS.
+    func testPlainRepoReportsNoLFS() async throws {
+        let path = try await makeRepo("lfs-absent")
+        let status = await GitClient(repoPath: path).lfsStatus()
+        XCTAssertFalse(status.isEnabled)
+        XCTAssertTrue(status.files.isEmpty)
     }
 
     /// A submodule whose checked-out commit moved shows "+", the state the

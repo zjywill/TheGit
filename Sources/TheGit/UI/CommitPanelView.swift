@@ -361,6 +361,11 @@ struct FileMenu: View {
                 }
             }
         }
+        // Only with git-lfs installed, and only for a file it isn't
+        // already storing — "Track" on an LFS file would be a no-op.
+        if repo.lfsAvailable, !repo.isLFSTracked(file.path) {
+            LFSTrackMenu(file: file, repo: repo)
+        }
         Button("Stash file") { repo.stashFile(file) }
         Divider()
         Button("File History") { repo.showFileHistory(file.path) }
@@ -372,6 +377,32 @@ struct FileMenu: View {
         Button("Create patch from file changes…") { repo.savePatch(forFile: file) }
         Divider()
         Button("Delete file…", role: .destructive) { repo.fileToDelete = file }
+    }
+}
+
+/// "Track with LFS": writes the pattern to `.gitattributes` and stages it,
+/// so the next commit stores a pointer instead of the bytes.
+struct LFSTrackMenu: View {
+    let file: FileChange
+    @ObservedObject var repo: RepoState
+
+    private var ext: String { (file.fileName as NSString).pathExtension }
+
+    var body: some View {
+        if ext.isEmpty {
+            Button("Track \"\(file.fileName)\" with LFS") {
+                repo.trackWithLFS(file, pattern: file.path)
+            }
+        } else {
+            Menu("Track with LFS") {
+                Button("Track all \"*.\(ext)\" files") {
+                    repo.trackWithLFS(file, pattern: "*.\(ext)")
+                }
+                Button("Track only \"\(file.fileName)\"") {
+                    repo.trackWithLFS(file, pattern: file.path)
+                }
+            }
+        }
     }
 }
 
