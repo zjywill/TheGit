@@ -175,6 +175,16 @@ struct RepoSnapshot: Equatable {
     /// full brightness along their whole run, others dim entirely.
     var brightColors: Set<Int> = []
 
+    /// The commit HEAD points at, within the loaded window. Read off the
+    /// ref list rather than tracked separately, so it can never disagree
+    /// with what the graph draws.
+    var headHash: String? {
+        commits.first { c in c.refs.contains { $0.hasPrefix("HEAD") } }?.hash
+    }
+
+    /// The checked-out local branch, when HEAD isn't detached.
+    var headBranch: Branch? { localBranches.first(where: \.isCurrent) }
+
     /// LFS objects that genuinely have to be downloaded: pointer in the
     /// working tree, object nowhere on disk. A locally modified LFS file
     /// also reads as "not in the store" — verified against git-lfs 3.7 —

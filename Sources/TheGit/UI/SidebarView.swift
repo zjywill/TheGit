@@ -10,9 +10,11 @@ struct SidebarView: View {
     /// keeps its own.
     @State private var filter = ""
     @FocusState private var filterFocused: Bool
+    @State private var hoveringHead = false
 
     var body: some View {
         VStack(spacing: 0) {
+            headChip
             filterField
             // ScrollView + LazyVStack instead of List: List is NSTableView
             // underneath, and it was the app's one source of AppKit layout
@@ -192,6 +194,86 @@ struct SidebarView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(deleteMessage)
+        }
+    }
+
+    // MARK: - HEAD
+
+    /// The branch you are standing on, pinned above everything else.
+    /// The tree below can always hide this one fact — the branch sits in a
+    /// collapsed folder, the filter excludes it, the list is scrolled past
+    /// it — so it gets a line nothing can fold away. Clicking takes the
+    /// graph back to HEAD, exactly what clicking the branch in the tree
+    /// does: one place, one meaning.
+    @ViewBuilder
+    private var headChip: some View {
+        let branch = repo.snapshot.headBranch
+        let head = repo.snapshot.headHash
+        if branch != nil || head != nil {
+            let detached = branch == nil
+            let tint = detached ? Color.orange : Color.accentColor
+            Button {
+                repo.locateHead()
+            } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 6 * zoom) {
+                    // Same glyph whether or not HEAD is detached: colour and
+                    // wording carry the difference, the identity doesn't.
+                    Image(systemName: "arrow.triangle.branch")
+                        .zoomFont(11)
+                        .foregroundStyle(tint)
+                    if let branch {
+                        Text(branch.name)
+                            .zoomFont(12, weight: .semibold)
+                            .foregroundStyle(tint)
+                            .lineLimit(1)
+                            // Branch names share their prefixes (feat/…,
+                            // fix/…); the end is what tells them apart.
+                            .truncationMode(.middle)
+                    } else {
+                        Text("detached at \(String((head ?? "").prefix(7)))")
+                            .zoomFont(12, weight: .semibold, design: .monospaced)
+                            .foregroundStyle(tint)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    if let branch, branch.ahead > 0 || branch.behind > 0 {
+                        HStack(spacing: 3) {
+                            if branch.ahead > 0 {
+                                Text("↑\(branch.ahead)").foregroundStyle(.teal)
+                            }
+                            if branch.behind > 0 {
+                                Text("↓\(branch.behind)").foregroundStyle(.orange)
+                            }
+                        }
+                        .zoomFont(10, weight: .semibold, design: .monospaced)
+                    }
+                    // Fixed slot, so revealing the hint on hover moves
+                    // nothing: the counts to its left must not twitch.
+                    Image(systemName: "scope")
+                        .zoomFont(10, weight: .semibold)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 11 * zoom)
+                        .opacity(hoveringHead ? 1 : 0)
+                }
+                .padding(.horizontal, 8 * zoom)
+                .frame(height: 24 * zoom)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(tint.opacity(hoveringHead ? 0.18 : 0.10))
+                )
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.rowPressEffect)
+            .onHover { hoveringHead = $0 }
+            // Hover is the only thing that fades here, and only in colour:
+            // the row itself never moves, so the pointer can cross the
+            // sidebar without anything shifting under it.
+            .animation(.easeOut(duration: 0.12), value: hoveringHead)
+            .padding(.horizontal, 10)
+            .padding(.top, 10)
+            .help(detached
+                ? "HEAD is detached — click to show it in the graph"
+                : "On \(branch?.name ?? "") — click to show it in the graph")
         }
     }
 

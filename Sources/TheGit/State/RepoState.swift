@@ -284,9 +284,7 @@ final class RepoState: ObservableObject, Identifiable {
             // wherever HEAD sits in date-order.
             var layoutCommits = snap.commits
             if !(s0.staged.isEmpty && s0.unstaged.isEmpty && s0.conflicted.isEmpty) {
-                let headHash = snap.commits.first { c in
-                    c.refs.contains { $0.hasPrefix("HEAD") }
-                }?.hash
+                let headHash = snap.headHash
                 let wip = Commit(
                     hash: Commit.wipHash,
                     parents: headHash.map { [$0] } ?? [],
@@ -299,7 +297,7 @@ final class RepoState: ObservableObject, Identifiable {
             }
             snap.graphRows = GraphLayout.layout(commits: layoutCommits)
             snap.reachableFromHead = Self.reachableSet(
-                from: snap.commits.first { c in c.refs.contains { $0.hasPrefix("HEAD") } }?.hash,
+                from: snap.headHash,
                 commits: snap.commits
             )
             // A line is "on the current branch" when it carries a reachable
@@ -1380,6 +1378,10 @@ final class RepoState: ObservableObject, Identifiable {
     /// loaded window, extend the window far enough first.
     func locate(_ hash: String) {
         guard !hash.isEmpty else { return }
+        // A search filters the graph to a flat list, and the commit asked
+        // for is usually not in it — the jump would silently do nothing.
+        // Asking to go somewhere outranks the filter that hides it.
+        searchText = ""
         if snapshot.commits.contains(where: { $0.hash == hash }) {
             selectedCommit = hash
             scrollTarget = hash
@@ -1395,6 +1397,16 @@ final class RepoState: ObservableObject, Identifiable {
                 selectedCommit = hash
                 scrollTarget = hash
             }
+        }
+    }
+
+    /// Jump the graph back to HEAD — the current branch's tip, or the
+    /// commit itself when HEAD is detached.
+    func locateHead() {
+        if let tip = snapshot.headBranch?.tipHash, !tip.isEmpty {
+            locate(tip)
+        } else if let head = snapshot.headHash {
+            locate(head)
         }
     }
 

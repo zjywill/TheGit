@@ -28,16 +28,26 @@ extension View {
 /// Press feedback for plain icon buttons: subtle scale-down, fast ease-out.
 /// (Bordered buttons get this from AppKit for free; .plain ones don't.)
 struct PressEffectButtonStyle: ButtonStyle {
+    var scale: CGFloat = 0.94
+    var pressedOpacity: Double = 0.7
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? 0.94 : 1)
-            .opacity(configuration.isPressed ? 0.7 : 1)
+            .scaleEffect(configuration.isPressed ? scale : 1)
+            .opacity(configuration.isPressed ? pressedOpacity : 1)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
 extension ButtonStyle where Self == PressEffectButtonStyle {
     static var pressEffect: PressEffectButtonStyle { PressEffectButtonStyle() }
+
+    /// Same cue at row scale. A 6% shrink is calibrated for a 22pt icon;
+    /// on a full-width row it reads as the panel flexing, not as a button
+    /// answering, so a wide target moves far less and dims instead.
+    static var rowPressEffect: PressEffectButtonStyle {
+        PressEffectButtonStyle(scale: 0.985, pressedOpacity: 0.85)
+    }
 }
 
 extension Animation {
