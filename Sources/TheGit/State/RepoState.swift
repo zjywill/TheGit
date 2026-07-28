@@ -682,15 +682,25 @@ final class RepoState: ObservableObject, Identifiable {
 
     func fetch() { perform { try await $0.fetch() } }
     func pull() { perform { try await $0.pull() } }
-    /// A branch created locally has no upstream, and bare `git push` refuses
-    /// to guess one — the toolbar button would fail on every new branch until
-    /// the user typed `push -u` by hand. Set the upstream on the first push
-    /// instead, the same as the branch menu's "Push to" already does.
+    /// Bare `git push` fails in two everyday states, and the toolbar button
+    /// has to cover both (the way GitKraken does):
+    /// - no upstream (a branch created locally): push and set one.
+    /// - upstream named differently (a branch created off origin/main keeps
+    ///   tracking it): push.default=simple refuses outright, so push the
+    ///   branch under its own name and re-point the tracking there.
     func push() {
-        guard let current = snapshot.localBranches.first(where: \.isCurrent),
-              current.upstream == nil
-        else {
+        guard let current = snapshot.localBranches.first(where: \.isCurrent) else {
             perform { try await $0.push() }
+            return
+        }
+        if let upstream = current.upstream {
+            let remote = remote(for: current)
+            let sameName = upstream == "\(remote)/\(current.name)"
+            if sameName {
+                perform { try await $0.push() }
+            } else {
+                perform { try await $0.push(remote: remote, branch: current.name, setUpstream: true) }
+            }
             return
         }
         let remote = snapshot.defaultRemote

@@ -609,6 +609,37 @@ final class RepoIntegrationTests: XCTestCase {
         XCTAssertTrue(remoteRefs.contains("feature/x"), remoteRefs)
     }
 
+    /// A branch created off origin/main keeps tracking it, and bare
+    /// `git push` refuses under push.default=simple because the names
+    /// differ. The button must push the branch under its own name and
+    /// re-point the tracking there (GitKraken's behaviour), not surface
+    /// git's fatal.
+    func testPushOnBranchTrackingDifferentlyNamedUpstream() async throws {
+        let origin = root.appendingPathComponent("origin-mismatch.git").path
+        try await Shell.run("/usr/bin/env", ["git", "init", "-q", "--bare", "-b", "main", origin])
+        let path = try await makeRepo("push-mismatch")
+        try await git(path, ["remote", "add", "origin", origin])
+        try await git(path, ["push", "-q", "-u", "origin", "main"])
+        try await git(path, ["checkout", "-q", "-b", "fix/thing", "--track", "origin/main"])
+        try write("fix\n", to: path + "/fix.txt")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "fix"])
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        XCTAssertEqual(
+            repo.snapshot.localBranches.first(where: \.isCurrent)?.upstream, "origin/main")
+
+        repo.push()
+        try await waitUntil("the push to land under the branch's own name", { [weak repo] in
+            repo?.snapshot.localBranches.first(where: \.isCurrent)?.upstream == "origin/fix/thing"
+        }, refreshing: { await repo.refresh() })
+        XCTAssertNil(repo.errorMessage)
+
+        let remoteRefs = try await git(origin, ["branch", "--format=%(refname:short)"])
+        XCTAssertTrue(remoteRefs.contains("fix/thing"), remoteRefs)
+    }
+
     /// Nothing has ever been pushed, so there are no remote-tracking
     /// branches to read a remote name off — the very first push still has to
     /// land on the configured `origin`.
@@ -792,6 +823,127 @@ final class RepoIntegrationTests: XCTestCase {
         XCTAssertEqual(read(path + "/seed.txt"), "seed\n")
         XCTAssertTrue(repo.snapshot.staged.isEmpty)
         XCTAssertTrue(repo.snapshot.unstaged.isEmpty)
+    }
+
+    // MARK: - Pull auto-stash
+
+    /// Origin seeded with `main`, the app's working clone, and a second
+    /// clone to push upstream work from.
+    private func makePullFixture(_ name: String) async throws -> (path: String, theirs: String) {
+        let origin = root.appendingPathComponent("\(name)-origin.git").path
+        try await Shell.run("/usr/bin/env", ["git", "init", "-q", "--bare", "-b", "main", origin])
+        let path = try await makeRepo(name)
+        try await git(path, ["remote", "add", "origin", origin])
+        try await git(path, ["push", "-q", "-u", "origin", "main"])
+        let theirs = root.appendingPathComponent("\(name)-theirs").path
+        try await git(root.path, ["clone", "-q", origin, theirs])
+        return (path, theirs)
+    }
+
+    private func pushUpstream(_ theirs: String, file: String, contents: String) async throws {
+        try write(contents, to: theirs + "/" + file)
+        try await git(theirs, ["add", "-A"])
+        try await git(theirs, ["commit", "-qm", "upstream work"])
+        try await git(theirs, ["push", "-q"])
+    }
+
+    /// Pull on a dirty tree, GitKraken-style: the upstream commit arrives,
+    /// the uncommitted edits (tracked and untracked) come back, and no
+    /// stash entry is left behind.
+    func testPullAutoStashesADirtyTreeAndRestoresIt() async throws {
+        let (path, theirs) = try await makePullFixture("pull-dirty")
+        try await pushUpstream(theirs, file: "upstream.txt", contents: "up\n")
+
+        try write("wip\n", to: path + "/seed.txt")
+        try write("note\n", to: path + "/note.txt")
+        let repo = RepoState(path: path)
+        await repo.refresh()
+
+        repo.pull()
+        // Snapshot state matches the pre-pull state mid-flight, so the wait
+        // has to pin the timing on the working-tree contents themselves.
+        try await waitUntil("the pull to land and the WIP to come back") { [weak repo] in
+            self.read(path + "/upstream.txt") == "up\n"
+                && self.read(path + "/seed.txt") == "wip\n"
+                && self.read(path + "/note.txt") == "note\n"
+                && repo?.snapshot.unstaged.map(\.path).sorted() == ["note.txt", "seed.txt"]
+                && repo?.snapshot.stashes.isEmpty == true
+        }
+        XCTAssertNil(repo.errorMessage)
+    }
+
+    /// The pop conflicts: upstream rewrote the same lines the uncommitted
+    /// edit touches. The markers land in the working tree where the
+    /// conflict UI presents them, and the stash is kept as the backup.
+    func testPullPopConflictMarksTheFileAndKeepsTheStash() async throws {
+        let (path, theirs) = try await makePullFixture("pull-pop-conflict")
+        try await pushUpstream(theirs, file: "seed.txt", contents: "upstream\n")
+
+        try write("local\n", to: path + "/seed.txt")
+        let repo = RepoState(path: path)
+        await repo.refresh()
+
+        repo.pull()
+        try await waitUntil("the pop conflict to surface") { [weak repo] in
+            repo?.snapshot.conflicted.map(\.path) == ["seed.txt"]
+                && repo?.snapshot.stashes.count == 1
+        }
+        XCTAssertTrue(read(path + "/seed.txt").contains("<<<<<<<"))
+        XCTAssertTrue(repo.errorMessage?.contains("kept as a backup") == true,
+                      repo.errorMessage ?? "no error message")
+    }
+
+    /// A refused pull (`--ff-only` on a diverged branch) never touched the
+    /// tree, so the auto-stashed WIP must go straight back — as if the
+    /// stash dance never happened.
+    func testRefusedPullRestoresTheAutoStash() async throws {
+        let (path, theirs) = try await makePullFixture("pull-refused")
+        try await pushUpstream(theirs, file: "seed.txt", contents: "upstream\n")
+
+        // Diverge locally (different file, so only fast-forward is refused,
+        // not the merge itself), then dirty the tree.
+        try write("mine\n", to: path + "/mine.txt")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "local work"])
+        try write("wip\n", to: path + "/wip.txt")
+        let repo = RepoState(path: path)
+        await repo.refresh()
+
+        repo.runPull(.ffOnly)
+        try await waitUntil("the refused pull to restore the WIP") { [weak repo] in
+            repo?.errorMessage != nil
+                && repo?.snapshot.unstaged.map(\.path) == ["wip.txt"]
+                && repo?.snapshot.stashes.isEmpty == true
+        }
+        XCTAssertEqual(read(path + "/wip.txt"), "wip\n")
+    }
+
+    /// The pull itself stops on merge conflicts. Popping onto a conflicted
+    /// tree would tangle the WIP into the merge, so the stash must stay
+    /// put — and the error must say where the changes went.
+    func testConflictedPullKeepsTheAutoStashForLater() async throws {
+        let (path, theirs) = try await makePullFixture("pull-merge-conflict")
+        try await pushUpstream(theirs, file: "seed.txt", contents: "upstream\n")
+
+        // Modern git refuses a plain pull on divergence unless told how.
+        try await git(path, ["config", "pull.rebase", "false"])
+        try write("mine\n", to: path + "/seed.txt")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "local work"])
+        try write("wip\n", to: path + "/wip.txt")
+        let repo = RepoState(path: path)
+        await repo.refresh()
+
+        repo.pull()
+        try await waitUntil("the merge conflict to surface with the stash kept") { [weak repo] in
+            repo?.snapshot.operation == .merge
+                && repo?.snapshot.conflicted.map(\.path) == ["seed.txt"]
+                && repo?.snapshot.stashes.count == 1
+        }
+        // The WIP is in the stash, not in the conflicted tree.
+        XCTAssertEqual(read(path + "/wip.txt"), "")
+        XCTAssertTrue(repo.errorMessage?.contains("safe in the stash") == true,
+                      repo.errorMessage ?? "no error message")
     }
 
     // MARK: - Status-only refresh

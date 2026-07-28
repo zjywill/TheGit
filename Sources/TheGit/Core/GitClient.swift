@@ -525,8 +525,64 @@ actor GitClient {
         try await run(["fetch", "--all", "--prune"])
     }
 
-    func pull(extraArgs: [String] = []) async throws {
-        try await run(["pull"] + extraArgs)
+    /// GitKraken-style pull: a dirty working tree is auto-stashed first and
+    /// the stash popped back afterwards. Deliberately not `pull --autostash`
+    /// — when the final apply conflicts, git's autostash resets the tree and
+    /// hides the changes back in the stash, whereas popping leaves the
+    /// conflict markers in the working tree where the conflict UI shows them.
+    func pull(extraArgs: [String] = [], remote: String? = nil, branch: String? = nil) async throws {
+        var pullArgs = ["pull"] + extraArgs
+        if let remote, let branch { pullArgs += [remote, branch] }
+
+        let dirty = try await !run(["status", "--porcelain"])
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard dirty else {
+            try await run(pullArgs)
+            return
+        }
+
+        // `stash push` can exit 0 without creating a stash entry. Comparing
+        // refs/stash before and after is the only reliable "did we actually
+        // stash" signal — popping without it would eat a pre-existing stash.
+        let before = try? await run(["rev-parse", "--verify", "-q", "refs/stash"])
+        try await run(["stash", "push", "-u", "-m", "Auto-stash before pull"])
+        let after = try? await run(["rev-parse", "--verify", "-q", "refs/stash"])
+        guard let after, after != before else {
+            try await run(pullArgs)
+            return
+        }
+
+        do {
+            try await run(pullArgs)
+        } catch {
+            if ((try? await operationState()) ?? nil) != nil {
+                // The pull stopped on merge/rebase conflicts. Popping onto a
+                // conflicted tree would tangle the WIP into the conflict, so
+                // the stash stays put until the user resolves and pops it.
+                let detail = (error as? GitError)?.message ?? error.localizedDescription
+                throw GitError(
+                    command: "pull",
+                    message: detail
+                        + "\n\nYour uncommitted changes are safe in the stash — pop it after resolving."
+                )
+            }
+            // The pull failed without touching the tree (offline, refused
+            // fast-forward): put the working tree back exactly as it was.
+            try? await run(["stash", "pop"])
+            throw error
+        }
+
+        do {
+            try await run(["stash", "pop"])
+        } catch {
+            // A conflicted pop marks the files in the working tree and keeps
+            // the stash entry — report it as an outcome, not a git failure.
+            throw GitError(
+                command: "stash pop",
+                message: "The pull succeeded, but restoring your uncommitted changes hit conflicts — "
+                    + "they're marked in the working tree, and the stash was kept as a backup."
+            )
+        }
     }
 
     func stashPush(message: String? = nil, paths: [String] = []) async throws {
@@ -721,10 +777,6 @@ actor GitClient {
         if setUpstream { args.append("-u") }
         args += [remote, branch]
         try await run(args)
-    }
-
-    func pull(remote: String, branch: String, extraArgs: [String] = []) async throws {
-        try await run(["pull"] + extraArgs + [remote, branch])
     }
 
     /// Advance a branch you are NOT on, without checking it out. git only
