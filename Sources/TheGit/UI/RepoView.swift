@@ -4,6 +4,10 @@ import SwiftUI
 /// sidebar (branches) | graph | commit panel.
 struct RepoView: View {
     @ObservedObject var repo: RepoState
+    /// Lives here, not in RepoToolbar: @AppStorage inside a ToolbarContent
+    /// struct is never installed on the view graph on macOS — writes were
+    /// silently dropped and the pull-mode picker's check never moved.
+    @AppStorage("pullMode") private var pullModeRaw = RepoState.PullMode.ff.rawValue
 
     var body: some View {
         HSplitView {
@@ -45,7 +49,7 @@ struct RepoView: View {
                 repo.commitSelectionChanged()
             }
         }
-        .toolbar { RepoToolbar(repo: repo) }
+        .toolbar { RepoToolbar(repo: repo, pullModeRaw: $pullModeRaw) }
         // On its own layer, not in the chain below: a .sheet stacked with
         // the alerts and confirmationDialog on this same view never
         // presents — they compete for one presentation slot, and the
@@ -136,8 +140,9 @@ struct RepoToolbar: ToolbarContent {
     @ObservedObject var repo: RepoState
     @FocusState private var searchFocused: Bool
     /// Default action for the Pull button, GitKraken-style; the dropdown
-    /// only picks the default, the button itself executes it.
-    @AppStorage("pullMode") private var pullModeRaw = RepoState.PullMode.ff.rawValue
+    /// only picks the default, the button itself executes it. A Binding
+    /// into RepoView's @AppStorage — see the note there.
+    @Binding var pullModeRaw: String
 
     private var pullMode: RepoState.PullMode {
         RepoState.PullMode(rawValue: pullModeRaw) ?? .ff
@@ -164,6 +169,11 @@ struct RepoToolbar: ToolbarContent {
             } primaryAction: {
                 repo.runPull(pullMode)
             }
+            // The NSMenu a toolbar Menu builds is a snapshot — it never
+            // re-renders on state change, so the check stayed put (and
+            // primaryAction kept running the old mode). A new id tears the
+            // whole item down and rebuilds it whenever the mode changes.
+            .id(pullModeRaw)
             .help(pullMode.title)
 
             Button {
