@@ -17,6 +17,17 @@ struct Commit: Identifiable, Hashable {
     /// Synthetic hash for the uncommitted-changes row in the graph.
     static let wipHash = "WIP"
     var isWip: Bool { hash == Self.wipHash }
+
+    /// Stash rows are synthetic commits too: hash is the stash ref behind a
+    /// prefix no real sha can collide with. Like WIP, they run through the
+    /// regular lane algorithm, which is what routes their dashed line into
+    /// the base commit wherever it sits.
+    static let stashHashPrefix = "STASH:"
+    var isStash: Bool { hash.hasPrefix(Self.stashHashPrefix) }
+    /// "stash@{0}" for a stash row, nil for real commits.
+    var stashRef: String? {
+        isStash ? String(hash.dropFirst(Self.stashHashPrefix.count)) : nil
+    }
 }
 
 enum BranchKind: Hashable {
@@ -159,9 +170,6 @@ struct RepoSnapshot: Equatable {
     var submodules: [Submodule] = []
     var lfs = LFSStatus()
     var stashes: [Stash] = []
-    /// Stashes grouped by the commit they were taken on, for the graph's
-    /// stash nodes. Empty when there are no stashes — zero cost then.
-    var stashesByBase: [String: [Stash]] = [:]
     var tags: [Tag] = []
     var staged: [FileChange] = []
     var unstaged: [FileChange] = []

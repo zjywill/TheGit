@@ -28,18 +28,13 @@ struct GraphView: View {
         // filtered gaps, so rows collapse to a single node column.
         let rows = searching
             ? allRows.filter {
-                !$0.commit.isWip
+                !$0.commit.isWip && !$0.commit.isStash
                     && ($0.commit.subject.localizedCaseInsensitiveContains(query)
                         || $0.commit.author.localizedCaseInsensitiveContains(query)
                         || $0.commit.hash.hasPrefix(query.lowercased()))
             }
             : allRows
-        // Stash nodes occupy the first free lane(s) to the right of their
-        // base commit's row; widen the graph only when stashes exist.
-        let stashesByBase = searching ? [:] : repo.snapshot.stashesByBase
-        let totalLanes = stashesByBase.isEmpty
-            ? GraphLayout.maxLanes(of: rows)
-            : rows.map { $0.laneCount + (stashesByBase[$0.commit.hash]?.count ?? 0) }.max() ?? 1
+        let totalLanes = GraphLayout.maxLanes(of: rows)
         let laneW = Self.laneWidth * zoom
         let rowH = Self.rowHeight * zoom
         let neededWidth = CGFloat(totalLanes) * laneW + 8
@@ -101,6 +96,18 @@ struct GraphView: View {
                                         repo.confirmDiscardAll = true
                                     }
                                 }
+                        } else if row.commit.isStash {
+                            // A stash row: laid out like any commit, so its
+                            // dashed line lands on the base commit's lane.
+                            StashGraphRow(
+                                row: row,
+                                graphWidth: graphWidth,
+                                badgeWidth: badgeWidth,
+                                repo: repo,
+                                scrollX: scrollX,
+                                fadeLeading: fadeLeading,
+                                fadeTrailing: faded
+                            )
                         } else {
                             GraphRowView(
                                 row: row,
@@ -110,8 +117,7 @@ struct GraphView: View {
                                 fadeLeading: fadeLeading,
                                 searchMode: searching,
                                 repo: repo,
-                                scrollX: scrollX,
-                                stashes: stashesByBase[row.commit.hash] ?? []
+                                scrollX: scrollX
                             )
                             // Infinite scroll: reaching the last row loads 500 more.
                             .onAppear { repo.loadMoreIfNeeded(row) }
@@ -231,6 +237,97 @@ struct WipGraphRow: View {
     }
 }
 
+/// A stash as its own graph row, GitKraken-style: a dashed node on its own
+/// lane, a dashed line into the base commit below, the stash message as the
+/// row text. Clicking highlights the stash in the sidebar; the context menu
+/// mirrors the sidebar row's.
+struct StashGraphRow: View {
+    let row: GraphRow
+    let graphWidth: CGFloat
+    let badgeWidth: CGFloat
+    @ObservedObject var repo: RepoState
+    var scrollX: CGFloat = 0
+    var fadeLeading = false
+    var fadeTrailing = false
+    @Environment(\.uiZoom) private var zoom
+
+    /// The snapshot's stash for this row. Rebuilt from the row itself when
+    /// the list has renumbered mid-refresh — rows and stashes then disagree
+    /// for one frame, and the row is what's on screen.
+    private var stash: Stash {
+        let ref = row.commit.stashRef ?? ""
+        return repo.snapshot.stashes.first { $0.ref == ref }
+            ?? Stash(
+                ref: ref,
+                date: row.commit.date,
+                message: row.commit.subject,
+                baseHash: row.commit.parents.first ?? ""
+            )
+    }
+
+    /// Stashes hang off a commit, not off HEAD's history directly: bright
+    /// exactly when the commit they were taken on is.
+    private var onCurrentBranch: Bool {
+        repo.snapshot.reachableFromHead.contains(row.commit.parents.first ?? "")
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if badgeWidth > 0 {
+                Spacer().frame(width: badgeWidth)
+            }
+
+            LaneCanvas(
+                row: row,
+                dimmed: !onCurrentBranch,
+                brightColors: repo.snapshot.brightColors,
+                scrollX: scrollX,
+                fadeLeading: fadeLeading,
+                fadeTrailing: fadeTrailing
+            )
+            .frame(width: graphWidth, height: GraphView.rowHeight * zoom)
+            .clipped()
+
+            RoundedRectangle(cornerRadius: 1)
+                .fill(LaneCanvas.color(row.columnColor))
+                .frame(width: 3, height: 16 * zoom)
+                .opacity(onCurrentBranch ? 1 : 0.45)
+
+            Text(stash.message)
+                .zoomFont(12)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            Spacer(minLength: 12)
+
+            Text(stash.ref)
+                .zoomFont(11, design: .monospaced)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .fixedSize()
+        }
+        .background(
+            repo.selectedStashRef == stash.ref
+                ? Color.accentColor.opacity(0.22)
+                : LaneCanvas.color(row.columnColor).opacity(0.055)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture { repo.selectedStashRef = stash.ref }
+        .contextMenu {
+            Button("Apply (keep stash)") { repo.applyStash(stash) }
+            Button("Pop (apply and remove)") { repo.popStash(stash) }
+            Divider()
+            Button("Create branch from stash…") {
+                repo.promptText = ""
+                repo.branchPrompt = .branchFromStash(stash)
+            }
+            Divider()
+            Button("Drop…", role: .destructive) { repo.stashToDrop = stash }
+        }
+    }
+}
+
 struct GraphRowView: View {
     let row: GraphRow
     let graphWidth: CGFloat
@@ -240,8 +337,6 @@ struct GraphRowView: View {
     var searchMode: Bool = false
     @ObservedObject var repo: RepoState
     var scrollX: CGFloat = 0
-    /// Stashes taken on this commit; drawn as dashed nodes to the right.
-    var stashes: [Stash] = []
     @ObservedObject private var avatars = AvatarStore.shared
     @Environment(\.uiZoom) private var zoom
 
@@ -295,43 +390,10 @@ struct GraphRowView: View {
                     : nil,
                 scrollX: scrollX,
                 fadeLeading: fadeLeading,
-                fadeTrailing: faded,
-                stashCount: searchMode ? 0 : stashes.count,
-                stashStartLane: row.laneCount
+                fadeTrailing: faded
             )
             .frame(width: graphWidth, height: GraphView.rowHeight * zoom)
-                .overlay(alignment: .leading) {
-                    // Hit areas over the canvas-drawn stash nodes. An
-                    // overlay adds nothing to the row's layout, so lane
-                    // alignment can't drift. Only the on-screen part of a
-                    // node is interactive (clipped() doesn't stop hits).
-                    if !searchMode {
-                        let laneW = GraphView.laneWidth * zoom
-                        ForEach(Array(stashes.enumerated()), id: \.element.ref) { i, stash in
-                            let cx = CGFloat(row.laneCount + i) * laneW + laneW / 2 - scrollX
-                            if cx > 0, cx < graphWidth {
-                                Color.clear
-                                    .frame(width: laneW, height: laneW)
-                                    .contentShape(Circle())
-                                    .onTapGesture { repo.selectedStashRef = stash.ref }
-                                    .help("\(stash.ref) — \(stash.message)")
-                                    .contextMenu {
-                                        Button("Apply (keep stash)") { repo.applyStash(stash) }
-                                        Button("Pop (apply and remove)") { repo.popStash(stash) }
-                                        Divider()
-                                        Button("Create branch from stash…") {
-                                            repo.promptText = ""
-                                            repo.branchPrompt = .branchFromStash(stash)
-                                        }
-                                        Divider()
-                                        Button("Drop…", role: .destructive) { repo.stashToDrop = stash }
-                                    }
-                                    .offset(x: cx - laneW / 2)
-                            }
-                        }
-                    }
-                }
-                .clipped()
+            .clipped()
 
             // Branch-colored tick before the message, GitKraken-style.
             RoundedRectangle(cornerRadius: 1)
@@ -471,10 +533,6 @@ struct LaneCanvas: View {
     /// the lines only, in-canvas — a pinned node must not fade with them.
     var fadeLeading = false
     var fadeTrailing = false
-    /// Stash nodes for this row: dashed grey circles in the first free
-    /// lanes right of `stashStartLane`, GitKraken-style. Zero when none.
-    var stashCount = 0
-    var stashStartLane = 0
     @Environment(\.uiZoom) private var zoom
 
     static let palette: [Color] = [
@@ -505,14 +563,17 @@ struct LaneCanvas: View {
             let midY = size.height / 2
             let dotX = x(row.column, laneW)
             let isWip = row.commit.isWip
+            // WIP and stash rows share the synthetic-node treatment below:
+            // dashed outline, no pinning, hide with their lane.
+            let synthetic = isWip || row.commit.isStash
 
             // Node position on screen. Scrolling right would carry the dot
             // out the left edge; instead it pins at lane 0's center and the
-            // lines keep sliding underneath, GitKraken-style. The WIP node
-            // is the exception: it isn't a real commit, so it hides with
-            // its lane instead of pinning — same as GitKraken.
+            // lines keep sliding underneath, GitKraken-style. Synthetic
+            // nodes are the exception: they aren't real commits, so they
+            // hide with their lane instead of pinning — same as GitKraken.
             let pinX = laneW / 2
-            let pinned = !isWip && scrollX > 0 && dotX - scrollX < pinX
+            let pinned = !synthetic && scrollX > 0 && dotX - scrollX < pinX
 
             // Lines fade at the edges; the mask lives inside the canvas so
             // the pinned node (drawn later, unmasked) stays fully opaque.
@@ -605,38 +666,13 @@ struct LaneCanvas: View {
                 stroke(p, edge: edge)
             }
 
-            // Stash nodes: dashed grey circles beside the base commit, in
-            // the lines' context on purpose — they scroll, fade and hide
-            // with the lanes and never pin, so they cannot disturb the
-            // row's alignment.
-            for i in 0..<stashCount {
-                let sx = x(stashStartLane + i, laneW)
-                let sr: CGFloat = 7 * zoom
-                let stashRect = CGRect(x: sx - sr, y: midY - sr, width: sr * 2, height: sr * 2)
-                lineContext.fill(
-                    Path(ellipseIn: stashRect),
-                    with: .color(Color(nsColor: .textBackgroundColor))
-                )
-                lineContext.stroke(
-                    Path(ellipseIn: stashRect),
-                    with: .color(.secondary.opacity(0.9)),
-                    style: StrokeStyle(lineWidth: 1.5 * zoom, dash: [3 * zoom, 2.5 * zoom])
-                )
-                lineContext.draw(
-                    Text(Image(systemName: "tray.full"))
-                        .font(.system(size: 7 * zoom))
-                        .foregroundColor(.secondary),
-                    at: CGPoint(x: sx, y: midY)
-                )
-            }
-
             // The node draws in its own context: trailing fade only, never
             // the leading one — a dot approaching the left edge stays fully
-            // opaque until it pins, so there is no fade-then-snap. The WIP
-            // node instead shares the lines' clipping, so it slides into
-            // the blank strip and disappears along with its lane.
+            // opaque until it pins, so there is no fade-then-snap. Synthetic
+            // nodes instead share the lines' clipping, so they slide into
+            // the blank strip and disappear along with their lane.
             var nodeContext: GraphicsContext
-            if isWip {
+            if synthetic {
                 nodeContext = lineContext
             } else {
                 nodeContext = context
@@ -665,13 +701,25 @@ struct LaneCanvas: View {
                 Path(ellipseIn: nodeRect),
                 with: .color(Color(nsColor: .textBackgroundColor))
             )
-            if isWip {
+            if synthetic {
                 // Empty dashed circle, GitKraken-style uncommitted node.
+                // A stash node carries a tray icon so it can't be mistaken
+                // for WIP; both take the branch-line color, which is what
+                // ties the node to its dashed line.
+                let alpha = dimmed ? 0.45 : 0.9
                 nodeContext.stroke(
                     Path(ellipseIn: nodeRect.insetBy(dx: 1 * zoom, dy: 1 * zoom)),
-                    with: .color(Self.color(row.columnColor).opacity(0.9)),
+                    with: .color(Self.color(row.columnColor).opacity(alpha)),
                     style: StrokeStyle(lineWidth: 1.5 * zoom, dash: [3 * zoom, 2.5 * zoom])
                 )
+                if row.commit.isStash {
+                    nodeContext.draw(
+                        Text(Image(systemName: "tray.full"))
+                            .font(.system(size: 7 * zoom))
+                            .foregroundColor(Self.color(row.columnColor).opacity(alpha)),
+                        at: CGPoint(x: nodeX, y: midY)
+                    )
+                }
                 return
             }
             let inner = nodeRect.insetBy(dx: 1.5 * zoom, dy: 1.5 * zoom)

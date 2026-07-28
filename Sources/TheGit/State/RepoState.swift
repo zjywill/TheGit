@@ -297,7 +297,8 @@ final class RepoState: ObservableObject, Identifiable {
                 commits: snap.commits,
                 headHash: snap.headHash,
                 dirty: !(s0.staged.isEmpty && s0.unstaged.isEmpty && s0.conflicted.isEmpty),
-                reachable: snap.reachableFromHead
+                reachable: snap.reachableFromHead,
+                stashes: stashList
             )
             snap.graphRows = g.rows
             snap.brightColors = g.bright
@@ -308,7 +309,6 @@ final class RepoState: ObservableObject, Identifiable {
             snap.submodules = try await submodules
             snap.lfs = await lfs
             snap.stashes = stashList
-            snap.stashesByBase = Dictionary(grouping: stashList, by: \.baseHash)
             snap.tags = try await tags
             snap.staged = s0.staged
             snap.unstaged = s0.unstaged
@@ -365,7 +365,8 @@ final class RepoState: ObservableObject, Identifiable {
                     commits: snap.commits,
                     headHash: snap.headHash,
                     dirty: isDirty,
-                    reachable: snap.reachableFromHead
+                    reachable: snap.reachableFromHead,
+                    stashes: snap.stashes
                 )
                 snap.graphRows = g.rows
                 snap.brightColors = g.bright
@@ -387,7 +388,8 @@ final class RepoState: ObservableObject, Identifiable {
         commits: [Commit],
         headHash: String?,
         dirty: Bool,
-        reachable: Set<String>
+        reachable: Set<String>,
+        stashes: [Stash] = []
     ) -> (rows: [GraphRow], bright: Set<Int>) {
         // WIP is a synthetic commit whose parent is HEAD: the lane algorithm
         // then routes its line to HEAD's lane correctly, wherever HEAD sits
@@ -404,11 +406,46 @@ final class RepoState: ObservableObject, Identifiable {
             )
             layoutCommits = [wip] + commits
         }
+        // Each stash is a synthetic commit too, inserted directly above its
+        // base so its dashed line spans exactly one row — GitKraken's
+        // layout. Inserting keeps children-before-parents order intact for
+        // the lane algorithm; a stash whose base fell outside the loaded
+        // window simply isn't drawn, same as any other unloaded commit.
+        if !stashes.isEmpty {
+            let byBase = Dictionary(
+                grouping: stashes.filter { !$0.baseHash.isEmpty },
+                by: \.baseHash
+            )
+            var withStashes: [Commit] = []
+            withStashes.reserveCapacity(layoutCommits.count + stashes.count)
+            for commit in layoutCommits {
+                // stash list order is stash@{0} first — newest on top.
+                for stash in byBase[commit.hash] ?? [] {
+                    withStashes.append(Commit(
+                        hash: Commit.stashHashPrefix + stash.ref,
+                        parents: [stash.baseHash],
+                        author: "",
+                        date: stash.date,
+                        refs: [],
+                        subject: stash.message
+                    ))
+                }
+                withStashes.append(commit)
+            }
+            layoutCommits = withStashes
+        }
         let rows = GraphLayout.layout(commits: layoutCommits)
         // A line is "on the current branch" when it carries a reachable
         // commit or leads to its parents (also reachable by definition).
+        // Synthetic rows count when what they hang off is reachable: WIP
+        // always (its parent is HEAD), a stash when its base is.
         var bright: Set<Int> = []
-        for row in rows where row.commit.isWip || reachable.contains(row.commit.hash) {
+        for row in rows {
+            let onBranch = row.commit.isWip
+                || reachable.contains(row.commit.hash)
+                || (row.commit.isStash
+                    && reachable.contains(row.commit.parents.first ?? ""))
+            guard onBranch else { continue }
             bright.insert(row.columnColor)
             for edge in row.parentLanes { bright.insert(edge.color) }
         }

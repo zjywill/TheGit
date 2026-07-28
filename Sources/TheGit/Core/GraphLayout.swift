@@ -7,8 +7,9 @@ import Foundation
 struct GraphEdge: Hashable {
     let lane: Int
     let color: Int
-    /// The WIP line: dashed for its whole run, from the WIP node down to
-    /// the HEAD commit it points at (GitKraken draws it the same way).
+    /// A synthetic line — WIP or a stash — dashed for its whole run, from
+    /// its node down to the real commit it hangs off (GitKraken draws both
+    /// the same way).
     var dashed = false
 }
 
@@ -91,13 +92,15 @@ enum GraphLayout {
             for (idx, parent) in commit.parents.enumerated() {
                 if idx == 0 {
                     // First parent keeps the commit's own lane and color —
-                    // keeps the main line straight. The WIP commit's line
-                    // stays dashed until it reaches HEAD.
+                    // keeps the main line straight. Synthetic commits (WIP,
+                    // stashes) keep their line dashed until it reaches the
+                    // real commit it hangs off.
+                    let dashed = commit.isWip || commit.isStash
                     lanes[column] = parent
                     laneColors[column] = columnColor
-                    laneDashed[column] = commit.isWip
+                    laneDashed[column] = dashed
                     parentLanes.append(
-                        GraphEdge(lane: column, color: columnColor, dashed: commit.isWip)
+                        GraphEdge(lane: column, color: columnColor, dashed: dashed)
                     )
                 } else if let existing = lanes.firstIndex(of: parent) {
                     // Another drawn commit already expects this parent —
