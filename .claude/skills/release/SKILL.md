@@ -101,6 +101,21 @@ how the half-release above happened. The script clones the tap via
 `git@github.com:`; keep it that way, and suspect this first if the tap push
 fails silently.
 
+**Script exits silently right after the test lines — no tag created.**
+The integration tests (merge/stash) have a history of timing flakes, and
+the script's `swift test | tail -3` can crop the actual failure while
+still showing a "passed" trailer from the swift-testing runner. Run the
+full `swift test` to see what failed; if it passes clean, the release run
+just hit a flake — rerun release.sh.
+
+**Verification shows the OLD version even though the script said
+"Released".** raw.githubusercontent.com caches for ~5 minutes. Before
+diagnosing a half-release, confirm via the API, which is not cached:
+
+```bash
+curl -fsSL https://api.github.com/repos/zjywill/homebrew-tap/contents/Formula/thegit.rb | python3 -c "import sys,json,base64; print(base64.b64decode(json.load(sys.stdin)['content']).decode())" | grep -E '  url |  sha256'
+```
+
 **Tarball 404 right after tagging.** GitHub generates tag tarballs on
 demand; the script already retries 5×. Only investigate if all retries
 fail.
