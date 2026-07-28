@@ -134,7 +134,78 @@ TheGit never handles those tokens itself.
 
 ## Install
 
-### Build the app
+### Homebrew (recommended)
+
+```bash
+brew install zjywill/tap/thegit
+```
+
+The formula builds from source on your machine, which is deliberate: an
+ad-hoc-signed app downloaded over the network gets quarantined and Gatekeeper
+refuses it, so there is no prebuilt bottle or DMG to install. A first build
+takes a minute or two and needs an Xcode 15+ toolchain.
+
+Homebrew installs the bundle inside its own prefix and adds a `thegit` command
+to your `PATH`. A formula can't write to `/Applications`, so copy it there
+yourself:
+
+```bash
+cp -R /opt/homebrew/opt/thegit/TheGit.app /Applications/
+```
+
+(On an Intel Mac the prefix is `/usr/local` instead.)
+
+A **copy**, not a symlink. Symlinking is the tidier-looking option and it does
+give you a working Finder icon, but Spotlight indexes neither the Homebrew
+prefix nor the target of a symlink in `/Applications` — the app then never
+shows up in Spotlight or the Applications view. The cost of copying is one
+command after each upgrade, below.
+
+Homebrew 6 asks you to trust third-party taps. Installing the formula by its
+full name as above records that trust for you; if a later command says the tap
+is being ignored, this re-adds it:
+
+```bash
+brew trust --formula zjywill/tap/thegit
+```
+
+### Upgrade
+
+```bash
+brew update && brew upgrade thegit
+```
+
+`brew update` refreshes the tap — without it, `brew upgrade` only ever sees
+the formula version you already have. Quit TheGit first: a running app keeps
+using its old bundle until you relaunch it.
+
+Then refresh the copy in `/Applications`:
+
+```bash
+rm -rf /Applications/TheGit.app && cp -R /opt/homebrew/opt/thegit/TheGit.app /Applications/
+```
+
+`opt/thegit` always points at whichever version Homebrew currently has, so
+that line is the same after every upgrade.
+
+To see which version you're on:
+
+```bash
+brew list --versions thegit
+```
+
+### Uninstall
+
+```bash
+brew uninstall thegit && brew untap zjywill/tap
+```
+
+That doesn't touch the copy in `/Applications` — remove it with
+`rm -rf /Applications/TheGit.app`. Your settings (the `com.zjywill.TheGit`
+`defaults` domain) and the API key in the login keychain survive both an
+upgrade and an uninstall; delete them by hand if you want a clean slate.
+
+### Build the app yourself
 
 ```bash
 scripts/bundle.sh
@@ -177,7 +248,8 @@ Sources/TheGit/
   State/       AppState (open repos) and RepoState (one repository)
   UI/          sidebar, graph, diffs, commit panel, settings
 Tests/         parser, graph, cleanup and repo integration tests
-scripts/       bundle.sh (app + DMG), make-icon.py, sync-providers.py
+scripts/       bundle.sh (app + DMG), release.sh (tag + tap), make-icon.py,
+               sync-providers.py
 ```
 
 The AI provider catalog in `Sources/TheGit/Resources/providers.json` is
