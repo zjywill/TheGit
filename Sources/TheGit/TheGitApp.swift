@@ -180,7 +180,11 @@ struct RepoTabsBar: View {
             .onHover { AppState.pointerOverTopControl = $0 }
             Spacer()
         }
-        .padding(.horizontal, 80) // leave room for traffic lights
+        // The traffic lights live in the toolbar row above, not in this one,
+        // so nothing here has to dodge them. 10 pt is the sidebar's own
+        // inset: the first tab's edge lines up with the filter field and
+        // the branch pill directly below it.
+        .padding(.horizontal, 10)
         .frame(height: 38 * zoom)
         .background(.bar)
     }
