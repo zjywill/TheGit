@@ -10,11 +10,6 @@ struct GraphView: View {
     static let laneWidth: CGFloat = 18
     static let defaultVisibleLanes = 8
 
-    /// User-adjusted graph column width; 0 means "auto" (fit, capped at default).
-    @AppStorage("graphColumnWidth") private var storedWidth: Double = 0
-    @State private var dragBaseWidth: CGFloat?
-    @State private var hoveringResizer = false
-
     private static let leadingInset: CGFloat = 8
 
     var body: some View {
@@ -36,11 +31,7 @@ struct GraphView: View {
         let rowH = Self.rowHeight * zoom
         let neededWidth = CGFloat(totalLanes) * laneW + 8
         let autoWidth = CGFloat(min(totalLanes, Self.defaultVisibleLanes)) * laneW + 8
-        let graphWidth = searching
-            ? laneW * 2
-            : storedWidth > 0
-                ? min(max(CGFloat(storedWidth), laneW * 2), neededWidth)
-                : autoWidth
+        let graphWidth = searching ? laneW * 2 : autoWidth
         // How far the lanes can slide before their right edge is reached.
         let maxScroll = max(0, neededWidth - graphWidth)
         // The offset lives on the repo — see the note there.
@@ -167,33 +158,6 @@ struct GraphView: View {
                 .allowsHitTesting(false)
             }
         }
-        }
-        .overlay(alignment: .topLeading) {
-            // Column resizer, spreadsheet-style: the graph is one column of a
-            // table. Tracks the pointer 1:1 — no animation on direct manipulation.
-            Rectangle()
-                .fill(hoveringResizer || dragBaseWidth != nil
-                    ? Color.accentColor.opacity(0.6)
-                    : Color.primary.opacity(0.07))
-                // Hover tint fades; the width drag itself stays 1:1.
-                .animation(.easeOut(duration: 0.1), value: hoveringResizer)
-                .frame(width: 2)
-                .frame(maxHeight: .infinity)
-                .offset(x: Self.leadingInset + graphWidth + 2)
-                .contentShape(Rectangle().inset(by: -4))
-                .onHover { inside in
-                    hoveringResizer = inside
-                    if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
-                }
-                .gesture(
-                    DragGesture(minimumDistance: 1)
-                        .onChanged { value in
-                            let base = dragBaseWidth ?? graphWidth
-                            dragBaseWidth = base
-                            storedWidth = Double(min(max(base + value.translation.width, laneW * 2), neededWidth))
-                        }
-                        .onEnded { _ in dragBaseWidth = nil }
-                )
         }
         }
     }
