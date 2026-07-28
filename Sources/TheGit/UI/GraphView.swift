@@ -977,6 +977,16 @@ struct RefBadge: View {
 
     private var capsule: some View {
         HStack(spacing: 3) {
+            // The checked-out branch answers "where am I?" — the one
+            // wayfinding fact in the whole column — so it gets the two
+            // strongest signals macOS has for "current": a checkmark (the
+            // menu-bar convention) and a solid filled capsule (the
+            // prominent-button treatment). Every other badge keeps the
+            // tinted style; hue alone was the only difference before, and
+            // hue is the weakest layer of hierarchy.
+            if info.isHead {
+                Image(systemName: "checkmark").zoomFont(8, weight: .bold)
+            }
             Text(info.label)
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -994,11 +1004,11 @@ struct RefBadge: View {
                     .zoomFont(9, weight: .bold, design: .monospaced)
             }
         }
-        .zoomFont(10, weight: .medium)
+        .zoomFont(10, weight: info.isHead ? .semibold : .medium)
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
-        .background(Capsule().fill(color.opacity(0.18)))
-        .foregroundStyle(color)
+        .background(Capsule().fill(info.isHead ? color : color.opacity(0.18)))
+        .foregroundStyle(info.isHead ? Color.white : color)
         .help(helpText)
     }
 
