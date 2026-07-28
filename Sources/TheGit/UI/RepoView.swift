@@ -6,13 +6,15 @@ struct RepoView: View {
     @ObservedObject var repo: RepoState
 
     var body: some View {
-        // The three panes carry `.id(repo.id)` individually, NOT the
-        // HSplitView above them. Keying the whole view made every tab switch
-        // destroy the split view itself — a sampled switch spent 616 samples
-        // in -[NSSplitViewController viewDidLoad] rebuilding it from nothing,
-        // for a container whose only job is to hold three widths. Per-pane
-        // ids reset the per-repo view state exactly as before while the
-        // AppKit split view survives the switch untouched.
+        // Only the sidebar is keyed on the repo, and nothing above it is.
+        // An id here is a demolition order: it makes SwiftUI throw the
+        // subtree away and build a new one on every switch, and the graph
+        // and commit panes were paying it for state they can just as well
+        // hold on the repo (the lane offset) or already do (the selection).
+        // Alternating five runs of each shape, summing main-thread time in
+        // the 700ms after each switch: 277ms median keyed, 191ms not.
+        // The sidebar keeps its id — its filter box is genuinely view-local
+        // and has to reset per tab.
         HSplitView {
             SidebarView(repo: repo)
                 .id(repo.id)
@@ -36,7 +38,6 @@ struct RepoView: View {
                         ))
                 }
             }
-            .id(repo.id)
             .frame(minWidth: 400)
             .layoutPriority(1)
             Group {
@@ -49,11 +50,7 @@ struct RepoView: View {
                     }
                 }
             }
-            .id(repo.id)
             .frame(minWidth: 260, idealWidth: 300, maxWidth: 420)
-            .onChange(of: repo.selectedCommit) { _, _ in
-                repo.commitSelectionChanged()
-            }
         }
         // On its own layer, not in the chain below: a .sheet stacked with
         // the alerts and confirmationDialog on this same view never
@@ -149,7 +146,7 @@ struct RepoToolbar: ToolbarContent {
     @FocusState private var searchFocused: Bool
     /// Default action for the Pull button, GitKraken-style; the dropdown
     /// only picks the default, the button itself executes it. A Binding
-    /// into RepoView's @AppStorage — see the note there.
+    /// into RootView's @AppStorage — see the note there.
     @Binding var pullModeRaw: String
 
     private var pullMode: RepoState.PullMode {

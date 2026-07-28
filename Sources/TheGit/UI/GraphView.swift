@@ -14,9 +14,6 @@ struct GraphView: View {
     @AppStorage("graphColumnWidth") private var storedWidth: Double = 0
     @State private var dragBaseWidth: CGFloat?
     @State private var hoveringResizer = false
-    /// Shared horizontal offset for the lane column. The ref-label column
-    /// sits outside it, so labels stay put while the lanes slide.
-    @State private var graphScrollX: CGFloat = 0
 
     private static let leadingInset: CGFloat = 8
 
@@ -46,7 +43,8 @@ struct GraphView: View {
                 : autoWidth
         // How far the lanes can slide before their right edge is reached.
         let maxScroll = max(0, neededWidth - graphWidth)
-        let scrollX = min(graphScrollX, maxScroll)
+        // The offset lives on the repo — see the note there.
+        let scrollX = min(repo.graphScrollX, maxScroll)
         // Fade only where content actually continues, so the edge tells you
         // there is more in that direction.
         let fadeTrailing = !searching && scrollX < maxScroll - 1
@@ -150,12 +148,19 @@ struct GraphView: View {
                 repo.scrollTarget = nil
             }
         }
+        // This pane is reused across tabs rather than rebuilt, so the
+        // NSScrollView carries its offset from whatever repo you were just
+        // looking at. Land on the newest commit, which is where a rebuilt
+        // pane used to start.
+        .onChange(of: repo.id) { _, _ in
+            if let top = rows.first?.id { proxy.scrollTo(top, anchor: .top) }
+        }
         .background(Color(nsColor: .textBackgroundColor))
         .overlay(alignment: .topLeading) {
             // Only over the lane column: scrolling elsewhere is unaffected.
             if maxScroll > 0 {
                 HorizontalScrollCatcher { delta in
-                    graphScrollX = min(max(graphScrollX - delta, 0), maxScroll)
+                    repo.graphScrollX = min(max(repo.graphScrollX - delta, 0), maxScroll)
                 }
                 .frame(width: graphWidth + Self.leadingInset + badgeWidth)
                 .frame(maxHeight: .infinity)

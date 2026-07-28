@@ -127,7 +127,15 @@ final class RepoState: ObservableObject, Identifiable {
     @Published var isGeneratingMessage = false
     private var generateTask: Task<Void, Never>?
     @Published var errorMessage: String?
-    @Published var selectedCommit: String?
+    /// Loading the commit's file list hangs off the property itself rather
+    /// than off an .onChange in the view: the commit pane is shared between
+    /// tabs now, so a view-level observer also fires when the *repo* under
+    /// it changes — and would close a diff the other tab had left open.
+    @Published var selectedCommit: String? {
+        didSet {
+            if oldValue != selectedCommit { commitSelectionChanged() }
+        }
+    }
     /// Stash highlighted from its graph node; the sidebar row lights up.
     @Published var selectedStashRef: String?
     @Published var branchPrompt: BranchPrompt?
@@ -1541,7 +1549,7 @@ final class RepoState: ObservableObject, Identifiable {
     }
 
     /// Called when the graph selection changes.
-    func commitSelectionChanged() {
+    private func commitSelectionChanged() {
         if diffCommit != nil { closeDiff() }
         commitFiles = []
         guard let hash = selectedCommit else { return }
@@ -1577,6 +1585,12 @@ final class RepoState: ObservableObject, Identifiable {
 
     /// Graph scroll request (commit hash); consumed by GraphView.
     @Published var scrollTarget: String?
+
+    /// How far the graph's lane column has been slid sideways. On the repo
+    /// rather than in GraphView because the graph pane is no longer rebuilt
+    /// per tab — view-local, it would follow you from one repo into the
+    /// next. Here each repo keeps the offset it had when you left it.
+    @Published var graphScrollX: CGFloat = 0
 
     /// Select a commit and scroll the graph to it. If it's deeper than the
     /// loaded window, extend the window far enough first.
