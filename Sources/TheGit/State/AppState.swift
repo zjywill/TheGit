@@ -96,6 +96,16 @@ final class AppState: ObservableObject {
         persist()
     }
 
+    /// Move a tab to another slot, the others closing the gap behind it.
+    /// Called repeatedly while a tab is dragged — once per slot it crosses,
+    /// not once per frame — so the list the user sees IS the order, and
+    /// letting go commits nothing extra.
+    func moveTab(from: Int, to: Int) {
+        guard from != to, repos.indices.contains(from), repos.indices.contains(to) else { return }
+        repos.insert(repos.remove(at: from), at: to)
+        persist()
+    }
+
     private func persist() {
         UserDefaults.standard.set(repos.map(\.path), forKey: Self.recentKey)
     }
