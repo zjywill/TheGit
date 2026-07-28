@@ -169,6 +169,28 @@ is being ignored, this re-adds it:
 brew trust --formula zjywill/tap/thegit
 ```
 
+### Let an AI agent install it for you
+
+Using Claude Code, Codex, or any agent with a terminal? Paste this prompt
+and it will handle the whole thing — install, the `/Applications` copy, and
+verification:
+
+```text
+Install TheGit (https://github.com/zjywill/TheGit), a native macOS Git
+client, on this Mac via Homebrew:
+
+1. brew install zjywill/tap/thegit
+   — builds from source, needs an Xcode 15+ toolchain; if Homebrew says the
+   tap is untrusted, run: brew trust --formula zjywill/tap/thegit
+2. Copy the app where Finder and Spotlight can see it (a symlink is NOT
+   enough — Spotlight won't index it):
+   rm -rf /Applications/TheGit.app && cp -R "$(brew --prefix thegit)/TheGit.app" /Applications/
+3. Verify: brew list --versions thegit, then open /Applications/TheGit.app
+
+If it's already installed, upgrade instead: quit TheGit, run
+brew update && brew upgrade thegit, then redo step 2.
+```
+
 ### Upgrade
 
 ```bash
