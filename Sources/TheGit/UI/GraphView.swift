@@ -414,10 +414,14 @@ struct GraphRowView: View {
                 BadgeColumn(
                     refs: row.commit.refs,
                     localBranches: repo.snapshot.localBranches,
+                    remotes: Set(repo.snapshot.remoteNames),
                     repo: repo,
                     maxBadgeWidth: max(40, badgeWidth - 34)
                 )
                 .frame(width: badgeWidth, alignment: .trailing)
+                // Above the lane canvas, so the hover-expanded badge isn't
+                // drawn under the commit nodes it floats across.
+                .zIndex(1)
             }
 
             LaneCanvas(
@@ -486,7 +490,7 @@ struct GraphRowView: View {
 
     /// Branches whose tip is this commit (from its decorations).
     private var branchesHere: [Branch] {
-        RefBadge.infos(for: row.commit.refs)
+        RefBadge.infos(for: row.commit.refs, remotes: Set(repo.snapshot.remoteNames))
             .filter { !$0.isTag }
             .compactMap { info in
                 repo.snapshot.localBranches.first { $0.name == info.label }
@@ -877,11 +881,18 @@ struct CommitDragSource: ViewModifier {
 struct BadgeColumn: View {
     let refs: [String]
     var localBranches: [Branch] = []
+    /// Real remote names, for telling remote refs from slashed local ones.
+    var remotes: Set<String> = []
     /// When set, badges become drag sources and drop targets.
     var repo: RepoState?
     /// Widest a single badge may get before its label truncates.
     var maxBadgeWidth: CGFloat = 130
     @State private var showOverflow = false
+    // Two hover flags, not one: the expanded badge is an overlay that
+    // extends past the base badge's bounds, so each needs its own tracking
+    // and the expansion lives while the pointer is on either.
+    @State private var hoverBase = false
+    @State private var hoverTail = false
 
     /// ahead/behind of the local branch a badge represents, if any.
     private func track(_ info: RefBadge.Info) -> (ahead: Int, behind: Int)? {
@@ -893,13 +904,33 @@ struct BadgeColumn: View {
     }
 
     var body: some View {
-        let infos = RefBadge.infos(for: refs)
+        let infos = RefBadge.infos(for: refs, remotes: remotes)
         HStack(spacing: 4) {
             Spacer(minLength: 0)
             if let first = infos.first {
                 // Capped rather than left to overflow: an unbounded badge
                 // grows past its column and gets sliced by the window edge.
                 RefBadge(info: first, track: track(first), repo: repo)
+                    .onHover { hoverBase = $0 }
+                    // GitKraken hover: the badge expands in place to its
+                    // full label, floating over the graph to its right,
+                    // until the pointer leaves it. Attached inside the
+                    // maxWidth frame so it anchors to the badge itself —
+                    // the frame is wider than a short badge, and anchoring
+                    // there drew the expansion beside the badge, not on it.
+                    .overlay(alignment: .leading) {
+                        if hoverBase || hoverTail {
+                            RefBadge(info: first, track: track(first), repo: repo)
+                                .fixedSize()
+                                // The badge's tinted capsule is translucent
+                                // (made to sit on the row background); when
+                                // floating over the graph it needs an opaque
+                                // base or the content bleeds through.
+                                .background(Capsule().fill(Color(nsColor: .windowBackgroundColor)))
+                                .shadow(color: .black.opacity(0.4), radius: 3, y: 1)
+                                .onHover { hoverTail = $0 }
+                        }
+                    }
                     .frame(maxWidth: maxBadgeWidth, alignment: .trailing)
             }
             if infos.count > 1 {
@@ -951,7 +982,11 @@ struct RefBadge: View {
 
     /// Turn raw %D refs into display badges: drop origin/HEAD, merge the
     /// local + remote refs of the same branch into one badge, HEAD first.
-    static func infos(for refs: [String]) -> [Info] {
+    /// `remotes` are the repo's real remote names — a local branch can
+    /// itself contain slashes (feature/x), so "has a slash" cannot tell
+    /// local from remote; only the first path component being an actual
+    /// remote can.
+    static func infos(for refs: [String], remotes: Set<String> = []) -> [Info] {
         var result: [Info] = []
         for ref in refs {
             if ref.hasSuffix("/HEAD") { continue }
@@ -960,7 +995,9 @@ struct RefBadge: View {
             var label = ref
             if isTag { label = String(ref.dropFirst(5)) }
             if let arrow = ref.range(of: "-> ") { label = String(ref[arrow.upperBound...]) }
-            let isRemote = !isTag && label.contains("/") // heuristic: origin/x
+            // "HEAD -> x" always names the checked-out local branch.
+            let isRemote = !isTag && !isHead
+                && remotes.contains(String(label.split(separator: "/").first ?? ""))
             // "origin/main" collapses into an existing "main" badge (and vice versa).
             let short = isRemote ? label.split(separator: "/").dropFirst().joined(separator: "/") : label
             if let i = result.firstIndex(where: { $0.label == short || ($0.hasRemote && !$0.hasLocal && $0.label.hasSuffix("/" + label)) }) {

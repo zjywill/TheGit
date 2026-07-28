@@ -127,4 +127,55 @@ final class MenuActionsTests: XCTestCase {
             DropIntent.commitOnBranch(commit: commit, target: "main").id
         )
     }
+
+    // MARK: - Ref badges
+
+    /// A local branch with slashes in its name (fundive/mcp-apps-host) must
+    /// not be mistaken for a remote ref — that misread collapsed the badge
+    /// to the wrong label and cost the context menu its Checkout entry.
+    func testSlashedLocalBranchStaysLocalInBadges() {
+        let infos = RefBadge.infos(
+            for: ["origin/fundive/mcp-apps-host", "fundive/mcp-apps-host"],
+            remotes: ["origin"]
+        )
+        XCTAssertEqual(infos.count, 1)
+        XCTAssertEqual(infos.first?.label, "fundive/mcp-apps-host")
+        XCTAssertEqual(infos.first?.hasLocal, true)
+        XCTAssertEqual(infos.first?.hasRemote, true)
+    }
+
+    /// Same collapse with the refs in the other order (%D puts HEAD's
+    /// branch first when it's checked out).
+    func testSlashedLocalBranchCollapsesInEitherOrder() {
+        let infos = RefBadge.infos(
+            for: ["HEAD -> fundive/mcp-apps-host", "origin/fundive/mcp-apps-host"],
+            remotes: ["origin"]
+        )
+        XCTAssertEqual(infos.count, 1)
+        XCTAssertEqual(infos.first?.label, "fundive/mcp-apps-host")
+        XCTAssertEqual(infos.first?.isHead, true)
+        XCTAssertEqual(infos.first?.hasLocal, true)
+        XCTAssertEqual(infos.first?.hasRemote, true)
+    }
+
+    /// The plain case keeps working: origin/main + main = one badge.
+    func testLocalAndRemoteOfSameBranchCollapse() {
+        let infos = RefBadge.infos(for: ["main", "origin/main"], remotes: ["origin"])
+        XCTAssertEqual(infos.count, 1)
+        XCTAssertEqual(infos.first?.label, "main")
+        XCTAssertEqual(infos.first?.hasLocal, true)
+        XCTAssertEqual(infos.first?.hasRemote, true)
+    }
+
+    /// A remote-only ref keeps its full origin-qualified label, and a
+    /// same-named branch on another remote is a separate badge, not a
+    /// collapse target.
+    func testRemoteOnlyRefKeepsFullLabel() {
+        let infos = RefBadge.infos(
+            for: ["origin/codex/builtin-browser", "upstream/codex/builtin-browser"],
+            remotes: ["origin", "upstream"]
+        )
+        XCTAssertEqual(infos.map(\.label), ["origin/codex/builtin-browser", "upstream/codex/builtin-browser"])
+        XCTAssertEqual(infos.map(\.hasLocal), [false, false])
+    }
 }
