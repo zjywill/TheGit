@@ -258,7 +258,7 @@ actor GitClient {
     }
 
     func checkout(branch: String) async throws {
-        try await run(["checkout", branch])
+        try await withAutoStash("checkout") { try await run(["checkout", branch]) }
     }
 
     /// Checkout a remote branch as a new local tracking branch (or switch
@@ -270,10 +270,12 @@ actor GitClient {
             try await checkout(branch: branch.name)
             return
         }
-        if localExists {
-            try await run(["checkout", branch.shortName])
-        } else {
-            try await run(["checkout", "--track", branch.name])
+        try await withAutoStash("checkout") {
+            if localExists {
+                try await run(["checkout", branch.shortName])
+            } else {
+                try await run(["checkout", "--track", branch.name])
+            }
         }
     }
 
@@ -449,11 +451,11 @@ actor GitClient {
     /// indistinguishable from a reset. Fast-forward updates go through
     /// `mergeFastForwardOnly`, which wants the opposite guarantee.
     func merge(_ branch: String) async throws {
-        try await run(["merge", "--no-ff", "--no-edit", branch])
+        try await withAutoStash("merge") { try await run(["merge", "--no-ff", "--no-edit", branch]) }
     }
 
     func rebase(onto branch: String) async throws {
-        try await run(["rebase", branch])
+        try await withAutoStash("rebase") { try await run(["rebase", branch]) }
     }
 
     func createBranch(_ name: String, at startPoint: String, checkout: Bool) async throws {
@@ -502,11 +504,11 @@ actor GitClient {
     // MARK: - Commit operations
 
     func cherryPick(_ hash: String) async throws {
-        try await run(["cherry-pick", hash])
+        try await withAutoStash("cherry-pick") { try await run(["cherry-pick", hash]) }
     }
 
     func revert(_ hash: String) async throws {
-        try await run(["revert", "--no-edit", hash])
+        try await withAutoStash("revert") { try await run(["revert", "--no-edit", hash]) }
     }
 
     enum ResetMode: String {
@@ -546,6 +548,83 @@ actor GitClient {
 
     func fetch() async throws {
         try await run(["fetch", "--all", "--prune"])
+    }
+
+    /// Substrings git prints when refusing to *start* an operation over
+    /// uncommitted changes. Matched loosely because the wording varies per
+    /// command: "cannot rebase: You have unstaged changes", "Your local
+    /// changes to the following files would be overwritten by checkout",
+    /// "Please commit your changes or stash them before you merge".
+    private static let dirtyRefusalMarkers = [
+        "commit your changes or stash them",
+        "would be overwritten by",
+        "you have unstaged changes",
+        "index contains uncommitted changes",
+    ]
+
+    private func isDirtyRefusal(_ error: Error) -> Bool {
+        guard let message = (error as? GitError)?.message.lowercased() else { return false }
+        return Self.dirtyRefusalMarkers.contains { message.contains($0) }
+    }
+
+    /// GitKraken-style dirty-tree handling for checkout/merge/rebase/
+    /// cherry-pick/revert: run the operation as-is, and only when git
+    /// refuses it over uncommitted changes, stash them, retry, and pop
+    /// the stash back. A clean tree — or a dirty one git is happy to
+    /// carry along — never touches the stash. Same manual stash dance
+    /// as `pull`, for the same reason: git's own --autostash hides
+    /// conflicted changes back in the stash instead of leaving markers
+    /// where the conflict UI shows them.
+    private func withAutoStash(_ command: String, _ operation: () async throws -> Void) async throws {
+        do {
+            try await operation()
+            return
+        } catch {
+            guard isDirtyRefusal(error) else { throw error }
+        }
+
+        // `stash push` can exit 0 without creating a stash entry — the
+        // refs/stash before/after comparison is the only reliable "did we
+        // actually stash" signal; popping without it would eat a
+        // pre-existing stash.
+        let before = try? await run(["rev-parse", "--verify", "-q", "refs/stash"])
+        try await run(["stash", "push", "-u", "-m", "Auto-stash before \(command)"])
+        let after = try? await run(["rev-parse", "--verify", "-q", "refs/stash"])
+        guard let after, after != before else {
+            try await operation()
+            return
+        }
+
+        do {
+            try await operation()
+        } catch {
+            if ((try? await operationState()) ?? nil) != nil {
+                // Stopped on conflicts mid-operation. Popping onto a
+                // conflicted tree would tangle the WIP into the conflict,
+                // so the stash stays put until the user resolves.
+                let detail = (error as? GitError)?.message ?? error.localizedDescription
+                throw GitError(
+                    command: command,
+                    message: detail
+                        + "\n\nYour uncommitted changes are safe in the stash — pop it after resolving."
+                )
+            }
+            // Failed without touching the tree: put it back as it was.
+            try? await run(["stash", "pop"])
+            throw error
+        }
+
+        do {
+            try await run(["stash", "pop"])
+        } catch {
+            // A conflicted pop marks the files in the working tree and keeps
+            // the stash entry — report it as an outcome, not a git failure.
+            throw GitError(
+                command: "stash pop",
+                message: "The \(command) succeeded, but restoring your uncommitted changes hit conflicts — "
+                    + "they're marked in the working tree, and the stash was kept as a backup."
+            )
+        }
     }
 
     /// GitKraken-style pull: a dirty working tree is auto-stashed first and
@@ -813,7 +892,7 @@ actor GitClient {
     /// out — so it fast-forwards through merge instead. `--ff-only` keeps
     /// the same guarantee: no merge commit, no surprise.
     func mergeFastForwardOnly(_ ref: String) async throws {
-        try await run(["merge", "--ff-only", ref])
+        try await withAutoStash("merge") { try await run(["merge", "--ff-only", ref]) }
     }
 
     func renameRemote(_ old: String, to new: String) async throws {
