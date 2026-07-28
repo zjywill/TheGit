@@ -263,6 +263,7 @@ struct RepoToolbar: ToolbarContent {
         // to the right of the buttons, so they never move. Inserted only
         // while busy — an idle item still draws an empty capsule shell.
         if repo.isBusy {
+#if compiler(>=6.2)
             if #available(macOS 26.0, *) {
                 ToolbarItem {
                     ProgressView().controlSize(.small)
@@ -273,6 +274,11 @@ struct RepoToolbar: ToolbarContent {
                     ProgressView().controlSize(.small)
                 }
             }
+#else
+            ToolbarItem {
+                ProgressView().controlSize(.small)
+            }
+#endif
         }
     }
 }
