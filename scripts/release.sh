@@ -90,7 +90,9 @@ cd "$WORK/tap"
     -e "s|^  url \".*\"|  url \"$URL\"|" \
     -e "s|^  sha256 \".*\"|  sha256 \"$SHA\"|" \
     "$FORMULA"
-git diff --stat -- "$FORMULA"
+# --no-pager: in a small terminal git hands even a two-line stat to less,
+# and the whole release sits at "(END)" waiting for a keypress.
+git --no-pager diff --stat -- "$FORMULA"
 [ -n "$(git status --porcelain)" ] || die "formula already points at $TAG, nothing to do"
 git add "$FORMULA"
 git commit -q -m "thegit $VERSION"
