@@ -96,6 +96,10 @@ struct TheGitApp: App {
 
 struct RootView: View {
     @EnvironmentObject var appState: AppState
+    /// Lives here, not in RepoToolbar: @AppStorage inside a ToolbarContent
+    /// struct is never installed on the view graph on macOS — writes were
+    /// silently dropped and the pull-mode picker's check never moved.
+    @AppStorage("pullMode") private var pullModeRaw = RepoState.PullMode.ff.rawValue
 
     var body: some View {
         VStack(spacing: 0) {
@@ -109,9 +113,19 @@ struct RootView: View {
             }
             if let repo = appState.activeRepo {
                 RepoView(repo: repo)
-                    .id(repo.id)
             } else {
                 EmptyStateView()
+            }
+        }
+        // Anchored to the window, not to the repo. Hanging it off RepoView
+        // meant every tab switch tore the NSToolbar down and rebuilt each
+        // item viewer as a fresh subview — the single largest cost of a
+        // switch (1542 samples in -[NSToolbarView layout] plus 745 in
+        // ToolbarBridge.makeStorage, ~27% of the main thread). Up here the
+        // items keep their identity across repos and only rebind.
+        .toolbar {
+            if let repo = appState.activeRepo {
+                RepoToolbar(repo: repo, pullModeRaw: $pullModeRaw)
             }
         }
         .alert(

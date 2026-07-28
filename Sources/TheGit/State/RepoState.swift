@@ -194,6 +194,8 @@ final class RepoState: ObservableObject, Identifiable {
     }
 
     private var hasLoaded = false
+    /// When the snapshot was last read from git — see `appeared()`.
+    private var lastRefreshedAt: Date?
     private var autoFetchTask: Task<Void, Never>?
     private var watcher: FSWatcher?
     private var pendingRefresh: Task<Void, Never>?
@@ -236,6 +238,11 @@ final class RepoState: ObservableObject, Identifiable {
         }
     }
 
+    /// A repo is considered current for this long after a refresh. Only
+    /// reached when nothing has touched the working tree or .git since —
+    /// the watcher resets it on any change.
+    private static let freshFor: TimeInterval = 60
+
     /// Called when the repo tab appears. First time: full load with busy
     /// indicator. Subsequent tab switches show cached data instantly and
     /// only freshen quietly in the background — switching tabs is a
@@ -244,7 +251,15 @@ final class RepoState: ObservableObject, Identifiable {
         startAutoFetch()
         startWatching()
         if hasLoaded {
-            await refresh(quiet: true)
+            // The watcher and the auto-fetch have been live on this repo
+            // since its first appearance — whatever tab you were on. A tab
+            // you left a moment ago is therefore already current, and
+            // re-reading nine git commands on the way in bought nothing but
+            // a second full re-layout landing a few hundred ms after the
+            // switch: the graph settled, then visibly hitched again.
+            if Date().timeIntervalSince(lastRefreshedAt ?? .distantPast) > Self.freshFor {
+                await refresh(quiet: true)
+            }
         } else {
             hasLoaded = true
             await refresh()
@@ -325,6 +340,7 @@ final class RepoState: ObservableObject, Identifiable {
             // still makes List re-diff and visibly nudges the scroll
             // position right after scrolling stops.
             if snap != snapshot { snapshot = snap }
+            lastRefreshedAt = Date()
             syncMergeDraft()
             // Close the diff if its file no longer has changes — but only
             // for working-tree diffs. A commit's diff (diffCommit set) is

@@ -4,14 +4,18 @@ import SwiftUI
 /// sidebar (branches) | graph | commit panel.
 struct RepoView: View {
     @ObservedObject var repo: RepoState
-    /// Lives here, not in RepoToolbar: @AppStorage inside a ToolbarContent
-    /// struct is never installed on the view graph on macOS — writes were
-    /// silently dropped and the pull-mode picker's check never moved.
-    @AppStorage("pullMode") private var pullModeRaw = RepoState.PullMode.ff.rawValue
 
     var body: some View {
+        // The three panes carry `.id(repo.id)` individually, NOT the
+        // HSplitView above them. Keying the whole view made every tab switch
+        // destroy the split view itself — a sampled switch spent 616 samples
+        // in -[NSSplitViewController viewDidLoad] rebuilding it from nothing,
+        // for a container whose only job is to hold three widths. Per-pane
+        // ids reset the per-repo view state exactly as before while the
+        // AppKit split view survives the switch untouched.
         HSplitView {
             SidebarView(repo: repo)
+                .id(repo.id)
                 .frame(minWidth: 200, idealWidth: 240, maxWidth: 360)
             // The diff OVERLAYS the graph instead of replacing it: swapping
             // the split child makes HSplitView re-balance all three panes
@@ -32,6 +36,7 @@ struct RepoView: View {
                         ))
                 }
             }
+            .id(repo.id)
             .frame(minWidth: 400)
             .layoutPriority(1)
             Group {
@@ -44,12 +49,12 @@ struct RepoView: View {
                     }
                 }
             }
+            .id(repo.id)
             .frame(minWidth: 260, idealWidth: 300, maxWidth: 420)
             .onChange(of: repo.selectedCommit) { _, _ in
                 repo.commitSelectionChanged()
             }
         }
-        .toolbar { RepoToolbar(repo: repo, pullModeRaw: $pullModeRaw) }
         // On its own layer, not in the chain below: a .sheet stacked with
         // the alerts and confirmationDialog on this same view never
         // presents — they compete for one presentation slot, and the
@@ -58,7 +63,10 @@ struct RepoView: View {
             Color.clear
                 .sheet(isPresented: $repo.showCleanup) { CleanupView(repo: repo) }
         )
-        .task { await repo.appeared() }
+        // Keyed on the repo, not on view identity: this view is no longer
+        // rebuilt per tab (see the note on the panes above), so a plain
+        // `.task` would only ever fire for the first repo shown.
+        .task(id: repo.id) { await repo.appeared() }
         // Refresh quietly whenever the app regains focus — changes made
         // in a terminal or editor show up without pressing ⌘R.
         .onReceive(NotificationCenter.default.publisher(
