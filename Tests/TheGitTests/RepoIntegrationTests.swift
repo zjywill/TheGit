@@ -688,6 +688,39 @@ final class RepoIntegrationTests: XCTestCase {
         XCTAssertEqual(repo.snapshot.currentBranch, "main")
     }
 
+    /// The sidebar's "Merge into main" on a branch that is strictly ahead
+    /// must still record a merge commit. Git's default fast-forward just
+    /// slides the ref — history then shows the branch as never merged,
+    /// indistinguishable from a reset.
+    func testExplicitMergeRecordsAMergeCommitEvenWhenFastForwardIsPossible() async throws {
+        let path = try await makeRepo("merge-no-ff")
+        try await git(path, ["checkout", "-q", "-b", "side"])
+        try write("side\n", to: path + "/side.txt")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "side work"])
+        try await git(path, ["checkout", "-q", "main"])
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        let side = try XCTUnwrap(repo.snapshot.localBranches.first { $0.name == "side" })
+        repo.merge(side)
+
+        // Wait for the merge COMMIT, not the file: --no-ff lays down the
+        // working tree first, so side.txt exists a beat before HEAD moves.
+        try await waitUntil("the merge commit to land", {
+            repo.snapshot.commits.first { !$0.isWip }?
+                .subject.hasPrefix("Merge branch") == true
+        }, refreshing: { await repo.refresh() })
+        XCTAssertNil(repo.errorMessage)
+        // Two parents at HEAD = a real merge commit, not a fast-forward.
+        let parents = try await git(path, ["log", "-1", "--format=%P"])
+        XCTAssertEqual(
+            parents.trimmingCharacters(in: .whitespacesAndNewlines)
+                .split(separator: " ").count,
+            2
+        )
+    }
+
     // MARK: - Stash
 
     /// "Stash n Staged Files" takes the staged ones and nothing else — the

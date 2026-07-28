@@ -27,6 +27,12 @@ actor GitClient {
                     "GIT_EDITOR": "true",
                     "GIT_PAGER": "cat",
                     "GIT_TERMINAL_PROMPT": "0",
+                    // A background `git status` opportunistically rewrites
+                    // the index, holding index.lock just long enough for a
+                    // user-triggered merge/stash to die on "File exists".
+                    // Optional locks off skips that rewrite; commands whose
+                    // locks are mandatory (commit, merge) are unaffected.
+                    "GIT_OPTIONAL_LOCKS": "0",
                 ],
                 label: args.joined(separator: " ")
             )
@@ -414,8 +420,13 @@ actor GitClient {
         absolute(try await run(["rev-parse", "--git-path", "info/exclude"]))
     }
 
+    /// An explicit merge (menu or drag-drop) always records a merge commit.
+    /// Without --no-ff, merging a branch that is strictly ahead just slides
+    /// the current ref forward — no "Merge branch 'x' into y" in history,
+    /// indistinguishable from a reset. Fast-forward updates go through
+    /// `mergeFastForwardOnly`, which wants the opposite guarantee.
     func merge(_ branch: String) async throws {
-        try await run(["merge", "--no-edit", branch])
+        try await run(["merge", "--no-ff", "--no-edit", branch])
     }
 
     func rebase(onto branch: String) async throws {
@@ -645,7 +656,8 @@ actor GitClient {
             try? await Shell.run(
                 "/usr/bin/env",
                 ["git", "-C", repoPath] + args,
-                env: ["GIT_EDITOR": "true", "GIT_PAGER": "cat", "GIT_TERMINAL_PROMPT": "0"]
+                env: ["GIT_EDITOR": "true", "GIT_PAGER": "cat",
+                      "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"]
             )
         }
         func trimmed(_ args: [String]) async -> String? {
