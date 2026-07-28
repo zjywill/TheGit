@@ -1049,4 +1049,172 @@ final class RepoIntegrationTests: XCTestCase {
         await repo.refresh()
         XCTAssertEqual(repo.snapshot.commits.count, commitsBefore + 1)
     }
+
+    // MARK: - Clean up (batch delete)
+
+    /// Adds `name` as a branch whose one commit is already merged into main,
+    /// which is what makes it a cleanup candidate.
+    private func makeMergedBranch(_ path: String, _ name: String) async throws {
+        try await git(path, ["checkout", "-q", "-b", name])
+        try write(name + "\n", to: path + "/\(name).txt")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "work on \(name)"])
+        try await git(path, ["checkout", "-q", "main"])
+        try await git(path, ["merge", "-q", "--no-ff", "-m", "merge \(name)", name])
+    }
+
+    private func localBranches(_ path: String) async throws -> [String] {
+        try await git(path, ["branch", "--format=%(refname:short)"])
+            .split(separator: "\n")
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+            .sorted()
+    }
+
+    /// Select all then delete is the whole list in one click: every candidate
+    /// branch is gone from git afterwards, and main — never a candidate — is
+    /// untouched.
+    func testSelectAllThenDeleteRemovesEveryCandidateBranch() async throws {
+        let path = try await makeRepo("clean-all")
+        for name in ["feat-a", "feat-b", "feat-c"] {
+            try await makeMergedBranch(path, name)
+        }
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        await repo.scanCleanup()
+        XCTAssertEqual(repo.cleanupCandidates.map(\.name).sorted(), ["feat-a", "feat-b", "feat-c"])
+
+        repo.selectAllCleanup(true)
+        XCTAssertEqual(repo.selectedCleanupCandidates.count, 3)
+        repo.requestClean(repo.selectedCleanupCandidates)
+        repo.confirmPendingClean()
+        try await waitUntil("all three branches to go") { repo.cleanupCandidates.isEmpty }
+        let after = try await localBranches(path)
+        XCTAssertEqual(after, ["main"], "Delete All left branches behind")
+        XCTAssertNil(repo.cleanupError)
+        // Eleven deletes are one click, so they are one Undo.
+        XCTAssertEqual(repo.cleanupUndo.count, 1)
+        XCTAssertEqual(repo.cleanupUndo.last?.deletes.count, 3)
+    }
+
+    /// The ticks decide the batch: unticked rows survive it untouched.
+    func testBatchDeletesOnlyTheTickedRows() async throws {
+        let path = try await makeRepo("clean-selected")
+        for name in ["keep-me", "drop-a", "drop-b"] {
+            try await makeMergedBranch(path, name)
+        }
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        await repo.scanCleanup()
+
+        for candidate in repo.cleanupCandidates where candidate.name.hasPrefix("drop-") {
+            repo.toggleCleanupSelection(candidate)
+        }
+        XCTAssertEqual(repo.selectedCleanupCandidates.map(\.name).sorted(), ["drop-a", "drop-b"])
+
+        repo.requestClean(repo.selectedCleanupCandidates)
+        // A batch always asks, even when every row in it is safe.
+        XCTAssertNotNil(repo.cleanToConfirm)
+        repo.confirmPendingClean()
+
+        try await waitUntil("the two ticked branches to go") {
+            repo.cleanupCandidates.map(\.name) == ["keep-me"]
+        }
+        let remaining = try await localBranches(path)
+        XCTAssertEqual(remaining, ["keep-me", "main"])
+        // Nothing is left ticked that no longer exists.
+        XCTAssertTrue(repo.cleanupSelection.isEmpty)
+        XCTAssertNil(repo.cleanupError)
+    }
+
+    /// Undo covers the click, not the branch: one Undo after a batch puts
+    /// every branch back at exactly the tip it had.
+    func testUndoAfterABatchRestoresEveryBranchAtItsTip() async throws {
+        let path = try await makeRepo("clean-undo")
+        for name in ["feat-a", "feat-b"] {
+            try await makeMergedBranch(path, name)
+        }
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        await repo.scanCleanup()
+        var tips: [String: String] = [:]
+        for name in ["feat-a", "feat-b"] {
+            tips[name] = try await git(path, ["rev-parse", name])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        repo.clean(repo.cleanupCandidates)
+        try await waitUntil("both branches to go") { repo.cleanupCandidates.isEmpty }
+        let deleted = try await localBranches(path)
+        XCTAssertEqual(deleted, ["main"])
+
+        repo.undoLastClean()
+        try await waitUntil("both branches to come back") {
+            repo.cleanupCandidates.count == 2
+        }
+        let restoredBranches = try await localBranches(path)
+        XCTAssertEqual(restoredBranches, ["feat-a", "feat-b", "main"])
+        for (name, tip) in tips {
+            let restored = try await git(path, ["rev-parse", name])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            XCTAssertEqual(restored, tip, "\(name) came back at a different commit")
+        }
+        XCTAssertTrue(repo.cleanupUndo.isEmpty)
+        XCTAssertNil(repo.cleanupError)
+    }
+
+    /// One row that git refuses must not strand the rows behind it — the
+    /// dirty worktree stays, everything else in the batch still goes.
+    func testAFailedRowDoesNotStopTheRestOfTheBatch() async throws {
+        let path = try await makeRepo("clean-partial")
+        try await makeMergedBranch(path, "feat-a")
+        try await makeMergedBranch(path, "wt-branch")
+        let worktree = root.appendingPathComponent("clean-partial-wt").path
+        try await git(path, ["worktree", "add", "-q", worktree, "wt-branch"])
+        // git refuses `worktree remove` while the tree is dirty.
+        try write("uncommitted\n", to: worktree + "/dirty.txt")
+        try await git(worktree, ["add", "-A"])
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        await repo.scanCleanup()
+        // The branch is checked out in the worktree, so the worktree is the
+        // candidate for it — not the branch.
+        XCTAssertEqual(repo.cleanupCandidates.map(\.name).sorted(), ["clean-partial-wt", "feat-a"])
+
+        repo.clean(repo.cleanupCandidates)
+        try await waitUntil("the batch to finish") { !repo.cleaning }
+        let survivors = try await localBranches(path)
+        XCTAssertEqual(
+            survivors, ["main", "wt-branch"],
+            "the merged branch should have gone even though the worktree refused"
+        )
+        XCTAssertNotNil(repo.cleanupError, "a refused row has to be reported")
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: worktree + "/dirty.txt"),
+            "the dirty worktree must survive"
+        )
+    }
+
+    /// A rescan hands back fresh structs, so the ticks are kept by id — and
+    /// dropped for rows the rescan no longer finds.
+    func testSelectionSurvivesARescanAndDropsVanishedRows() async throws {
+        let path = try await makeRepo("clean-selection-rescan")
+        for name in ["feat-a", "feat-b"] {
+            try await makeMergedBranch(path, name)
+        }
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        await repo.scanCleanup()
+        repo.selectAllCleanup(true)
+        XCTAssertEqual(repo.cleanupSelection.count, 2)
+
+        await repo.scanCleanup()
+        XCTAssertEqual(repo.cleanupSelection.count, 2, "a rescan dropped the ticks")
+
+        // Deleted behind the app's back: the tick has nothing left to point at.
+        try await git(path, ["branch", "-D", "feat-a"])
+        await repo.refresh()
+        await repo.scanCleanup()
+        XCTAssertEqual(repo.cleanupSelection, ["branch:feat-b"])
+    }
 }
