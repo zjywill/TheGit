@@ -215,7 +215,7 @@ struct RepoToolbar: ToolbarContent {
             Button {
                 repo.openCleanup()
             } label: {
-                Label("Clean", systemImage: "sparkles")
+                Label("Clean", systemImage: "xmark.bin")
             }
             .help("Review merged and abandoned branches and worktrees")
 
