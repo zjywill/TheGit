@@ -60,6 +60,11 @@ struct RepoView: View {
             Color.clear
                 .sheet(isPresented: $repo.showCleanup) { CleanupView(repo: repo) }
         )
+        // Same one-slot rule as above: each sheet gets its own layer.
+        .background(
+            Color.clear
+                .sheet(isPresented: $repo.showCreatePR) { CreatePullRequestView(repo: repo) }
+        )
         // Keyed on the repo, not on view identity: this view is no longer
         // rebuilt per tab (see the note on the panes above), so a plain
         // `.task` would only ever fire for the first repo shown.

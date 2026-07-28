@@ -166,6 +166,20 @@ enum ForgeParsers {
         }
     }
 
+    /// The created PR's address out of the CLI's chatter: both `gh` and
+    /// `glab` print it on its own line, surrounded by human sentences that
+    /// differ per version. No URL is not a failure — the caller just has
+    /// nothing to open.
+    static func webURL(in output: String) -> String? {
+        for line in output.split(whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("https://") || trimmed.hasPrefix("http://") {
+                return trimmed
+            }
+        }
+        return nil
+    }
+
     /// "Draft: fix things" -> "fix things". WIP: is the older spelling.
     static func stripDraftPrefix(_ title: String) -> String {
         for prefix in ["Draft: ", "draft: ", "WIP: ", "wip: "] where title.hasPrefix(prefix) {
@@ -277,15 +291,36 @@ actor ForgeClient {
         try await run(forge, [forge == .github ? "pr" : "mr", "view", String(pr.number), "--web"])
     }
 
-    /// `--web` hands the compose form to the browser instead of us building
-    /// a form UI — and it keeps the actual "create" click with the user.
-    func createPullRequest(branch: String, forge: Forge) async throws {
+    /// Creates the PR/MR outright and returns its URL when the CLI printed
+    /// one. The compose form lives in our sheet now, so the CLI runs fully
+    /// non-interactive — every flag it might otherwise prompt for is given.
+    func createPullRequest(
+        source: String,
+        target: String,
+        title: String,
+        body: String,
+        draft: Bool,
+        forge: Forge
+    ) async throws -> String? {
+        var args: [String]
         switch forge {
         case .github:
-            try await run(forge, ["pr", "create", "--head", branch, "--web"])
+            args = [
+                "pr", "create",
+                "--head", source, "--base", target,
+                "--title", title, "--body", body,
+            ]
         case .gitlab:
-            try await run(forge, ["mr", "create", "--source-branch", branch, "--web"])
+            args = [
+                "mr", "create",
+                "--source-branch", source, "--target-branch", target,
+                "--title", title, "--description", body,
+                // glab asks "create this MR?" even with every field given.
+                "--yes",
+            ]
         }
+        if draft { args.append("--draft") }
+        return ForgeParsers.webURL(in: try await run(forge, args))
     }
 
     // MARK: - Plumbing

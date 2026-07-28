@@ -69,7 +69,7 @@ struct FileDiffView: View {
 
                 if repo.lfsPointer != nil, repo.showRawPointer {
                     Button("LFS Summary") { repo.showRawPointer = false }
-                        .controlSize(.small)
+                        .controlSize(.regular)
                 }
 
                 if let commitHash = repo.diffCommit {
@@ -78,6 +78,9 @@ struct FileDiffView: View {
                         .zoomFont(11, design: .monospaced)
                         .foregroundStyle(.tertiary)
                 } else {
+                    // .regular, not .small: the header has 34pt to spend,
+                    // and a 19pt bezel in it is a target you have to aim
+                    // at. The regular bezel is the whole reachable height.
                     Button(file.area == .staged ? "Unstage File" : "Stage File") {
                         if file.area == .staged {
                             repo.unstage(file)
@@ -86,14 +89,18 @@ struct FileDiffView: View {
                         }
                         repo.closeDiff()
                     }
-                    .controlSize(.small)
+                    .controlSize(.regular)
                 }
 
                 Button {
                     repo.closeDiff()
                 } label: {
+                    // The glyph is 10pt; the target is not. Without the
+                    // frame the hittable area is the drawn pixels only.
                     Image(systemName: "xmark")
                         .zoomFont(10, weight: .bold)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.pressEffect)
                 .foregroundStyle(.secondary)
@@ -209,11 +216,19 @@ struct DiffLineRow: View {
                     .padding(.vertical, 3)
                 Spacer(minLength: 8)
                 if let hunkAction {
-                    Button(hunkAction.title, action: hunkAction.run)
-                        .buttonStyle(.plain)
-                        .zoomFont(10, weight: .medium)
-                        .foregroundStyle(Color.accentColor)
-                        .padding(.trailing, 10)
+                    // The tappable area is the padded shape, not the 10pt
+                    // text run — a hunk header is a thin strip and the
+                    // words alone are a few dozen hittable pixels.
+                    Button(action: hunkAction.run) {
+                        Text(hunkAction.title)
+                            .zoomFont(10, weight: .medium)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.pressEffect)
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.trailing, 4)
                 }
             } else {
                 Text(line.oldNum.map(String.init) ?? "")

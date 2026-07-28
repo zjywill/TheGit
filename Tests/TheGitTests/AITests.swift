@@ -422,4 +422,70 @@ final class CommitMessageGeneratorTests: XCTestCase {
             "fix: crash\n\nSee ```swift``` below."
         )
     }
+
+    // MARK: - Pull request generator
+
+    func testPRParseSplitsTitleAndBody() {
+        let (title, body) = PullRequestGenerator.parse(
+            "Add drag to reorder tabs\n\nTabs now move like browser tabs.\n- detail"
+        )
+        XCTAssertEqual(title, "Add drag to reorder tabs")
+        XCTAssertEqual(body, "Tabs now move like browser tabs.\n- detail")
+    }
+
+    func testPRParseStripsLabelsHeadingsAndFences() {
+        let fenced = PullRequestGenerator.parse(
+            "```markdown\nTitle: Fix the crash\n\nDescription:\nIt crashed.\n```"
+        )
+        XCTAssertEqual(fenced.title, "Fix the crash")
+        XCTAssertEqual(fenced.body, "It crashed.")
+
+        let heading = PullRequestGenerator.parse("# Fix the crash\n\nIt crashed.")
+        XCTAssertEqual(heading.title, "Fix the crash")
+
+        // A body whose first line merely *contains* a colon keeps it.
+        let plain = PullRequestGenerator.parse("Fix crash\n\nNote: see below.")
+        XCTAssertEqual(plain.body, "Note: see below.")
+    }
+
+    func testPRParseTitleOnlyAndEmpty() {
+        let solo = PullRequestGenerator.parse("Fix the crash")
+        XCTAssertEqual(solo.title, "Fix the crash")
+        XCTAssertEqual(solo.body, "")
+
+        // Leading blank lines don't become the title.
+        let padded = PullRequestGenerator.parse("\n\nFix the crash\n\nBody.")
+        XCTAssertEqual(padded.title, "Fix the crash")
+
+        let empty = PullRequestGenerator.parse("")
+        XCTAssertEqual(empty.title, "")
+        XCTAssertEqual(empty.body, "")
+    }
+
+    func testPRSystemPromptNamesTheForgeNoun() {
+        let gh = PullRequestGenerator.systemPrompt(forge: .github, language: .english, extra: "")
+        XCTAssertTrue(gh.contains("pull request"))
+        let gl = PullRequestGenerator.systemPrompt(forge: .gitlab, language: .chinese, extra: "No emoji.")
+        XCTAssertTrue(gl.contains("merge request"))
+        XCTAssertTrue(gl.contains("简体中文"))
+        XCTAssertTrue(gl.hasSuffix("No emoji."))
+    }
+
+    func testPRUserPromptCarriesCommitsAndDiff() {
+        let prompt = PullRequestGenerator.userPrompt(
+            source: "feature/x",
+            target: "main",
+            commits: ["feat: one", "fix: two"],
+            summary: "2 files changed"
+        )
+        XCTAssertTrue(prompt.contains("`feature/x`"))
+        XCTAssertTrue(prompt.contains("`main`"))
+        XCTAssertTrue(prompt.contains("feat: one"))
+        XCTAssertTrue(prompt.contains("2 files changed"))
+
+        let bare = PullRequestGenerator.userPrompt(
+            source: "a", target: "b", commits: [], summary: "diff"
+        )
+        XCTAssertFalse(bare.contains("commit messages"))
+    }
 }

@@ -191,6 +191,20 @@ final class RepoState: ObservableObject, Identifiable {
     @Published var pullRequests: [PullRequest] = []
     @Published var forgeError: ForgeFailure?
     @Published var loadingPullRequests = false
+    /// The "New Pull Request" sheet. Its fields live here, CleanupView-style,
+    /// so the sheet survives a sidebar rebuild without losing a draft.
+    @Published var showCreatePR = false
+    @Published var prSource = ""
+    @Published var prTarget = ""
+    @Published var prTitle = ""
+    @Published var prBody = ""
+    @Published var prDraft = false
+    @Published var isGeneratingPR = false
+    @Published var isCreatingPR = false
+    /// Errors stay inside the sheet — an alert over a sheet is two layers
+    /// of modal for one mistake.
+    @Published var prError: String?
+    private var prGenerateTask: Task<Void, Never>?
 
     nonisolated var id: String { path }
     var displayName: String { (path as NSString).lastPathComponent }
@@ -1228,16 +1242,126 @@ final class RepoState: ObservableObject, Identifiable {
         }
     }
 
-    /// Opens the forge's compose form in the browser — the actual "create"
-    /// click stays with the user, and we don't rebuild their form.
-    func createPullRequest(from branch: Branch) {
-        guard let forge else { return }
-        let name = branch.shortName
+    /// Opens the compose sheet with sensible branches already picked:
+    /// the given branch (or HEAD) against the repo's mainline.
+    func createPullRequest(from branch: Branch? = nil) {
+        guard forge != nil else { return }
+        prSource = branch?.shortName ?? snapshot.currentBranch ?? ""
+        prTitle = ""
+        prBody = ""
+        prDraft = false
+        prError = nil
+        showCreatePR = true
         Task {
+            prTarget = await git.defaultBranch(remote: snapshot.defaultRemote)
+            // The obvious degenerate default (main → main): fall back to
+            // HEAD so the picker never opens pre-broken.
+            if prTarget == prSource, let head = snapshot.currentBranch, head != prSource {
+                prSource = head
+            }
+        }
+    }
+
+    /// Streams title and description into the sheet's fields. Whatever the
+    /// user already typed rides along as intent, like the commit box does.
+    func generatePullRequestMessage() {
+        guard let forge, let endpoint = AISettings.shared.endpoint, !isGeneratingPR else { return }
+        let settings = AISettings.shared
+        let (source, target) = (prSource, prTarget)
+        let draft = [prTitle, prBody].filter { !$0.isEmpty }.joined(separator: "\n\n")
+        isGeneratingPR = true
+
+        prGenerateTask = Task {
+            defer {
+                isGeneratingPR = false
+                prGenerateTask = nil
+            }
             do {
-                try await forgeClient.createPullRequest(branch: name, forge: forge)
+                // Two dots for the log (this branch's commits), three for
+                // the diff (against the merge base) — asymmetric on
+                // purpose, so target-only commits appear in neither.
+                let commits = (try? await git.commitMessages(in: "\(target)..\(source)")) ?? []
+                let stat = try await git.rangeDiff("\(target)...\(source)", stat: true)
+                let diff = try await git.rangeDiff("\(target)...\(source)", stat: false)
+                guard !diff.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    prError = "No difference between \(source) and \(target)."
+                    return
+                }
+
+                var user = PullRequestGenerator.userPrompt(
+                    source: source,
+                    target: target,
+                    commits: commits,
+                    summary: CommitMessageGenerator.summarize(
+                        stat: stat, diff: diff, budget: settings.budget.rawValue
+                    )
+                )
+                if !draft.isEmpty {
+                    user = "The author already started writing this — keep its intent:\n\(draft)\n\n" + user
+                }
+                let request = AIRequest(
+                    system: PullRequestGenerator.systemPrompt(
+                        forge: forge,
+                        language: settings.language,
+                        extra: settings.extraInstructions
+                    ),
+                    user: user
+                )
+
+                prError = nil
+                var answer = ""
+                for try await delta in AIClient.stream(request, endpoint: endpoint) {
+                    answer += delta
+                    (prTitle, prBody) = PullRequestGenerator.parse(answer)
+                }
+                if PullRequestGenerator.parse(answer).title.isEmpty, !Task.isCancelled {
+                    prError = "The model returned nothing."
+                }
             } catch {
-                errorMessage = forgeFailure(error).alertText
+                prError = error.localizedDescription
+            }
+        }
+    }
+
+    func cancelPullRequestGeneration() { prGenerateTask?.cancel() }
+
+    /// Push (the forge can only see what the remote has), create, open the
+    /// new page in the browser. The sheet stays up on failure with the
+    /// draft intact — a 401 must not eat a written description.
+    func submitPullRequest() {
+        guard let forge, !isCreatingPR else { return }
+        let (source, target) = (prSource, prTarget)
+        let title = prTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, source != target else { return }
+        isCreatingPR = true
+
+        Task {
+            defer { isCreatingPR = false }
+            do {
+                let remote = snapshot.defaultRemote
+                if let branch = snapshot.localBranches.first(where: { $0.name == source }) {
+                    if branch.upstream == nil || branch.upstreamGone {
+                        try await git.push(remote: remote, branch: source, setUpstream: true)
+                    } else if branch.ahead > 0 {
+                        try await git.push(remote: remote, branch: source, setUpstream: false)
+                    }
+                }
+                let url = try await forgeClient.createPullRequest(
+                    source: source,
+                    target: target,
+                    title: title,
+                    body: prBody,
+                    draft: prDraft,
+                    forge: forge
+                )
+                showCreatePR = false
+                if let url, let link = URL(string: url) {
+                    NSWorkspace.shared.open(link)
+                }
+                await loadPullRequests()
+                await refresh()
+            } catch {
+                prError = forgeFailure(error).alertText
             }
         }
     }

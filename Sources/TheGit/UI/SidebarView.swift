@@ -438,9 +438,13 @@ struct SidebarView: View {
                     // A "0" next to a failed list reads as "none open",
                     // which is exactly the wrong thing to believe.
                     countLabel: repo.forgeError == nil ? nil : "—",
-                    actionIcon: "arrow.clockwise",
-                    actionHelp: "Refresh \(forge.sectionTitle.lowercased())"
-                ) { repo.refreshPullRequests() }
+                    actionHelp: "New \(forge.itemNoun)…",
+                    secondary: .init(
+                        icon: "arrow.clockwise",
+                        help: "Refresh \(forge.sectionTitle.lowercased())",
+                        run: { repo.refreshPullRequests() }
+                    )
+                ) { repo.createPullRequest() }
                 // Both of these explain an empty section, so they'd be a
                 // second, contradictory answer while a filter is on.
                 if !filtering {
@@ -777,6 +781,15 @@ struct SectionHeader: View {
     var topSpace: CGFloat = SidebarMetrics.sectionGap
     var actionIcon = "plus"
     var actionHelp: String?
+    /// A second, quieter button left of the primary one. A struct, not a
+    /// second closure parameter: two optional closures make every existing
+    /// trailing closure ambiguous between forward and backward matching.
+    struct Secondary {
+        let icon: String
+        let help: String
+        let run: () -> Void
+    }
+    var secondary: Secondary?
     var action: (() -> Void)?
     @State private var hovering = false
     @Environment(\.uiZoom) private var zoom
@@ -794,6 +807,21 @@ struct SectionHeader: View {
                 .tracking(0.3)
                 .foregroundStyle(.secondary)
             Spacer()
+            // Borderless on purpose: two outlined buttons side by side
+            // read as a segmented control, and this one is the lesser act.
+            if let secondary {
+                Button(action: secondary.run) {
+                    Image(systemName: secondary.icon)
+                        .zoomFont(11, weight: .semibold)
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.pressEffect)
+                .foregroundStyle(Color.accentColor)
+                .help(secondary.help)
+                .opacity(hovering ? 1 : 0)
+                .allowsHitTesting(hovering)
+            }
             // Count and + button share one centered slot, so the swap on
             // hover never shifts anything.
             ZStack {

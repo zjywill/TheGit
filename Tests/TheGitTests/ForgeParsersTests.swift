@@ -23,6 +23,24 @@ final class ForgeParsersTests: XCTestCase {
         XCTAssertNil(ForgeParsers.forge(forHost: "git.sr.ht"))
     }
 
+    // MARK: - Created PR/MR URL
+
+    func testWebURLOutOfCreateOutput() {
+        // gh: chatter on stderr, the URL alone on stdout's last line.
+        XCTAssertEqual(
+            ForgeParsers.webURL(in: "\nhttps://github.com/o/r/pull/12\n"),
+            "https://github.com/o/r/pull/12"
+        )
+        // glab: a human summary first, then the URL.
+        XCTAssertEqual(
+            ForgeParsers.webURL(in: "!42 Fix crash (feature/x)\nhttps://gitlab.com/g/a/-/merge_requests/42"),
+            "https://gitlab.com/g/a/-/merge_requests/42"
+        )
+        // A URL mentioned mid-sentence is not the created page.
+        XCTAssertNil(ForgeParsers.webURL(in: "Creating merge request for feature/x into main"))
+        XCTAssertNil(ForgeParsers.webURL(in: ""))
+    }
+
     // MARK: - gh
 
     /// Verbatim shape of `gh pr list --json number,title,headRefName,author,isDraft,url`.

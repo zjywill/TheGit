@@ -196,6 +196,29 @@ actor GitClient {
             .filter { !$0.isEmpty }
     }
 
+    /// Full messages of the commits a pull request would carry, newest
+    /// first — `range` is `target..source`. Merges are skipped for the same
+    /// reason as in `recentCommitMessages`.
+    func commitMessages(in range: String, limit: Int = 30) async throws -> [String] {
+        let output = try await run([
+            "log", "-n", String(limit), "--no-merges", "--format=%B%x00", range,
+        ])
+        return output
+            .components(separatedBy: "\0")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// The branch's combined change for the AI description: `range` is
+    /// `target...source` — three dots, so commits that landed on target
+    /// meanwhile don't show up as this branch's work.
+    func rangeDiff(_ range: String, stat: Bool) async throws -> String {
+        var args = ["diff", "--no-color", "--no-ext-diff"]
+        args += stat ? ["--stat=200"] : ["-U3"]
+        args.append(range)
+        return try await run(args)
+    }
+
     // MARK: - Conflict resolution
 
     /// Take one side of a conflicted file wholesale, then mark it resolved.
