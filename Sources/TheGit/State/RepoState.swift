@@ -115,6 +115,9 @@ final class RepoState: ObservableObject, Identifiable {
 
     @Published var snapshot = RepoSnapshot()
     @Published var commitMessage = ""
+    /// The merge draft last prefilled into `commitMessage`, so it can be
+    /// taken back out when the merge ends without it being committed.
+    private var mergeDraft: String?
     @Published var panelMode: PanelMode = .commit
     @Published var searchText = ""
     @Published var amend = false
@@ -315,10 +318,14 @@ final class RepoState: ObservableObject, Identifiable {
             snap.conflicted = s0.conflicted
             snap.currentBranch = s0.branch
             snap.operation = try await operation
+            if snap.operation == .merge {
+                snap.mergeMessage = try? await git.mergeMessage()
+            }
             // Publish only real changes: replacing an identical snapshot
             // still makes List re-diff and visibly nudges the scroll
             // position right after scrolling stops.
             if snap != snapshot { snapshot = snap }
+            syncMergeDraft()
             // Close the diff if its file no longer has changes — but only
             // for working-tree diffs. A commit's diff (diffCommit set) is
             // historical and must survive background refreshes.
@@ -328,6 +335,23 @@ final class RepoState: ObservableObject, Identifiable {
             }
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    /// GitKraken lands you on git's own prepared message mid-merge instead
+    /// of an empty box. Prefill only an untouched box, and take the draft
+    /// back out once the merge ends without it being committed — Continue
+    /// uses MERGE_MSG directly, and a stale "Merge branch..." left in the
+    /// box would head the next unrelated commit.
+    private func syncMergeDraft() {
+        if snapshot.operation == .merge, let draft = snapshot.mergeCommitDraft {
+            if commitMessage.isEmpty {
+                commitMessage = draft
+                mergeDraft = draft
+            }
+        } else if let draft = mergeDraft {
+            if commitMessage == draft { commitMessage = "" }
+            mergeDraft = nil
         }
     }
 

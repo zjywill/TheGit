@@ -64,6 +64,12 @@ struct GraphView: View {
         // restores/adjusts its scroll offset on SwiftUI updates (selection,
         // background refreshes), producing large jumps. With fixed-height
         // rows and stable ids, LazyVStack never moves the scroll position.
+        // Same indentation trick as ScrollViewReader/ScrollView below: the
+        // banner strip stacks above the graph without reindenting it.
+        VStack(spacing: 0) {
+        if let op = repo.snapshot.operation, !repo.snapshot.conflicted.isEmpty {
+            ConflictGraphBanner(op: op, repo: repo)
+        }
         ScrollViewReader { proxy in
         ScrollView {
             // Leading-aligned: rows whose fixed columns overflow a narrow
@@ -184,6 +190,42 @@ struct GraphView: View {
                         .onEnded { _ in dragBaseWidth = nil }
                 )
         }
+        }
+    }
+}
+
+/// GitKraken's amber strip over the graph: conflicts exist, and here is
+/// the operation that hit them. The commit panel owns resolution — this
+/// only makes the state impossible to miss from the graph.
+struct ConflictGraphBanner: View {
+    let op: OngoingOperation
+    @ObservedObject var repo: RepoState
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .zoomFont(12)
+                .foregroundStyle(.orange)
+            Text(text)
+                .zoomFont(12, weight: .medium)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity)
+        .background(Color.orange.opacity(0.16))
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private var text: String {
+        let n = repo.snapshot.conflicted.count
+        let files = "\(n) file conflict\(n == 1 ? "" : "s")"
+        if let headline = repo.snapshot.operationHeadline {
+            return "\(files) — \(headline)"
+        }
+        return "\(files) — resolve them to continue the \(op.rawValue.lowercased())"
     }
 }
 

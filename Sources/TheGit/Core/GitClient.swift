@@ -131,6 +131,15 @@ actor GitClient {
         return nil
     }
 
+    /// The message git prepared for a paused merge (.git/MERGE_MSG),
+    /// worktree-safe via --git-path; nil when no merge is in flight.
+    func mergeMessage() async throws -> String? {
+        let rel = try await run(["rev-parse", "--git-path", "MERGE_MSG"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let path = rel.hasPrefix("/") ? rel : repoPath + "/" + rel
+        return try? String(contentsOf: URL(fileURLWithPath: path), encoding: .utf8)
+    }
+
     /// Files touched by a commit, with their status letters.
     func commitFiles(_ hash: String) async throws -> [FileChange] {
         let out = try await run(["show", "--name-status", "--format=", hash])

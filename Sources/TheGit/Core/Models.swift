@@ -176,6 +176,10 @@ struct RepoSnapshot: Equatable {
     var conflicted: [FileChange] = []
     var currentBranch: String?
     var operation: OngoingOperation?
+    /// Contents of .git/MERGE_MSG while a merge is paused: git's own
+    /// prepared message — "Merge branch 'main' into X" plus a
+    /// "# Conflicts:" comment block.
+    var mergeMessage: String?
     /// Commits reachable from HEAD within the loaded window — the current
     /// branch's history, used to spotlight it in the graph.
     var reachableFromHead: Set<String> = []
@@ -192,6 +196,25 @@ struct RepoSnapshot: Equatable {
 
     /// The checked-out local branch, when HEAD isn't detached.
     var headBranch: Branch? { localBranches.first(where: \.isCurrent) }
+
+    /// First line of the prepared merge message — names both branches
+    /// ("Merge branch 'main' into X"), which "Merge in progress" doesn't.
+    var operationHeadline: String? {
+        mergeMessage?.split(separator: "\n").first.map(String.init)
+    }
+
+    /// The prepared merge message without its comment block. `commit -m`
+    /// records '#' lines verbatim (cleanup mode "whitespace", not the
+    /// editor's "strip"), so they must never reach the message box.
+    var mergeCommitDraft: String? {
+        guard let mergeMessage else { return nil }
+        let text = mergeMessage
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.hasPrefix("#") }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
 
     /// LFS objects that genuinely have to be downloaded: pointer in the
     /// working tree, object nowhere on disk. A locally modified LFS file

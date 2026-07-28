@@ -290,6 +290,9 @@ struct CommitPanelView: View {
 
     private var canCommit: Bool {
         (repo.amend || !repo.snapshot.staged.isEmpty)
+            // git refuses to commit with unmerged paths; greying the button
+            // out says so before the error alert would.
+            && repo.snapshot.conflicted.isEmpty
             && !repo.commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !repo.isBusy
     }
@@ -300,6 +303,10 @@ struct CommitPanelView: View {
 
     private var commitButtonTitle: String {
         if repo.amend { return "Amend Previous Commit" }
+        // Mid-merge, "Commit Changes to 236 Files" reads like an accident
+        // about to happen; committing here is what completes the merge,
+        // so say that (GitKraken's "Commit and Merge").
+        if repo.snapshot.operation == .merge { return "Commit and Complete Merge" }
         let count = repo.snapshot.staged.count
         return count > 0 ? "Commit Changes to \(count) File\(count == 1 ? "" : "s")" : "Commit"
     }
@@ -320,6 +327,15 @@ struct OperationBanner: View {
                 Text("\(op.rawValue) in progress")
                     .zoomFont(12, weight: .semibold)
                 Spacer()
+            }
+            // GitKraken names both sides mid-merge; "Merge in progress"
+            // alone doesn't say what is being merged into what.
+            if let headline = repo.snapshot.operationHeadline {
+                Text(headline)
+                    .zoomFont(11, weight: .medium)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Text(conflicts > 0
                 ? "\(conflicts) conflicted file\(conflicts == 1 ? "" : "s") — resolve them, then continue."
