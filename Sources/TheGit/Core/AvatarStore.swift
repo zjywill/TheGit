@@ -39,7 +39,6 @@ final class AvatarStore: ObservableObject {
 
     private init() {
         isEnabled = UserDefaults.standard.bool(forKey: Self.defaultsKey)
-        memory.countLimit = 400
     }
 
     /// Bumped when freshly loaded avatars are ready. Views observing the
@@ -47,9 +46,18 @@ final class AvatarStore: ObservableObject {
     /// arrivals costs one redraw instead of thirty.
     @Published private(set) var version = 0
 
-    /// 64px avatars: a few hundred is a couple of MB, and the graph never
-    /// shows more than a screenful at a time.
-    private let memory = NSCache<NSString, NSImage>()
+    /// A plain dictionary, deliberately not NSCache: NSCache dumps its
+    /// entire contents on memory pressure — a swift build in a terminal is
+    /// enough — and every dump made visible rows fall back to initials,
+    /// reload from disk, swap back, and repeat on the next refresh. In an
+    /// active repo (FSEvents firing constantly) that alternation reads as
+    /// the whole graph's avatars flickering. 64px images are ~16KB each;
+    /// even a thousand authors is a few MB, cheap insurance against that.
+    private var memory: [String: NSImage] = [:]
+    /// Soft cap for pathological repos (unique bot emails per commit).
+    /// Trimming re-flashes the trimmed rows once, so it triggers rarely
+    /// and drops a batch, not one-by-one at the boundary.
+    private static let memoryLimit = 1200
 
     /// Keys with no usable avatar. 404s are also written to disk so the
     /// miss survives a restart; network failures stay in memory only, or
@@ -70,7 +78,7 @@ final class AvatarStore: ObservableObject {
     /// asked first, through `glab`, exactly like the PR list does.
     func avatar(for email: String, gitlabRepo: String? = nil) -> Image? {
         guard let key = Self.key(for: email) else { return nil }
-        if let cached = memory.object(forKey: key as NSString) {
+        if let cached = memory[key] {
             return Image(nsImage: cached)
         }
         guard !missing.contains(key), !inFlight.contains(key),
@@ -99,7 +107,12 @@ final class AvatarStore: ObservableObject {
             // with the earlier check — two independent decodes is cheap
             // insurance against ever drawing a torn image.
             if let data, let image = NSImage(data: data), image.size.width > 0 {
-                memory.setObject(image, forKey: key as NSString)
+                if memory.count >= Self.memoryLimit {
+                    for key in memory.keys.prefix(Self.memoryLimit / 4) {
+                        memory.removeValue(forKey: key)
+                    }
+                }
+                memory[key] = image
                 scheduleBump()
             } else {
                 missing.insert(key)
