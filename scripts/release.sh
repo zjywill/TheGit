@@ -80,7 +80,10 @@ echo "==> Updating $TAP_REPO"
 # A fresh clone, not the local tap checkout: `brew tap` leaves that at
 # whatever state the last install put it in, and pushing from a stale or
 # dirty copy is how a tap ends up disagreeing with itself.
-git clone -q "https://github.com/$TAP_REPO.git" "$WORK/tap"
+# SSH, not https: this machine authenticates to GitHub over SSH only, and
+# an https push either prompts for a token or dies — which is exactly how
+# a release once shipped its tag but not the tap update (v0.3.0).
+git clone -q "git@github.com:$TAP_REPO.git" "$WORK/tap"
 cd "$WORK/tap"
 [ -f "$FORMULA" ] || die "$FORMULA not found in $TAP_REPO"
 /usr/bin/sed -i '' \
