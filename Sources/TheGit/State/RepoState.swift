@@ -1383,16 +1383,49 @@ final class RepoState: ObservableObject, Identifiable {
         var id: String { name }
     }
 
+    /// One clean, however many rows it covered. Undo works in the units the
+    /// user acted in: a batch delete comes back as a batch, not one branch
+    /// per click.
+    struct CleanBatch: Hashable {
+        var deletes: [UndoableDelete]
+    }
+
+    /// What a confirm dialog is currently asking about. One case per shape
+    /// of question, so the sheet needs exactly one alert — SwiftUI only
+    /// honours a single `.alert` per view.
+    enum PendingClean: Equatable {
+        case single(CleanupCandidate)
+        case batch([CleanupCandidate])
+
+        var candidates: [CleanupCandidate] {
+            switch self {
+            case .single(let candidate): return [candidate]
+            case .batch(let candidates): return candidates
+            }
+        }
+    }
+
     @Published var showCleanup = false
     @Published var cleanupCandidates: [CleanupCandidate] = []
     @Published var scanningCleanup = false
     @Published var cleanupError: String?
-    @Published var candidateToConfirm: CleanupCandidate?
-    @Published var cleanupUndo: [UndoableDelete] = []
+    @Published var cleanToConfirm: PendingClean?
+    @Published var cleanupUndo: [CleanBatch] = []
+    /// Row ids ticked for a batch delete. Ids, not candidates, so a rescan
+    /// that returns fresh structs keeps the ticks.
+    @Published var cleanupSelection: Set<String> = []
+    /// A delete is running. A batch is many git calls, and clicking the
+    /// button twice while it works would ask git to delete gone branches.
+    @Published var cleaning = false
+
+    var selectedCleanupCandidates: [CleanupCandidate] {
+        cleanupCandidates.filter { cleanupSelection.contains($0.id) }
+    }
 
     func openCleanup() {
         showCleanup = true
         cleanupUndo = []
+        cleanupSelection = []
         Task { await scanCleanup() }
     }
 
@@ -1406,6 +1439,29 @@ final class RepoState: ObservableObject, Identifiable {
             cleanupCandidates = []
             cleanupError = error.localizedDescription
         }
+        // A row that no longer exists must not keep a tick alive — the
+        // count on the button has to match what a delete would touch.
+        cleanupSelection.formIntersection(cleanupCandidates.map(\.id))
+    }
+
+    func toggleCleanupSelection(_ candidate: CleanupCandidate) {
+        if cleanupSelection.contains(candidate.id) {
+            cleanupSelection.remove(candidate.id)
+        } else {
+            cleanupSelection.insert(candidate.id)
+        }
+    }
+
+    func selectAllCleanup(_ selected: Bool) {
+        cleanupSelection = selected ? Set(cleanupCandidates.map(\.id)) : []
+    }
+
+    /// Batch deletes always ask, even when every row is safe. One click for
+    /// twenty rows is exactly the case where the user hasn't read them one
+    /// by one, so the dialog is where the stakes get stated.
+    func requestClean(_ candidates: [CleanupCandidate]) {
+        guard !candidates.isEmpty else { return }
+        cleanToConfirm = .batch(candidates)
     }
 
     /// Four signals, strongest first: the forge says the PR was merged;
@@ -1518,62 +1574,112 @@ final class RepoState: ObservableObject, Identifiable {
     }
 
     /// Clean exactly one row. Safe rows come straight here; risky rows land
-    /// in `candidateToConfirm` first and arrive after the user says yes.
+    /// in `cleanToConfirm` first and arrive after the user says yes.
     func clean(_ candidate: CleanupCandidate) {
+        clean([candidate])
+    }
+
+    /// Clean any number of rows in one pass. Worktrees go first — removing
+    /// one frees the branch it pinned — and a row that fails never stops
+    /// the rows behind it, so a locked worktree can't strand a whole batch.
+    func clean(_ candidates: [CleanupCandidate]) {
+        guard !candidates.isEmpty, !cleaning else { return }
+        cleaning = true
         Task {
-            var rescan = false
-            do {
-                switch candidate.target {
-                case .branch(let name, let tip):
-                    try await git.deleteLocalBranch(name)
-                    cleanupUndo.append(UndoableDelete(name: name, tip: tip))
-                case .worktree(let path, let prunable):
-                    if prunable {
-                        try await git.pruneWorktrees()
-                    } else {
-                        try await git.removeWorktreeIfClean(path)
-                    }
-                    // Removing a worktree frees its branch for cleanup.
-                    rescan = true
-                }
-            } catch {
-                cleanupError = error.localizedDescription
-                return
+            defer { cleaning = false }
+
+            // `worktree prune` is all-or-nothing, so the prunable rows are
+            // one git call between them rather than one call each.
+            let stale = candidates.filter {
+                if case .worktree(_, true) = $0.target { return true }
+                return false
             }
-            cleanupError = nil
-            withAnimation(.easeOut(duration: 0.16)) {
-                if case .worktree(_, true) = candidate.target {
-                    // `worktree prune` is all-or-nothing, so every stale
-                    // entry just went with it.
-                    cleanupCandidates.removeAll {
-                        if case .worktree(_, true) = $0.target { return true }
-                        return false
-                    }
-                } else {
-                    cleanupCandidates.removeAll { $0.id == candidate.id }
+            let folders = candidates.filter {
+                if case .worktree(_, false) = $0.target { return true }
+                return false
+            }
+            let branches = candidates.filter { !$0.isWorktree }
+
+            var cleaned: Set<String> = []
+            var undone: [UndoableDelete] = []
+            var failures: [(name: String, message: String)] = []
+            var prunedStale = false
+            var touchedWorktrees = false
+
+            if !stale.isEmpty {
+                do {
+                    try await git.pruneWorktrees()
+                    prunedStale = true
+                    touchedWorktrees = true
+                } catch {
+                    failures.append((stale[0].name, error.localizedDescription))
                 }
+            }
+            for candidate in folders {
+                guard case .worktree(let path, _) = candidate.target else { continue }
+                do {
+                    try await git.removeWorktreeIfClean(path)
+                    cleaned.insert(candidate.id)
+                    touchedWorktrees = true
+                } catch {
+                    failures.append((candidate.name, error.localizedDescription))
+                }
+            }
+            for candidate in branches {
+                guard case .branch(let name, let tip) = candidate.target else { continue }
+                do {
+                    try await git.deleteLocalBranch(name)
+                    undone.append(UndoableDelete(name: name, tip: tip))
+                    cleaned.insert(candidate.id)
+                } catch {
+                    failures.append((candidate.name, error.localizedDescription))
+                }
+            }
+
+            if !undone.isEmpty { cleanupUndo.append(CleanBatch(deletes: undone)) }
+            // One failure reads as itself; several would overflow the footer,
+            // so they collapse to the names and the count.
+            cleanupError = failures.isEmpty ? nil
+                : failures.count == 1 ? failures[0].message
+                : "Couldn't clean \(failures.count) items: "
+                    + failures.map(\.name).joined(separator: ", ")
+
+            withAnimation(.easeOut(duration: 0.16)) {
+                cleanupCandidates.removeAll { candidate in
+                    if cleaned.contains(candidate.id) { return true }
+                    // Every stale entry went with the prune, including any
+                    // the user left unticked — git offers no finer grain.
+                    if prunedStale, case .worktree(_, true) = candidate.target { return true }
+                    return false
+                }
+                cleanupSelection.formIntersection(cleanupCandidates.map(\.id))
             }
             await refresh(quiet: true)
-            if rescan { await scanCleanup() }
+            if touchedWorktrees { await scanCleanup() }
         }
     }
 
-    func confirmCleanCandidate() {
-        guard let candidate = candidateToConfirm else { return }
-        candidateToConfirm = nil
-        clean(candidate)
+    func confirmPendingClean() {
+        guard let pending = cleanToConfirm else { return }
+        cleanToConfirm = nil
+        clean(pending.candidates)
     }
 
-    /// Puts the last deleted branch back at exactly the tip it had.
+    /// Puts the branches from the last clean back at exactly the tips they
+    /// had — all of them, however many that click deleted.
     func undoLastClean() {
         guard let last = cleanupUndo.popLast() else { return }
         Task {
-            do {
-                try await git.createBranch(last.name, at: last.tip, checkout: false)
-                cleanupError = nil
-            } catch {
-                cleanupError = error.localizedDescription
+            var failures: [String] = []
+            for delete in last.deletes {
+                do {
+                    try await git.createBranch(delete.name, at: delete.tip, checkout: false)
+                } catch {
+                    failures.append(delete.name)
+                }
             }
+            cleanupError = failures.isEmpty ? nil
+                : "Couldn't restore " + failures.joined(separator: ", ")
             await refresh(quiet: true)
             await scanCleanup()
         }
