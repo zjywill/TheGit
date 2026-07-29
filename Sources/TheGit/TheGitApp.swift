@@ -103,6 +103,7 @@ struct TheGitApp: App {
 struct RootView: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject private var updates = UpdateChecker.shared
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Lives here, not in RepoToolbar: @AppStorage inside a ToolbarContent
     /// struct is never installed on the view graph on macOS — writes were
     /// silently dropped and the pull-mode picker's check never moved.
@@ -114,8 +115,12 @@ struct RootView: View {
             // than to whichever repo happens to be open — and so it still
             // appears on the empty state, which is where a fresh install
             // spends its first minute.
-            if updates.update != nil {
-                UpdateBanner()
+            if let update = updates.update {
+                UpdateBanner(
+                    update: update,
+                    openReleasePage: { updates.openReleasePage() },
+                    dismiss: { updates.skipCurrentUpdate() }
+                )
                 Divider()
             }
             // With no repo open the bar holds one lone + against an empty
@@ -132,6 +137,9 @@ struct RootView: View {
                 EmptyStateView()
             }
         }
+        // Here rather than on the banner itself: showing the banner is this
+        // stack's change, so this is the transaction its transition rides on.
+        .animation(.easeOut(duration: reduceMotion ? 0 : 0.2), value: updates.update)
         // Anchored to the window, not to the repo. Hanging it off RepoView
         // meant every tab switch tore the NSToolbar down and rebuilt each
         // item viewer as a fresh subview — the single largest cost of a
@@ -185,8 +193,14 @@ struct RootView: View {
 /// One quiet line saying a newer release exists. It cannot install anything
 /// — see UpdateChecker — so the only action it offers is the release page,
 /// and dismissing it silences this version for good.
+///
+/// Takes the update rather than reading the singleton: the parent has
+/// already unwrapped it, and a second optional here only creates a state
+/// this can render but never actually reach.
 struct UpdateBanner: View {
-    @ObservedObject private var updates = UpdateChecker.shared
+    let update: UpdateChecker.Update
+    let openReleasePage: () -> Void
+    let dismiss: () -> Void
     @Environment(\.uiZoom) private var zoom
 
     var body: some View {
@@ -194,15 +208,28 @@ struct UpdateBanner: View {
             Image(systemName: "arrow.down.circle.fill")
                 .zoomFont(12)
                 .foregroundStyle(Color.accentColor)
-            Text("TheGit \(updates.update?.version.description ?? "") is available.")
+            Text("TheGit \(update.version.description) is available.")
                 .zoomFont(12, weight: .medium)
-            Button("See What's New") { updates.openReleasePage() }
-                .buttonStyle(.link)
-                .zoomFont(12)
+            // A shape, not a link: the surface behind it is chrome, and a
+            // blue word on chrome is a control only to someone who can see
+            // the blue. The arrow says the click leaves the app — this
+            // banner cannot install anything, and a plain label implies it
+            // can. Hand-built rather than .bordered so it scales with
+            // Cmd+= like the rest of the window.
+            Button(action: openReleasePage) {
+                HStack(spacing: 4) {
+                    Text("Open Release Notes")
+                    Image(systemName: "arrow.up.right")
+                }
+                .zoomFont(11, weight: .medium)
+                .padding(.horizontal, 8 * zoom)
+                .padding(.vertical, 3 * zoom)
+                .background(Capsule().fill(Color.primary.opacity(0.08)))
+                .contentShape(Capsule())
+            }
+            .buttonStyle(.pressEffect)
             Spacer()
-            Button {
-                updates.skipCurrentUpdate()
-            } label: {
+            Button(action: dismiss) {
                 Image(systemName: "xmark")
                     .zoomFont(9, weight: .bold)
                     .frame(width: 20 * zoom, height: 20 * zoom)
@@ -210,15 +237,22 @@ struct UpdateBanner: View {
             }
             .buttonStyle(.pressEffect)
             .foregroundStyle(.secondary)
+            // .help alone is a tooltip and an accessibility *hint*; with no
+            // name, VoiceOver announces this as "button".
+            .accessibilityLabel("Dismiss update notice")
             .help("Dismiss until the next release")
         }
         .padding(.horizontal, 10)
         .frame(height: 30 * zoom)
-        // Tinted rather than .bar: two stacked .bar strips (this and the tab
-        // bar under it) read as one confusing double-height chrome band.
-        .background(Color.accentColor.opacity(0.10))
+        // Neutral, not accent-tinted: accent means "current" everywhere else
+        // in this window — the active tab, the checked-out branch, the
+        // focused filter — and a full-width accent strip reads as a selected
+        // row. The accent stays on the one icon.
+        .background(Color.primary.opacity(0.05))
+        // The matching .animation lives on RootView's stack, not here: this
+        // view is inserted by the parent's `if`, and a modifier can't animate
+        // an insertion it doesn't exist for yet.
         .transition(.move(edge: .top).combined(with: .opacity))
-        .animation(.easeOut(duration: 0.2), value: updates.update)
     }
 }
 
@@ -410,6 +444,9 @@ struct RepoTab: View {
             }
             .buttonStyle(.pressEffect)
             .foregroundStyle(.secondary)
+            // Same omission as the update banner's dismiss: an SF Symbol
+            // carries no name, so this announced as a bare "button".
+            .accessibilityLabel("Close \(repo.displayName)")
             .opacity(hovering ? 1 : 0)
             .animation(.easeOut(duration: 0.12), value: hovering)
         }
