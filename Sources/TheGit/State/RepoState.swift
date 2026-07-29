@@ -234,6 +234,27 @@ final class RepoState: ObservableObject, Identifiable {
     func toggleExpanded(_ id: String) {
         if expandedNodes.contains(id) { expandedNodes.remove(id) } else { expandedNodes.insert(id) }
     }
+
+    /// The branch this repo last auto-revealed in the sidebar, so the
+    /// reveal happens once per checkout — a folder the user collapses
+    /// afterwards must stay collapsed across background refreshes.
+    private var lastRevealedBranch: String?
+
+    /// A current branch living inside collapsed folders ("feature/x/y")
+    /// is invisible in the sidebar — expand its ancestor folders whenever
+    /// the checked-out branch changes (including the first load).
+    private func revealCurrentBranch() {
+        guard let name = snapshot.currentBranch, name != lastRevealedBranch else { return }
+        lastRevealedBranch = name
+        // Folder node ids are cumulative "/"-terminated path prefixes.
+        let folders = name.split(separator: "/").dropLast()
+        guard !folders.isEmpty else { return }
+        var prefix = ""
+        for segment in folders {
+            prefix += segment + "/"
+            expandedNodes.insert(prefix)
+        }
+    }
     /// History of one file, shown over the graph.
     @Published var fileHistory: (path: String, commits: [Commit])?
     /// Commits loaded so far; grows when the list scrolls to the bottom.
@@ -438,6 +459,7 @@ final class RepoState: ObservableObject, Identifiable {
             if snap != snapshot { snapshot = snap }
             lastRefreshedAt = Date()
             updateLineage()
+            revealCurrentBranch()
             syncMergeDraft()
             // Close the diff if its file no longer has changes — but only
             // for working-tree diffs. A commit's diff (diffCommit set) is
@@ -511,6 +533,7 @@ final class RepoState: ObservableObject, Identifiable {
             if snap != snapshot {
                 snapshot = snap
                 updateLineage()
+                revealCurrentBranch()
             }
             if diffCommit == nil, let file = selectedFile {
                 let all = snap.staged + snap.unstaged + snap.conflicted
