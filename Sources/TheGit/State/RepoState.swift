@@ -1012,7 +1012,9 @@ final class RepoState: ObservableObject, Identifiable {
     func confirmRemoveWorktree() {
         guard let wt = worktreeToRemove else { return }
         worktreeToRemove = nil
-        perform { try await $0.removeWorktree(wt.path) }
+        // Forced: the sidebar's dialog already says the folder and anything
+        // uncommitted in it are going.
+        perform { try await $0.removeWorktree(wt.path, force: true) }
     }
 
     func fetchRemoteOnly(_ name: String) {
@@ -1514,7 +1516,7 @@ final class RepoState: ObservableObject, Identifiable {
         }
         var worktreeBranches: [String: Worktree] = [:]
         for worktree in snapshot.worktrees
-        where !worktree.locked && !worktree.prunable {
+        where !worktree.locked && !worktree.prunable && !worktree.isMain {
             if let branch = worktree.branch, branch != base {
                 worktreeBranches[branch] = worktree
             }
@@ -1558,17 +1560,23 @@ final class RepoState: ObservableObject, Identifiable {
             found.append(candidate)
         }
 
-        for worktree in snapshot.worktrees where !worktree.locked {
+        // The main worktree is never a candidate: git can't remove it, and
+        // offering a row that can only ever fail is worse than no row.
+        for worktree in snapshot.worktrees where !worktree.locked && !worktree.isMain {
             if worktree.prunable {
                 found.append(CleanupCandidate(
                     target: .worktree(path: worktree.path, prunable: true),
                     reason: .worktreeGone
                 ))
             } else if let branch = worktree.branch, let reason = reasons[branch] {
-                found.append(CleanupCandidate(
+                var candidate = CleanupCandidate(
                     target: .worktree(path: worktree.path, prunable: false),
                     reason: reason
-                ))
+                )
+                // Counted here rather than at the click, so the row can name
+                // what's at stake before the user decides.
+                candidate.dirtyEntries = await GitClient.dirtyEntryCount(at: worktree.path)
+                found.append(candidate)
             }
         }
         return found
@@ -1647,7 +1655,10 @@ final class RepoState: ObservableObject, Identifiable {
             for candidate in folders {
                 guard case .worktree(let path, _) = candidate.target else { continue }
                 do {
-                    try await git.removeWorktreeIfClean(path)
+                    // Forced only for the folders the dialog listed as dirty.
+                    try await git.removeWorktree(
+                        path, force: candidate.dirtyEntries > 0
+                    )
                     cleaned.insert(candidate.id)
                     touchedWorktrees = true
                 } catch {

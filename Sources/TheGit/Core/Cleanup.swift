@@ -23,6 +23,10 @@ struct CleanupCandidate: Identifiable, Hashable {
     /// Commits that exist nowhere else. Non-zero means deleting loses work,
     /// so the row asks before doing anything.
     var strandedCommits = 0
+    /// Uncommitted and untracked entries sitting in a worktree folder.
+    /// git won't remove such a folder without `--force`, so this is both
+    /// what the row warns about and what decides whether to pass it.
+    var dirtyEntries = 0
 
     var id: String {
         switch target {
@@ -65,7 +69,10 @@ struct CleanupCandidate: Identifiable, Hashable {
     /// so the risk is visible before the click, not after.
     var riskText: String? {
         if case .worktree(_, let prunable) = target {
-            return prunable ? nil : "deletes the folder on disk"
+            if prunable { return nil }
+            guard dirtyEntries > 0 else { return "deletes the folder on disk" }
+            return "deletes the folder and \(dirtyEntries) uncommitted "
+                + (dirtyEntries == 1 ? "change" : "changes")
         }
         guard strandedCommits > 0 else { return nil }
         return "\(strandedCommits) commit\(strandedCommits == 1 ? "" : "s") only here"

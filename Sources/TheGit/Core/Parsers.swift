@@ -80,7 +80,11 @@ enum GitParsers {
         func flush() {
             if let p = path {
                 result.append(Worktree(
+                    // git always lists the main worktree first, whichever
+                    // one the command ran in — there is no porcelain flag
+                    // for it, the position is the whole signal.
                     path: p, branch: branch, head: head,
+                    isMain: result.isEmpty,
                     prunable: prunable, locked: locked
                 ))
             }

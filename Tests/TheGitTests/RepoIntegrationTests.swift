@@ -1162,17 +1162,15 @@ final class RepoIntegrationTests: XCTestCase {
         XCTAssertNil(repo.cleanupError)
     }
 
-    /// One row that git refuses must not strand the rows behind it — the
-    /// dirty worktree stays, everything else in the batch still goes.
+    /// One row that git refuses must not strand the rows behind it. The lock
+    /// lands after the scan, so the batch meets a refusal the rows couldn't
+    /// have carried — which is the case per-row error handling exists for.
     func testAFailedRowDoesNotStopTheRestOfTheBatch() async throws {
         let path = try await makeRepo("clean-partial")
         try await makeMergedBranch(path, "feat-a")
         try await makeMergedBranch(path, "wt-branch")
         let worktree = root.appendingPathComponent("clean-partial-wt").path
         try await git(path, ["worktree", "add", "-q", worktree, "wt-branch"])
-        // git refuses `worktree remove` while the tree is dirty.
-        try write("uncommitted\n", to: worktree + "/dirty.txt")
-        try await git(worktree, ["add", "-A"])
 
         let repo = RepoState(path: path)
         await repo.refresh()
@@ -1181,6 +1179,7 @@ final class RepoIntegrationTests: XCTestCase {
         // candidate for it — not the branch.
         XCTAssertEqual(repo.cleanupCandidates.map(\.name).sorted(), ["clean-partial-wt", "feat-a"])
 
+        try await git(path, ["worktree", "lock", worktree])
         repo.clean(repo.cleanupCandidates)
         try await waitUntil("the batch to finish") { !repo.cleaning }
         let survivors = try await localBranches(path)
@@ -1190,8 +1189,63 @@ final class RepoIntegrationTests: XCTestCase {
         )
         XCTAssertNotNil(repo.cleanupError, "a refused row has to be reported")
         XCTAssertTrue(
-            FileManager.default.fileExists(atPath: worktree + "/dirty.txt"),
-            "the dirty worktree must survive"
+            FileManager.default.fileExists(atPath: worktree),
+            "the locked worktree must survive"
+        )
+    }
+
+    /// A worktree of any JS project has `node_modules` in it forever, so
+    /// "git refuses when it's dirty" would mean the row never works. The
+    /// scan counts what's there, the row says so, and the delete goes
+    /// through — untracked directories counting once, not per file inside.
+    func testDirtyWorktreeCountsWhatItWillDeleteAndGoes() async throws {
+        let path = try await makeRepo("clean-dirty-wt")
+        try await makeMergedBranch(path, "wt-branch")
+        let worktree = root.appendingPathComponent("clean-dirty-wt-tree").path
+        try await git(path, ["worktree", "add", "-q", worktree, "wt-branch"])
+        try FileManager.default.createDirectory(
+            atPath: worktree + "/node_modules", withIntermediateDirectories: true
+        )
+        try write("dep\n", to: worktree + "/node_modules/dep.js")
+        try write("dep2\n", to: worktree + "/node_modules/dep2.js")
+        try write("edited\n", to: worktree + "/wt-branch.txt")
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        await repo.scanCleanup()
+        let candidate = try XCTUnwrap(repo.cleanupCandidates.first { $0.isWorktree })
+        XCTAssertEqual(
+            candidate.dirtyEntries, 2,
+            "one modified file plus one untracked directory, not three files"
+        )
+        XCTAssertFalse(candidate.isSafe, "a dirty folder has to ask first")
+        XCTAssertEqual(
+            candidate.riskText, "deletes the folder and 2 uncommitted changes"
+        )
+
+        repo.clean([candidate])
+        try await waitUntil("the worktree to go") { !repo.cleaning }
+        XCTAssertNil(repo.cleanupError)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktree))
+    }
+
+    /// The repo's own working directory is the first thing `git worktree
+    /// list` prints. Left unmarked it becomes a Clean row — on a branch
+    /// merged long ago, that row offers to delete the repo you're in, and
+    /// git can only answer "is a main working tree".
+    func testMainWorktreeIsNeverACandidate() async throws {
+        let path = try await makeRepo("clean-main-wt")
+        try await makeMergedBranch(path, "test")
+        // The repo sits on a merged branch that isn't the default one —
+        // every signal the scan reads says "done with this".
+        try await git(path, ["checkout", "-q", "test"])
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        await repo.scanCleanup()
+        XCTAssertEqual(
+            repo.cleanupCandidates.filter(\.isWorktree).map(\.name), [],
+            "the main worktree must not be offered for deletion"
         )
     }
 

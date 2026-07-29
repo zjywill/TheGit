@@ -69,8 +69,14 @@ struct CleanupView: View {
         switch repo.cleanToConfirm {
         case .single(let candidate):
             if candidate.isWorktree {
-                return "The worktree folder is removed from disk. "
-                    + "git refuses if it still has uncommitted changes."
+                guard candidate.dirtyEntries > 0 else {
+                    return "The worktree folder is removed from disk. "
+                        + "Nothing in it is uncommitted, and the branch stays."
+                }
+                return "The worktree folder is removed from disk, along with "
+                    + "\(candidate.dirtyEntries) uncommitted "
+                    + (candidate.dirtyEntries == 1 ? "change" : "changes")
+                    + " that exist nowhere else. This can't be undone."
             }
             return "\(candidate.strandedCommits) commit"
                 + (candidate.strandedCommits == 1 ? "" : "s")
@@ -109,9 +115,16 @@ struct CleanupView: View {
                 : "\(stranded) commits exist only on branches in this list and will be lost.")
         }
         if !folders.isEmpty {
-            parts.append("\(folders.count) worktree folder"
+            let dirty = folders.reduce(0) { $0 + $1.dirtyEntries }
+            var line = "\(folders.count) worktree folder"
                 + (folders.count == 1 ? " is" : "s are")
-                + " removed from disk — git refuses any with uncommitted changes.")
+                + " removed from disk"
+            line += dirty == 0
+                ? ", none with uncommitted changes."
+                : ", including \(dirty) uncommitted "
+                    + (dirty == 1 ? "change" : "changes")
+                    + " that can't be undone."
+            parts.append(line)
         }
         if !branches.isEmpty {
             parts.append("Deleted branches can be restored with Undo.")

@@ -63,7 +63,7 @@ struct ToolsSettingsView: View {
             }
             .padding(20 * zoom)
         }
-        .frame(width: 560 * zoom, height: 620 * zoom)
+        // Sized by SettingsRootView, like every pane.
         .task { await probe() }
     }
 

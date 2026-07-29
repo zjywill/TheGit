@@ -71,6 +71,9 @@ struct Worktree: Identifiable, Hashable {
     let path: String
     let branch: String?
     let head: String
+    /// The repo's own working directory. git refuses to remove it — "is a
+    /// main working tree" — so nothing may offer to.
+    var isMain = false
     /// git can't find the working directory any more. Only the admin files
     /// in .git/worktrees are left, so pruning it loses nothing.
     var prunable = false

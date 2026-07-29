@@ -40,7 +40,8 @@ struct AISettingsView: View {
             }
             .padding(20 * zoom)
         }
-        .frame(width: 560 * zoom, height: 620 * zoom)
+        // No frame of its own: SettingsRootView sizes every pane, so the
+        // window holds still across pane switches.
         .onAppear { keyDraft = ai.apiKey }
         .onDisappear { probe?.cancel() }
     }

@@ -88,13 +88,8 @@ struct TheGitApp: App {
         // Its own window, inheriting nothing from the one above — zoom has
         // to be handed to it separately.
         Settings {
-            TabView {
-                AISettingsView()
-                    .tabItem { Label("AI", systemImage: "sparkles") }
-                ToolsSettingsView()
-                    .tabItem { Label("Tools", systemImage: "wrench.and.screwdriver") }
-            }
-            .environment(\.uiZoom, zoom)
+            SettingsRootView()
+                .environment(\.uiZoom, zoom)
         }
     }
 }
