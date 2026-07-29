@@ -1,5 +1,6 @@
 #!/bin/bash
-# Cut a release: tag the repo, then point the Homebrew tap at the new tag.
+# Cut a release: tag the repo, publish a GitHub Release with the DMG, then
+# point the Homebrew tap at the new tag.
 #
 #   scripts/release.sh 0.2.0
 #   scripts/release.sh 0.2.0 --dry-run
@@ -11,11 +12,13 @@
 # from a local tarball that isn't byte-identical to GitHub's (same failure,
 # but it looks like a Homebrew bug).
 #
-# Nothing here signs or notarises anything, so no DMG is published: an
-# ad-hoc-signed DMG downloaded over the network is quarantined and Gatekeeper
-# refuses it. The formula builds from source on the user's machine, which is
-# what keeps that whole problem out of the picture. If you get a Developer ID
-# later, that's when a GitHub Release with a DMG starts making sense.
+# The DMG is ad-hoc signed, not notarised, so macOS quarantines it on
+# download and the first launch needs a trip through System Settings. The
+# release notes say so, in the download's own words. Homebrew stays the
+# recommended channel precisely because building from source sidesteps
+# that; the DMG is for people who won't install a toolchain. When a
+# Developer ID shows up, sign in bundle.sh and delete the warning below —
+# nothing else here changes.
 set -euo pipefail
 
 TAP_REPO="zjywill/homebrew-tap"
@@ -37,6 +40,8 @@ cd "$(dirname "$0")/.."
 TAG="v$VERSION"
 
 echo "==> Checking the working tree"
+command -v gh >/dev/null || die "gh is not installed — 'brew install gh' (the release upload needs it)"
+gh auth status >/dev/null 2>&1 || die "gh is not logged in — run 'gh auth login'"
 [ -z "$(git status --porcelain)" ] || die "working tree is dirty — commit or stash first"
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 [ "$BRANCH" = "main" ] || die "on branch '$BRANCH', expected main"
@@ -51,22 +56,84 @@ swift test 2>&1 | tail -3
 if [ "$DRY_RUN" = "1" ]; then
     echo
     echo "Dry run — would have:"
-    echo "  1. tagged $TAG and pushed it to $SOURCE_REPO"
-    echo "  2. computed the sha256 of the $TAG tarball"
-    echo "  3. pointed $TAP_REPO's $FORMULA at it and pushed"
+    echo "  1. built the universal DMG for $VERSION"
+    echo "  2. tagged $TAG and pushed it to $SOURCE_REPO"
+    echo "  3. published the GitHub Release with the DMG attached"
+    echo "  4. computed the sha256 of the $TAG tarball"
+    echo "  5. pointed $TAP_REPO's $FORMULA at it and pushed"
     exit 0
 fi
+
+# Before the tag, not after: a build that fails here costs nothing, whereas
+# a failure after the push leaves a tag the tap and the release both need
+# cleaning up around. The version is passed explicitly because bundle.sh
+# would otherwise derive it from `git describe`, which can't see a tag that
+# doesn't exist yet.
+echo "==> Building the DMG"
+DMG="$PWD/dist/TheGit-$VERSION.dmg"
+VERSION="$VERSION" scripts/bundle.sh >/dev/null
+[ -f "$DMG" ] || die "bundle.sh finished but $DMG isn't there"
+echo "    $(du -h "$DMG" | awk '{print $1}')  $DMG"
 
 echo "==> Tagging $TAG"
 git tag -a "$TAG" -m "TheGit $VERSION"
 git push -q origin "$TAG"
 
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+# The notes are what the in-app update banner sends people to, so they carry
+# the first-launch instructions as well as the changelog. Commit subjects
+# rather than a hand-written summary: the repo writes conventional commits,
+# and a changelog nobody has to write is a changelog that doesn't get
+# skipped. `git describe` on the tag's parent finds the previous tag.
+echo "==> Publishing the GitHub Release"
+PREV="$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)"
+if [ -n "$PREV" ]; then
+    RANGE="$PREV..$TAG"
+else
+    RANGE="$TAG"
+fi
+{
+    echo "## Changes"
+    echo
+    git log --no-merges --pretty='- %s' "$RANGE"
+    cat <<'NOTES'
+
+## Install
+
+**Homebrew (recommended)** — builds from source, no Gatekeeper prompt:
+
+```
+brew install zjywill/tap/thegit
+rm -rf /Applications/TheGit.app && cp -R "$(brew --prefix thegit)/TheGit.app" /Applications/
+```
+
+**DMG** — no toolchain needed. TheGit isn't signed with an Apple Developer
+ID yet, so macOS blocks the first launch with "TheGit can't be opened".
+It only happens once:
+
+1. Open the DMG and drag TheGit to Applications.
+2. Try to open it; macOS refuses.
+3. System Settings → Privacy & Security → scroll down → **Open Anyway**.
+
+Or, in Terminal, skip the dialog entirely:
+
+```
+xattr -dr com.apple.quarantine /Applications/TheGit.app
+```
+NOTES
+} > "$WORK/notes.md"
+
+gh release create "$TAG" "$DMG" \
+    --repo "$SOURCE_REPO" \
+    --title "TheGit $VERSION" \
+    --notes-file "$WORK/notes.md"
+
 # GitHub generates the tarball on demand; the first request right after a tag
 # push occasionally 404s while the ref propagates.
 echo "==> Fetching the tarball GitHub generates for $TAG"
 URL="https://github.com/$SOURCE_REPO/archive/refs/tags/$TAG.tar.gz"
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
 for attempt in 1 2 3 4 5; do
     if curl -fsSL -o "$WORK/src.tar.gz" "$URL"; then break; fi
     [ "$attempt" = 5 ] && die "could not download $URL"
@@ -102,8 +169,9 @@ cat <<EOF
 
 Released $VERSION.
 
-  source  https://github.com/$SOURCE_REPO/releases/tag/$TAG
+  release https://github.com/$SOURCE_REPO/releases/tag/$TAG
   tap     https://github.com/$TAP_REPO/blob/main/$FORMULA
+  dmg     $DMG
 
 Users get it with:
   brew update && brew upgrade thegit
