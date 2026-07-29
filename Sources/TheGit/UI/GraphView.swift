@@ -288,9 +288,11 @@ struct StashGraphRow: View {
     }
 
     /// Stashes hang off a commit, not off HEAD's history directly: bright
-    /// exactly when the commit they were taken on is.
+    /// exactly when the commit they were taken on is — or, with a commit
+    /// selected, when the stash belongs to its lineage.
     private var onCurrentBranch: Bool {
-        repo.snapshot.reachableFromHead.contains(row.commit.parents.first ?? "")
+        if let lineage = repo.lineageSet { return lineage.contains(row.commit.hash) }
+        return repo.snapshot.reachableFromHead.contains(row.commit.parents.first ?? "")
     }
 
     var body: some View {
@@ -302,7 +304,7 @@ struct StashGraphRow: View {
             LaneCanvas(
                 row: row,
                 dimmed: !onCurrentBranch,
-                brightColors: repo.snapshot.brightColors,
+                brightColors: repo.lineageColors ?? repo.snapshot.brightColors,
                 scrollX: scrollX,
                 fadeLeading: fadeLeading,
                 fadeTrailing: fadeTrailing
@@ -388,6 +390,13 @@ struct GraphRowView: View {
         row.commit.isWip || repo.snapshot.reachableFromHead.contains(row.commit.hash)
     }
 
+    /// With a commit selected, its lineage takes over the spotlight:
+    /// bright = related to the selection, not "on the current branch".
+    private var bright: Bool {
+        if let lineage = repo.lineageSet { return lineage.contains(row.commit.hash) }
+        return onCurrentBranch
+    }
+
     var body: some View {
         HStack(spacing: 8) {
             if badgeWidth > 0 {
@@ -406,8 +415,10 @@ struct GraphRowView: View {
 
             LaneCanvas(
                 row: displayRow,
-                dimmed: !onCurrentBranch,
-                brightColors: searchMode ? nil : repo.snapshot.brightColors,
+                dimmed: !bright,
+                brightColors: searchMode
+                    ? nil
+                    : (repo.lineageColors ?? repo.snapshot.brightColors),
                 avatar: avatars.isEnabled
                     ? avatars.avatar(
                         for: row.commit.email,
@@ -425,13 +436,13 @@ struct GraphRowView: View {
             RoundedRectangle(cornerRadius: 1)
                 .fill(LaneCanvas.color(row.columnColor))
                 .frame(width: 3, height: 16 * zoom)
-                .opacity(onCurrentBranch ? 1 : 0.45)
+                .opacity(bright ? 1 : 0.45)
 
             Text(row.commit.subject)
                 .zoomFont(12)
                 .lineLimit(1)
                 .truncationMode(.tail)
-                .opacity(onCurrentBranch ? 1 : 0.55)
+                .opacity(bright ? 1 : 0.55)
 
             Spacer(minLength: 12)
 
@@ -444,14 +455,14 @@ struct GraphRowView: View {
                 .truncationMode(.tail)
                 .frame(width: 90 * zoom, alignment: .trailing)
                 .help(row.commit.author)
-                .opacity(onCurrentBranch ? 1 : 0.55)
+                .opacity(bright ? 1 : 0.55)
 
             Text(row.commit.shortHash)
                 .zoomFont(11, design: .monospaced)
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
                 .fixedSize()
-                .opacity(onCurrentBranch ? 1 : 0.55)
+                .opacity(bright ? 1 : 0.55)
         }
         .background(
             repo.selectedCommit == row.commit.hash

@@ -148,8 +148,64 @@ final class RepoState: ObservableObject, Identifiable {
     /// it changes — and would close a diff the other tab had left open.
     @Published var selectedCommit: String? {
         didSet {
-            if oldValue != selectedCommit { commitSelectionChanged() }
+            if oldValue != selectedCommit {
+                commitSelectionChanged()
+                updateLineage()
+            }
         }
+    }
+
+    /// Lineage of the selected commit — its ancestors and descendants
+    /// within the loaded window, itself included. While non-nil, the graph
+    /// dims everything outside it, so "did this fix make the release?" is
+    /// answered by a click. Nil when nothing is selected.
+    @Published private(set) var lineageSet: Set<String>?
+    /// Branch-line color ids that connect lineage commits: a line stays
+    /// bright only where it actually carries the selected commit's history.
+    @Published private(set) var lineageColors: Set<Int>?
+
+    /// Recompute the lineage sets for the current selection. Called on
+    /// selection changes and after every graph rebuild — rows (and their
+    /// color ids) are new objects after a refresh.
+    func updateLineage() {
+        guard let sel = selectedCommit,
+              snapshot.graphRows.contains(where: { $0.commit.hash == sel })
+        else {
+            if lineageSet != nil { lineageSet = nil; lineageColors = nil }
+            return
+        }
+        // Includes the synthetic rows (WIP, stashes): they carry real
+        // parent links, so a stash taken on a lineage commit stays bright.
+        let commits = snapshot.graphRows.map(\.commit)
+        var parents: [String: [String]] = [:]
+        var children: [String: [String]] = [:]
+        parents.reserveCapacity(commits.count)
+        for c in commits {
+            parents[c.hash] = c.parents
+            for p in c.parents { children[p, default: []].append(c.hash) }
+        }
+        var set: Set<String> = [sel]
+        var queue = [sel]
+        while let h = queue.popLast() {
+            for p in parents[h] ?? [] where set.insert(p).inserted { queue.append(p) }
+        }
+        queue = [sel]
+        while let h = queue.popLast() {
+            for c in children[h] ?? [] where set.insert(c).inserted { queue.append(c) }
+        }
+        // A parent-lane edge stays bright only when the parent it leads to
+        // is itself in the lineage — color ids alone would keep a shared
+        // line bright past the fork where the lineage leaves it.
+        var colors: Set<Int> = []
+        for row in snapshot.graphRows where set.contains(row.commit.hash) {
+            colors.insert(row.columnColor)
+            for (i, edge) in row.parentLanes.enumerated()
+            where i < row.commit.parents.count && set.contains(row.commit.parents[i]) {
+                colors.insert(edge.color)
+            }
+        }
+        lineageSet = set
+        lineageColors = colors
     }
     /// Stash highlighted from its graph node; the sidebar row lights up.
     @Published var selectedStashRef: String?
@@ -381,6 +437,7 @@ final class RepoState: ObservableObject, Identifiable {
             // position right after scrolling stops.
             if snap != snapshot { snapshot = snap }
             lastRefreshedAt = Date()
+            updateLineage()
             syncMergeDraft()
             // Close the diff if its file no longer has changes — but only
             // for working-tree diffs. A commit's diff (diffCommit set) is
@@ -451,7 +508,10 @@ final class RepoState: ObservableObject, Identifiable {
                 snap.graphRows = g.rows
                 snap.brightColors = g.bright
             }
-            if snap != snapshot { snapshot = snap }
+            if snap != snapshot {
+                snapshot = snap
+                updateLineage()
+            }
             if diffCommit == nil, let file = selectedFile {
                 let all = snap.staged + snap.unstaged + snap.conflicted
                 if !all.contains(where: { $0.id == file.id }) { closeDiff() }
