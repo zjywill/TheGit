@@ -49,6 +49,9 @@ struct GraphView: View {
         let changeCount = repo.snapshot.staged.count + repo.snapshot.unstaged.count
             + repo.snapshot.conflicted.count
 
+        // Where the relative age changes between rows (GitKraken's pills).
+        let ageBreaks = AgeBreaks.compute(rows: rows)
+
         // ScrollView + LazyVStack instead of List: NSTableView-backed List
         // restores/adjusts its scroll offset on SwiftUI updates (selection,
         // background refreshes), producing large jumps. With fixed-height
@@ -119,6 +122,14 @@ struct GraphView: View {
                         }
                     }
                     .frame(height: rowH)
+                    // The age pill rides the top edge of the first row of
+                    // each older block, drawn after (so above) the row
+                    // before it.
+                    .overlay(alignment: .topTrailing) {
+                        if let label = ageBreaks[row.id] {
+                            AgeBreakPill(label: label)
+                        }
+                    }
                     // Leading-aligned even when the row's fixed columns
                     // exceed the window: an overflowing HStack is centered
                     // by default, which shifts each row left by half its
@@ -532,6 +543,68 @@ struct GraphRowView: View {
     }
 }
 
+/// GitKraken-style relative-age pills ("6 days ago", "a week ago"): shown
+/// straddling the row boundary wherever the age label changes, so runs of
+/// same-aged commits read as one block and time jumps become visible.
+enum AgeBreaks {
+    /// Row id -> label, for rows whose age label differs from the row
+    /// above. The first row gets none — a pill on top of the newest
+    /// commit would label everything and mark nothing.
+    static func compute(rows: [GraphRow], now: Date = Date()) -> [String: String] {
+        var result: [String: String] = [:]
+        var previous: String?
+        for row in rows {
+            // Synthetic rows have no meaningful date (WIP sits at
+            // distantFuture) and must not break a run.
+            guard !row.commit.isWip, !row.commit.isStash else { continue }
+            let days = max(0, Int(now.timeIntervalSince(row.commit.date) / 86_400))
+            let label = Self.label(daysAgo: days)
+            if let previous, label != previous { result[row.id] = label }
+            previous = label
+        }
+        return result
+    }
+
+    static func label(daysAgo d: Int) -> String {
+        switch d {
+        case 0: return "today"
+        case 1: return "yesterday"
+        case ..<7: return "\(d) days ago"
+        case ..<14: return "a week ago"
+        case ..<31: return "\(d / 7) weeks ago"
+        case ..<61: return "a month ago"
+        case ..<366: return "\(d / 30) months ago"
+        case ..<731: return "a year ago"
+        default: return "\(d / 365) years ago"
+        }
+    }
+}
+
+/// The pill itself — quiet, right-aligned, half over the boundary it marks.
+struct AgeBreakPill: View {
+    let label: String
+    @Environment(\.uiZoom) private var zoom
+
+    var body: some View {
+        Text(label)
+            .zoomFont(10, weight: .medium)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(Color(nsColor: .windowBackgroundColor))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 5)
+                    .stroke(Color.primary.opacity(0.1))
+            )
+            .padding(.trailing, 10)
+            .offset(y: -9 * zoom)
+            .allowsHitTesting(false)
+    }
+}
+
 /// Draws one row's slice of the commit graph.
 struct LaneCanvas: View {
     let row: GraphRow
@@ -550,8 +623,23 @@ struct LaneCanvas: View {
     var fadeTrailing = false
     @Environment(\.uiZoom) private var zoom
 
+    /// OKLCH-harmonized lane colors: one lightness (0.70), one chroma
+    /// percentage (72% of each hue's sRGB maximum), ten hues ordered so
+    /// neighbouring lanes sit far apart on the wheel. Equal perceived
+    /// brightness is what keeps a busy graph from strobing — the stock
+    /// SwiftUI colors differ wildly in it. (Gold runs lighter as an
+    /// optical correction; yellows at L 0.70 read as olive.)
     static let palette: [Color] = [
-        .blue, .purple, .teal, .orange, .pink, .green, .indigo, .red, .cyan, .yellow,
+        Color(red: 0.385, green: 0.640, blue: 0.897),  // blue      250°
+        Color(red: 0.703, green: 0.524, blue: 0.898),  // purple    305°
+        Color(red: 0.335, green: 0.692, blue: 0.649),  // teal      185°
+        Color(red: 0.852, green: 0.533, blue: 0.301),  // orange     55°
+        Color(red: 0.909, green: 0.430, blue: 0.678),  // pink      350°
+        Color(red: 0.335, green: 0.714, blue: 0.434),  // green     150°
+        Color(red: 0.556, green: 0.591, blue: 0.897),  // indigo    278°
+        Color(red: 0.908, green: 0.471, blue: 0.479),  // red        20°
+        Color(red: 0.332, green: 0.677, blue: 0.757),  // cyan      215°
+        Color(red: 0.839, green: 0.702, blue: 0.356),  // gold       88°
     ]
 
     static func color(_ lane: Int) -> Color {
@@ -632,9 +720,13 @@ struct LaneCanvas: View {
                     // strokes its own segment from phase 0, and a pattern
                     // that doesn't tile fuses into blobs at row boundaries.
                     // Both scale by zoom together, so tiling is preserved.
+                    // Dashes keep butt caps for the same reason — round
+                    // caps grow each dash into its gap. Solid lines get
+                    // round caps so segments meeting at row boundaries
+                    // and arc joins blend without hairline seams.
                     style: edge.dashed
                         ? StrokeStyle(lineWidth: 2 * zoom, dash: [4 * zoom, 4 * zoom])
-                        : StrokeStyle(lineWidth: 2 * zoom)
+                        : StrokeStyle(lineWidth: 2 * zoom, lineCap: .round)
                 )
             }
 
@@ -647,7 +739,16 @@ struct LaneCanvas: View {
                 stroke(p, edge: edge)
             }
 
-            // Children lines joining the dot from the top edge.
+            // Corner radius for the subway-style elbows below. Clamped so
+            // the arc never overshoots the horizontal run or the half-row.
+            func elbow(_ dx: CGFloat) -> CGFloat {
+                min(abs(dx), midY, 9 * zoom)
+            }
+
+            // Children lines joining the dot from the top edge: straight
+            // down the lane, then one rounded right-angle turn into the
+            // dot. A cubic between distant lanes stretched into a long
+            // flat S — the orthogonal route stays crisp at any distance.
             for edge in row.mergeSources {
                 let lx = x(edge.lane, laneW)
                 var p = Path()
@@ -655,16 +756,19 @@ struct LaneCanvas: View {
                 if edge.lane == row.column {
                     p.addLine(to: CGPoint(x: dotX, y: midY))
                 } else {
-                    p.addCurve(
-                        to: CGPoint(x: dotX, y: midY),
-                        control1: CGPoint(x: lx, y: midY * 0.8),
-                        control2: CGPoint(x: dotX, y: midY * 0.4)
+                    p.addArc(
+                        tangent1End: CGPoint(x: lx, y: midY),
+                        tangent2End: CGPoint(x: dotX, y: midY),
+                        radius: elbow(dotX - lx)
                     )
+                    p.addLine(to: CGPoint(x: dotX, y: midY))
                 }
                 stroke(p, edge: edge)
             }
 
-            // Lines leaving the dot toward parents at the bottom edge.
+            // Lines leaving the dot toward parents at the bottom edge:
+            // horizontal run first, then the rounded turn down the lane —
+            // the mirror of the merge elbow above.
             for edge in row.parentLanes {
                 let lx = x(edge.lane, laneW)
                 var p = Path()
@@ -672,11 +776,12 @@ struct LaneCanvas: View {
                 if edge.lane == row.column {
                     p.addLine(to: CGPoint(x: lx, y: size.height))
                 } else {
-                    p.addCurve(
-                        to: CGPoint(x: lx, y: size.height),
-                        control1: CGPoint(x: dotX, y: midY + midY * 0.6),
-                        control2: CGPoint(x: lx, y: midY + midY * 0.2)
+                    p.addArc(
+                        tangent1End: CGPoint(x: lx, y: midY),
+                        tangent2End: CGPoint(x: lx, y: size.height),
+                        radius: elbow(lx - dotX)
                     )
+                    p.addLine(to: CGPoint(x: lx, y: size.height))
                 }
                 stroke(p, edge: edge)
             }
