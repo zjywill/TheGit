@@ -471,6 +471,22 @@ struct SidebarView: View {
                     PullRequestRow(pr: pr, forge: forge, repo: repo)
                 }
             }
+        } else if let missing = repo.missingForgeCLI, !filtering {
+            // The host is GitHub/GitLab but the CLI isn't installed. One
+            // hint row instead of an invisible feature: this is the only
+            // place a user can learn that installing `gh` puts their pull
+            // requests in this sidebar.
+            SectionHeader(
+                title: missing.sectionTitle,
+                count: 0,
+                countLabel: "—",
+                secondary: .init(
+                    icon: "arrow.clockwise",
+                    help: "Check for \(missing.binary) again",
+                    run: { repo.recheckForgeCLI() }
+                )
+            )
+            ForgeInstallHintRow(repo: repo, missing: missing)
         }
     }
 
@@ -860,6 +876,19 @@ struct SectionHeader: View {
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
+        // The buttons only exist on hover (opacity 0 removes them from the
+        // accessibility tree too), so VoiceOver gets the header as one
+        // element carrying the same acts as custom actions instead.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(title), \(countLabel ?? String(count))")
+        .accessibilityActions {
+            if let secondary {
+                Button(secondary.help, action: secondary.run)
+            }
+            if let action {
+                Button(actionHelp ?? "New", action: action)
+            }
+        }
         // Outside the hover shape on purpose: the gaps belong to the layout,
         // not to the header's hit area, or the + would arm itself while the
         // pointer is still in the space between two sections.
@@ -1113,6 +1142,60 @@ struct FolderRow: View {
 
 /// One open PR/MR. Everything it can do is a `gh`/`glab` subcommand —
 /// no API client, no token of our own.
+/// The sidebar's "install gh/glab" hint. Its own view for one reason:
+/// the copy needs an acknowledgement (the command line briefly becomes
+/// "Copied — paste it in Terminal"), and that transient state belongs to
+/// this row, not to the repo.
+struct ForgeInstallHintRow: View {
+    @ObservedObject var repo: RepoState
+    let missing: Forge
+    @State private var copied = false
+
+    private var hint: InstallHint { Toolchain.hint(for: missing.cliTool) }
+
+    private func tapped() {
+        repo.forgeInstallHintTapped()
+        guard hint.isCommand else { return }
+        AccessibilityNotification.Announcement("Copied \(hint.display)").post()
+        copied = true
+        Task {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            copied = false
+        }
+    }
+
+    var body: some View {
+        SidebarRow(icon: copied ? "checkmark.circle" : "arrow.down.circle", iconColor: .secondary) {
+            VStack(alignment: .leading, spacing: SidebarMetrics.lineGap) {
+                Text("Install \(missing.binary) to see \(missing.sectionTitle.lowercased()) here")
+                    .zoomFont(10)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                Text(copied ? "Copied — paste it in Terminal" : hint.display)
+                    .zoomFont(10, design: .monospaced)
+                    .foregroundStyle(Color.accentColor)
+                    .lineLimit(1)
+            }
+        }
+        .help(
+            hint.isCommand
+                ? "TheGit drives \(missing.sectionTitle.lowercased()) through the \(missing.binary) CLI.\n\nClick to copy the install command, run it in Terminal, then sign in with `\(missing.loginHint)`."
+                : "TheGit drives \(missing.sectionTitle.lowercased()) through the \(missing.binary) CLI.\n\nClick to open its install page. After installing, sign in with `\(missing.loginHint)`."
+        )
+        .onTapGesture { tapped() }
+        // A tap gesture is invisible to VoiceOver; give the row a
+        // button's name, trait and action explicitly.
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityHint(
+            hint.isCommand
+                ? "Copies the install command."
+                : "Opens the install page in your browser."
+        )
+        .accessibilityAction { tapped() }
+    }
+}
+
 struct PullRequestRow: View {
     let pr: PullRequest
     let forge: Forge

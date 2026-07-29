@@ -88,8 +88,13 @@ struct TheGitApp: App {
         // Its own window, inheriting nothing from the one above — zoom has
         // to be handed to it separately.
         Settings {
-            AISettingsView()
-                .environment(\.uiZoom, zoom)
+            TabView {
+                AISettingsView()
+                    .tabItem { Label("AI", systemImage: "sparkles") }
+                ToolsSettingsView()
+                    .tabItem { Label("Tools", systemImage: "wrench.and.screwdriver") }
+            }
+            .environment(\.uiZoom, zoom)
         }
     }
 }
@@ -158,14 +163,43 @@ struct EmptyStateView: View {
 
     var body: some View {
         VStack(spacing: 16) {
-            Image(systemName: "arrow.triangle.branch")
-                .zoomFont(48)
-                .foregroundStyle(.secondary)
-            Text("No repository open")
-                .font(.title3)
-                .foregroundStyle(.secondary)
-            Button("Open Repository…") { appState.openRepoPanel() }
-                .keyboardShortcut("o")
+            // A box with no git is the first-launch-on-a-fresh-Mac case:
+            // every repo would error, so "open a repository" is the wrong
+            // pitch. Say what's missing and offer Apple's own installer —
+            // one click, no password, no Homebrew. The card dismisses
+            // itself: AppState polls for git and flips the flag.
+            if appState.gitMissing {
+                Image(systemName: "wrench.and.screwdriver")
+                    .zoomFont(48)
+                    .foregroundStyle(.secondary)
+                Text("Git isn't installed")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                Text("TheGit works through Apple's command-line git.\nInstalling the Command Line Tools takes a few minutes and needs nothing else.")
+                    .zoomFont(12)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                // The screen's one action gets the one prominent button.
+                Button("Install Command Line Tools…") {
+                    appState.installCommandLineTools()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                Text("Opens Apple's installer. This screen moves on by itself once git is ready.")
+                    .zoomFont(10)
+                    .foregroundStyle(.tertiary)
+            } else {
+                Image(systemName: "arrow.triangle.branch")
+                    .zoomFont(48)
+                    .foregroundStyle(.secondary)
+                Text("No repository open")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                Button("Open Repository…") { appState.openRepoPanel() }
+                    .keyboardShortcut("o")
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

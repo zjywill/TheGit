@@ -20,12 +20,21 @@ struct AISettingsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18 * zoom) {
-                enableSection
+            VStack(alignment: .leading, spacing: 16 * zoom) {
+                SettingsSection(
+                    footer: "Generating a commit message sends the staged diff to the provider you pick below. Nothing is sent while this is off."
+                ) {
+                    SettingsRow(title: "Enable AI features") {
+                        // The title stays on the Toggle (hidden, not absent)
+                        // so the switch keeps its accessible name.
+                        Toggle("Enable AI features", isOn: $ai.isEnabled)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                    }
+                }
                 if ai.isEnabled {
-                    Divider()
                     endpointSection
-                    Divider()
                     messageSection
                 }
             }
@@ -38,22 +47,14 @@ struct AISettingsView: View {
 
     // MARK: - Sections
 
-    private var enableSection: some View {
-        VStack(alignment: .leading, spacing: 6 * zoom) {
-            Toggle("Enable AI features", isOn: $ai.isEnabled)
-                .zoomFont(13, weight: .medium)
-            Text("Generating a commit message sends the staged diff to the provider you pick below. Nothing is sent while this is off.")
-                .zoomFont(11)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
     private var endpointSection: some View {
-        VStack(alignment: .leading, spacing: 10 * zoom) {
-            Text("Provider").zoomFont(13, weight: .semibold)
-
-            field("Provider") {
+        SettingsSection(
+            title: "Provider",
+            footer: ai.provider?.needsModelLookup == true && fetched.isEmpty
+                ? "This endpoint decides its own model list — fetch it, or type a model id and press ⏎."
+                : nil
+        ) {
+            SettingsRow(title: "Provider") {
                 SearchablePicker(
                     placeholder: "Filter providers",
                     rows: providerRows,
@@ -66,132 +67,126 @@ struct AISettingsView: View {
                         status = nil
                     }
                 )
+                .frame(width: 300 * zoom)
+                .accessibilityLabel("Provider")
             }
-
-            field("Base URL") {
+            SettingsDivider()
+            SettingsRow(title: "Base URL") {
                 TextField(ai.provider?.baseUrl ?? "https://…", text: $ai.baseURLOverride)
                     .textFieldStyle(.roundedBorder)
                     .zoomFont(12, design: .monospaced)
+                    .frame(width: 300 * zoom)
+                    // The placeholder is an example, not a name.
+                    .accessibilityLabel("Base URL")
             }
-
             if !ai.isLocalEndpoint {
-                field("API Key") {
-                    VStack(alignment: .leading, spacing: 4 * zoom) {
-                        SecureField("sk-…", text: $keyDraft)
-                            .textFieldStyle(.roundedBorder)
-                            .zoomFont(12, design: .monospaced)
-                            .onChange(of: keyDraft) { _, new in ai.setAPIKey(new) }
-                        Text("Stored in your login keychain, never in preferences.")
-                            .zoomFont(10)
-                            .foregroundStyle(.secondary)
-                    }
+                SettingsDivider()
+                SettingsRow(
+                    title: "API Key",
+                    subtitle: "Stored in your login keychain, never in preferences."
+                ) {
+                    SecureField("sk-…", text: $keyDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .zoomFont(12, design: .monospaced)
+                        .frame(width: 300 * zoom)
+                        .accessibilityLabel("API Key")
+                        .onChange(of: keyDraft) { _, new in ai.setAPIKey(new) }
                 }
             }
-
-            field("Model") {
-                VStack(alignment: .leading, spacing: 6 * zoom) {
-                    SearchablePicker(
-                        placeholder: "Filter models",
-                        rows: modelRows,
-                        selection: ai.modelID,
-                        allowsFreeText: true,
-                        onSelect: { ai.modelID = $0 }
-                    )
-                    HStack(spacing: 8 * zoom) {
-                        Button("Fetch Models") { fetchModels() }
-                        Button("Test Connection") { testConnection() }
-                            .disabled(ai.endpoint == nil)
-                        if case .working = status {
-                            ProgressView().controlSize(.small)
-                        }
-                    }
-                    .zoomFont(11)
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-
-                    if ai.provider?.needsModelLookup == true, fetched.isEmpty {
-                        Text("This endpoint decides its own model list — fetch it, or type a model id and press ⏎.")
-                            .zoomFont(10)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
+            SettingsDivider()
+            SettingsRow(title: "Model") {
+                SearchablePicker(
+                    placeholder: "Filter models",
+                    rows: modelRows,
+                    selection: ai.modelID,
+                    allowsFreeText: true,
+                    onSelect: { ai.modelID = $0 }
+                )
+                .frame(width: 300 * zoom)
+                .accessibilityLabel("Model")
             }
-
-            if let status { statusLine(status) }
+            SettingsDivider()
+            HStack(spacing: 8 * zoom) {
+                if let status { statusLine(status) }
+                Spacer(minLength: 12 * zoom)
+                if case .working = status {
+                    ProgressView().controlSize(.small)
+                }
+                Button("Fetch Models") { fetchModels() }
+                Button("Test Connection") { testConnection() }
+                    .disabled(ai.endpoint == nil)
+            }
+            .zoomFont(11)
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .padding(.horizontal, 12 * zoom)
+            .padding(.vertical, 8 * zoom)
         }
     }
 
     private var messageSection: some View {
-        VStack(alignment: .leading, spacing: 10 * zoom) {
-            Text("Commit Messages").zoomFont(13, weight: .semibold)
-
-            field("Format") {
-                Picker("", selection: $ai.style) {
+        SettingsSection(
+            title: "Commit Messages",
+            footer: "Extra rules are appended to the prompt — house rules, a scope vocabulary, anything the model keeps getting wrong."
+        ) {
+            SettingsRow(title: "Format") {
+                Picker("Format", selection: $ai.style) {
                     ForEach(AISettings.Style.allCases) { Text($0.title).tag($0) }
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
+                .frame(width: 280 * zoom)
             }
-
-            field("Language") {
-                Picker("", selection: $ai.language) {
+            SettingsDivider()
+            SettingsRow(title: "Language") {
+                Picker("Language", selection: $ai.language) {
                     ForEach(AISettings.Language.allCases) { Text($0.title).tag($0) }
                 }
                 .labelsHidden()
+                .fixedSize()
             }
-
-            field("Diff budget") {
-                Picker("", selection: $ai.budget) {
+            SettingsDivider()
+            SettingsRow(title: "Diff budget") {
+                Picker("Diff budget", selection: $ai.budget) {
                     ForEach(AISettings.Budget.allCases) { Text($0.title).tag($0) }
                 }
                 .labelsHidden()
+                .fixedSize()
             }
-
-            field("") {
+            SettingsDivider()
+            SettingsRow(
+                title: "Match this repository's commit style",
+                subtitle: "Sends the last few commit messages along as a sample."
+            ) {
                 Toggle("Match this repository's commit style", isOn: $ai.matchRepoStyle)
-                    .zoomFont(12)
-                    .help("Sends the last few commit messages along as a sample.")
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
             }
-
-            field("Extra rules") {
-                VStack(alignment: .leading, spacing: 4 * zoom) {
-                    TextEditor(text: $ai.extraInstructions)
-                        .zoomFont(11, design: .monospaced)
-                        .scrollContentBackground(.hidden)
-                        .padding(4 * zoom)
-                        .frame(height: 60 * zoom)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6)
-                                .fill(Color(nsColor: .textBackgroundColor))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6)
-                                .stroke(Color.primary.opacity(0.1))
-                        )
-                    Text("Appended to the prompt — house rules, a scope vocabulary, anything the model keeps getting wrong.")
-                        .zoomFont(10)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+            SettingsDivider()
+            VStack(alignment: .leading, spacing: 6 * zoom) {
+                Text("Extra rules").zoomFont(13)
+                TextEditor(text: $ai.extraInstructions)
+                    .zoomFont(11, design: .monospaced)
+                    .scrollContentBackground(.hidden)
+                    .padding(4 * zoom)
+                    .frame(height: 60 * zoom)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color(nsColor: .textBackgroundColor))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color.primary.opacity(0.1))
+                    )
+                    .accessibilityLabel("Extra rules")
             }
+            .padding(.horizontal, 12 * zoom)
+            .padding(.vertical, 8 * zoom)
         }
     }
 
     // MARK: - Pieces
-
-    private func field<Content: View>(
-        _ label: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10 * zoom) {
-            Text(label)
-                .zoomFont(12)
-                .foregroundStyle(.secondary)
-                .frame(width: 90 * zoom, alignment: .trailing)
-            content()
-        }
-    }
 
     private func statusLine(_ status: Status) -> some View {
         let (icon, color, text): (String, Color, String) = {
@@ -204,11 +199,12 @@ struct AISettingsView: View {
         return HStack(alignment: .top, spacing: 6 * zoom) {
             Image(systemName: icon).foregroundStyle(color)
             Text(text).textSelection(.enabled)
-            Spacer(minLength: 0)
         }
         .zoomFont(11)
         .fixedSize(horizontal: false, vertical: true)
-        .padding(.leading, 100 * zoom)
+        // One element, so VoiceOver reads "OK, 12 models available" as a
+        // sentence instead of an icon and a string.
+        .accessibilityElement(children: .combine)
     }
 
     private var providerRows: [PickerRow] {
@@ -231,6 +227,12 @@ struct AISettingsView: View {
 
     // MARK: - Actions
 
+    /// The status line is plain text a VoiceOver user would only find by
+    /// re-reading the pane; a probe finishing is worth saying out loud.
+    private func announce(_ message: String) {
+        AccessibilityNotification.Announcement(message).post()
+    }
+
     private func fetchModels() {
         guard let provider = ai.provider, let baseURL = ai.baseURL else {
             status = .failed("Set a Base URL first.")
@@ -247,9 +249,11 @@ struct AISettingsView: View {
                 let models = try await AIClient.models(endpoint: endpoint)
                 fetched = models
                 status = .ok("\(models.count) models available.")
+                announce("\(models.count) models available.")
                 if ai.modelID.isEmpty, let first = models.first { ai.modelID = first.id }
             } catch {
                 status = .failed(error.localizedDescription)
+                announce("Fetching models failed. \(error.localizedDescription)")
             }
         }
     }
@@ -268,8 +272,10 @@ struct AISettingsView: View {
                 status = trimmed.isEmpty
                     ? .failed("Connected, but \(endpoint.model) replied with nothing.")
                     : .ok("\(endpoint.model) replied: \(trimmed.prefix(60))")
+                announce(trimmed.isEmpty ? "Connection test failed." : "Connection test passed.")
             } catch {
                 status = .failed(error.localizedDescription)
+                announce("Connection test failed. \(error.localizedDescription)")
             }
         }
     }

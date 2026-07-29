@@ -31,6 +31,17 @@ enum Forge: String {
     /// renders as "!1,001".
     func label(_ number: Int) -> String { numberPrefix + String(number) }
     var loginHint: String { self == .github ? "gh auth login" : "glab auth login" }
+    /// The same binary as `binary`, in Toolchain terms — for install hints.
+    var cliTool: DevTool { self == .github ? .gh : .glab }
+}
+
+/// What `detect` learned about a repo's forge: the CLI is there and the
+/// feature can run, or the host is a forge we know but its CLI isn't
+/// installed — worth a sentence in the sidebar, since one `brew install`
+/// unlocks a feature the user can't otherwise discover.
+enum ForgeAvailability: Equatable {
+    case ready(Forge)
+    case missingCLI(Forge)
 }
 
 /// A forge CLI failure, split in two: one plain line the sidebar can show
@@ -231,13 +242,15 @@ actor ForgeClient {
         self.repoPath = repoPath
     }
 
-    /// The forge for a repo, or nil when the host isn't one we know or its
-    /// CLI isn't installed — in which case the whole feature stays invisible.
-    static func detect(remoteURL: String) -> Forge? {
+    /// The forge for a repo, or nil when the host isn't one we know. A
+    /// known host whose CLI is missing comes back `.missingCLI`, so the
+    /// sidebar can say how to get it instead of the feature leaving no
+    /// trace at all.
+    static func detect(remoteURL: String) -> ForgeAvailability? {
         guard let forge = ForgeParsers.forge(forHost: ForgeParsers.host(of: remoteURL)) else {
             return nil
         }
-        return Shell.which(forge.binary) == nil ? nil : forge
+        return Shell.which(forge.binary) == nil ? .missingCLI(forge) : .ready(forge)
     }
 
     // MARK: - Queries

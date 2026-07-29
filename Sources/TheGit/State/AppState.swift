@@ -8,6 +8,11 @@ final class AppState: ObservableObject {
     @Published var activeRepoID: String?
     /// A folder the user tried to open that isn't a git repository.
     @Published var nonGitPath: String?
+    /// No usable git on the box (fresh Mac, no Command Line Tools). The
+    /// empty state swaps its "open a repo" pitch for an install card while
+    /// this is true; a background poll flips it back the moment the
+    /// installer finishes.
+    @Published var gitMissing = false
 
     private static let recentKey = "TheGit.openRepos"
 
@@ -56,6 +61,31 @@ final class AppState: ObservableObject {
             repos.append(RepoState(path: path))
         }
         activeRepoID = repos.first?.id
+        Task { await watchForGit() }
+    }
+
+    /// One probe at launch; while git is missing, keep watching. The CLT
+    /// installer runs out of process and tells us nothing, so a filesystem
+    /// poll (a handful of stats every few seconds) is the completion
+    /// signal — the card dismisses itself, no "recheck" button to find.
+    private func watchForGit() async {
+        guard Toolchain.installedGit() == nil else { return }
+        gitMissing = true
+        while Toolchain.installedGit() == nil {
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+        }
+        gitMissing = false
+        // Any repos restored before git arrived sat there erroring;
+        // wake them now that their commands can actually run.
+        for repo in repos {
+            Task { await repo.refresh() }
+        }
+    }
+
+    /// Pops Apple's own installer dialog. No completion callback exists;
+    /// `watchForGit` is already polling for the outcome.
+    func installCommandLineTools() {
+        Task { await Toolchain.installCommandLineTools() }
     }
 
     func openRepoPanel() {

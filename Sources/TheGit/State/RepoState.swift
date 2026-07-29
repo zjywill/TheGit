@@ -188,6 +188,9 @@ final class RepoState: ObservableObject, Identifiable {
     /// Set once we know the repo's host has a CLI we can drive; nil keeps
     /// the whole pull-request feature invisible.
     @Published var forge: Forge?
+    /// The host is a forge we know, but its CLI isn't installed. Mutually
+    /// exclusive with `forge`; drives the sidebar's install hint.
+    @Published var missingForgeCLI: Forge?
     @Published var pullRequests: [PullRequest] = []
     @Published var forgeError: ForgeFailure?
     @Published var loadingPullRequests = false
@@ -1180,9 +1183,35 @@ final class RepoState: ObservableObject, Identifiable {
         guard let url = try? await git.remoteURL(snapshot.defaultRemote),
               let found = ForgeClient.detect(remoteURL: url)
         else { return }
-        forge = found
         forgeHost = ForgeParsers.host(of: url)
-        await loadPullRequests()
+        switch found {
+        case .ready(let forge):
+            self.forge = forge
+            missingForgeCLI = nil
+            await loadPullRequests()
+        case .missingCLI(let forge):
+            missingForgeCLI = forge
+        }
+    }
+
+    /// The sidebar's "check again" after the user installs gh/glab: run
+    /// detection over from scratch.
+    func recheckForgeCLI() {
+        guard missingForgeCLI != nil else { return }
+        missingForgeCLI = nil
+        forgeDetected = false
+        Task { await detectForge() }
+    }
+
+    /// What tapping the install-hint row does: put the brew one-liner on
+    /// the pasteboard, or open the tool's site when there's no brew to
+    /// paste it into.
+    func forgeInstallHintTapped() {
+        guard let missing = missingForgeCLI else { return }
+        switch Toolchain.hint(for: missing.cliTool) {
+        case .command(let line): Self.copyToPasteboard(line)
+        case .website(let url): if let url = URL(string: url) { NSWorkspace.shared.open(url) }
+        }
     }
 
     /// Deliberately not animated. Fading the arriving rows in was tried and
