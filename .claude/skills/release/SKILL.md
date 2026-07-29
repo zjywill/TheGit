@@ -1,14 +1,17 @@
 ---
 name: release
 description: >-
-  Cut a TheGit release end to end: pick the next version, run the tests, tag,
-  push, and move the Homebrew tap — then verify users can actually upgrade.
-  Use this whenever the user says 发版, 发布, 升级版本号, release, bump the
-  version, cut a release, 打 tag, or update the tap — and also when they
-  report that `brew upgrade thegit` still shows an old version, that a tag
-  exists but brew doesn't see it, or that release.sh failed partway. Any
-  release-shaped request in this repo goes through this skill, not through
-  hand-run git tag / formula edits.
+  Cut a TheGit release end to end: pick the next version, run the tests, build
+  and publish the DMG on GitHub Releases, tag, push, and move the Homebrew tap
+  — then verify users can actually upgrade. Use this whenever the user says
+  发版, 发布, 升级版本号, 打包, 出个 DMG, release, bump the version, cut a
+  release, 打 tag, publish a release, upload the DMG, or update the tap — and
+  also when they report that `brew upgrade thegit` still shows an old version,
+  that a tag exists but brew doesn't see it, that a Release is missing its
+  DMG, that the in-app update banner isn't showing a version they just cut, or
+  that release.sh failed partway. Any release-shaped request in this repo goes
+  through this skill, not through hand-run git tag / gh release / formula
+  edits.
 ---
 
 # Releasing TheGit
@@ -24,11 +27,11 @@ It checks the tree, runs the tests, builds the universal DMG, tags
 attached and generated notes, computes the sha256 of GitHub's tarball, and
 points the tap (`zjywill/homebrew-tap`, `Formula/thegit.rb`) at it. It needs
 `gh` installed and logged in; it checks for that before touching anything.
-**Never replay these
-steps by hand** — the formula's `url` and `sha256` must move together, and
-the sha can only be computed after the tag exists on GitHub. That ordering
-is the reason the script exists; hand-running the steps is how half-releases
-happen. `--dry-run` as the second argument previews without touching
+
+**Never replay these steps by hand** — the formula's `url` and `sha256` must
+move together, and the sha can only be computed after the tag exists on
+GitHub. That ordering is the reason the script exists; hand-running the steps
+is how half-releases happen. `--dry-run` as the second argument previews without touching
 anything.
 
 ## Version number
@@ -58,10 +61,13 @@ run in July 2026 shipped its tag and then died, and nobody noticed until
 
 ```bash
 git ls-remote --tags origin | grep vX.Y.Z
+gh release view vX.Y.Z --repo zjywill/TheGit --json tagName,assets
 curl -fsSL https://raw.githubusercontent.com/zjywill/homebrew-tap/main/Formula/thegit.rb | grep -E '  url |  sha256'
 ```
 
-The formula must name the new tag. Then the user upgrades with:
+The release must list a `TheGit-X.Y.Z.dmg` asset with a non-zero size — a
+release with an empty `assets` array is the half-release the in-app update
+banner would send people to. The formula must name the new tag. Then the user upgrades with:
 
 ```bash
 brew update && brew upgrade thegit
