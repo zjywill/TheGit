@@ -29,6 +29,7 @@ extension EnvironmentValues {
 struct TheGitApp: App {
     @StateObject private var appState = AppState()
     @ObservedObject private var avatars = AvatarStore.shared
+    @ObservedObject private var updates = UpdateChecker.shared
     @AppStorage("uiZoomLevel") private var zoomLevel = UIZoom.defaultLevel
 
     private var zoom: CGFloat {
@@ -60,6 +61,11 @@ struct TheGitApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
+            // Directly under "About TheGit", where every Mac app puts it.
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { updates.checkNow() }
+                    .disabled(updates.isChecking)
+            }
             CommandGroup(after: .newItem) {
                 Button("Open Repository…") { appState.openRepoPanel() }
                     .keyboardShortcut("o")
@@ -96,6 +102,7 @@ struct TheGitApp: App {
 
 struct RootView: View {
     @EnvironmentObject var appState: AppState
+    @ObservedObject private var updates = UpdateChecker.shared
     /// Lives here, not in RepoToolbar: @AppStorage inside a ToolbarContent
     /// struct is never installed on the view graph on macOS — writes were
     /// silently dropped and the pull-mode picker's check never moved.
@@ -103,6 +110,14 @@ struct RootView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // Above the tab bar, so it reads as belonging to the app rather
+            // than to whichever repo happens to be open — and so it still
+            // appears on the empty state, which is where a fresh install
+            // spends its first minute.
+            if updates.update != nil {
+                UpdateBanner()
+                Divider()
+            }
             // With no repo open the bar holds one lone + against an empty
             // strip, and the empty state below already offers the same
             // action in a form that reads as the thing to do. A tab bar
@@ -150,6 +165,60 @@ struct RootView: View {
             cd "\(appState.nonGitPath ?? "")" && git init
             """)
         }
+        // Only the result of a check the *user* asked for gets a dialog.
+        .alert(
+            updates.manualResult?.title ?? "",
+            isPresented: Binding(
+                get: { updates.manualResult != nil },
+                set: { if !$0 { updates.manualResult = nil } }
+            ),
+            presenting: updates.manualResult
+        ) { _ in
+            Button("OK", role: .cancel) {}
+        } message: { result in
+            Text(result.message)
+        }
+        .onAppear { updates.checkInBackground() }
+    }
+}
+
+/// One quiet line saying a newer release exists. It cannot install anything
+/// — see UpdateChecker — so the only action it offers is the release page,
+/// and dismissing it silences this version for good.
+struct UpdateBanner: View {
+    @ObservedObject private var updates = UpdateChecker.shared
+    @Environment(\.uiZoom) private var zoom
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.down.circle.fill")
+                .zoomFont(12)
+                .foregroundStyle(Color.accentColor)
+            Text("TheGit \(updates.update?.version.description ?? "") is available.")
+                .zoomFont(12, weight: .medium)
+            Button("See What's New") { updates.openReleasePage() }
+                .buttonStyle(.link)
+                .zoomFont(12)
+            Spacer()
+            Button {
+                updates.skipCurrentUpdate()
+            } label: {
+                Image(systemName: "xmark")
+                    .zoomFont(9, weight: .bold)
+                    .frame(width: 20 * zoom, height: 20 * zoom)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.pressEffect)
+            .foregroundStyle(.secondary)
+            .help("Dismiss until the next release")
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 30 * zoom)
+        // Tinted rather than .bar: two stacked .bar strips (this and the tab
+        // bar under it) read as one confusing double-height chrome band.
+        .background(Color.accentColor.opacity(0.10))
+        .transition(.move(edge: .top).combined(with: .opacity))
+        .animation(.easeOut(duration: 0.2), value: updates.update)
     }
 }
 
