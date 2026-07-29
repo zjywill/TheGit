@@ -1262,6 +1262,32 @@ final class RepoIntegrationTests: XCTestCase {
         XCTAssertEqual(refreshed.dirtyEntries, 2)
     }
 
+    /// A cleanup refusal is followed by a rescan. If that newer scan also
+    /// fails, its error must remain visible instead of the earlier refusal.
+    func testCleanupRescanErrorTakesPriorityOverBatchError() async throws {
+        let path = try await makeRepo("clean-rescan-error")
+        try await makeMergedBranch(path, "wt-branch")
+        let worktree = root.appendingPathComponent("clean-rescan-error-tree").path
+        try await git(path, ["worktree", "add", "-q", worktree, "wt-branch"])
+
+        struct RescanFailure: LocalizedError {
+            var errorDescription: String? { "cleanup rescan failed" }
+        }
+        let repo = RepoState(path: path) { throw RescanFailure() }
+        await repo.refresh()
+        let candidate = CleanupCandidate(
+            target: .worktree(path: worktree, prunable: false),
+            reason: .merged(into: "main")
+        )
+        try await git(path, ["worktree", "lock", worktree])
+
+        repo.clean([candidate])
+        try await waitUntil("cleanup refusal and failed rescan") { !repo.cleaning }
+
+        XCTAssertEqual(repo.cleanupError, "cleanup rescan failed")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree))
+    }
+
     /// The repo's own working directory is the first thing `git worktree
     /// list` prints. Left unmarked it becomes a Clean row — on a branch
     /// merged long ago, that row offers to delete the repo you're in, and

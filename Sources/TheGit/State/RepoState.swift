@@ -107,6 +107,7 @@ final class RepoState: ObservableObject, Identifiable {
     let path: String
     let git: GitClient
     let forgeClient: ForgeClient
+    private let cleanupScanOverride: (() async throws -> [CleanupCandidate])?
 
     enum PanelMode: String, CaseIterable {
         case commit = "Commit"
@@ -304,10 +305,14 @@ final class RepoState: ObservableObject, Identifiable {
     nonisolated var id: String { path }
     var displayName: String { (path as NSString).lastPathComponent }
 
-    init(path: String) {
+    init(
+        path: String,
+        cleanupScanOverride: (() async throws -> [CleanupCandidate])? = nil
+    ) {
         self.path = path
         self.git = GitClient(repoPath: path)
         self.forgeClient = ForgeClient(repoPath: path)
+        self.cleanupScanOverride = cleanupScanOverride
     }
 
     private var hasLoaded = false
@@ -1571,7 +1576,11 @@ final class RepoState: ObservableObject, Identifiable {
         cleanupError = nil
         defer { scanningCleanup = false }
         do {
-            cleanupCandidates = try await findCleanupCandidates()
+            if let cleanupScanOverride {
+                cleanupCandidates = try await cleanupScanOverride()
+            } else {
+                cleanupCandidates = try await findCleanupCandidates()
+            }
         } catch {
             cleanupCandidates = []
             cleanupError = error.localizedDescription
@@ -1801,8 +1810,12 @@ final class RepoState: ObservableObject, Identifiable {
                 cleanupSelection.formIntersection(cleanupCandidates.map(\.id))
             }
             await refresh(quiet: true)
-            if touchedWorktrees { await scanCleanup() }
-            cleanupError = cleanError
+            if touchedWorktrees {
+                await scanCleanup()
+                if cleanupError == nil { cleanupError = cleanError }
+            } else {
+                cleanupError = cleanError
+            }
         }
     }
 
