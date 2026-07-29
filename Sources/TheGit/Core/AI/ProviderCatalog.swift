@@ -110,19 +110,23 @@ enum AIProviderCatalog {
         if let url = Bundle.main.url(forResource: "providers", withExtension: "json") {
             return url
         }
-        // SwiftPM's sidecar bundle, named <package>_<target> and flat
-        // inside. Next to the binary under `swift run`, and next to the
-        // .xctest bundle — not the test runner — under `swift test`.
+        // SwiftPM's sidecar bundle, named <package>_<target>. Next to the
+        // binary under `swift run`, and next to the .xctest bundle — not
+        // the test runner — under `swift test`. SwiftPM writes it flat,
+        // Xcode writes the same bundle in the macOS layout, so both spots
+        // are worth a look or a debug build finds an empty catalog.
         let code = Bundle(for: BundleToken.self).bundleURL
-        let candidates = [
+        let directories = [
             Bundle.main.bundleURL,
             code.deletingLastPathComponent(),
         ]
-        for directory in candidates {
-            let url = directory
-                .appendingPathComponent("TheGit_TheGit.bundle")
-                .appendingPathComponent("providers.json")
-            if FileManager.default.fileExists(atPath: url.path) { return url }
+        let layouts = ["providers.json", "Contents/Resources/providers.json"]
+        for directory in directories {
+            let sidecar = directory.appendingPathComponent("TheGit_TheGit.bundle")
+            for layout in layouts {
+                let url = sidecar.appendingPathComponent(layout)
+                if FileManager.default.fileExists(atPath: url.path) { return url }
+            }
         }
         return nil
     }
