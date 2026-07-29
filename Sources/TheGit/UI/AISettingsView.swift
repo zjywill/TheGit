@@ -11,6 +11,10 @@ struct AISettingsView: View {
     @State private var fetched: [AIModel] = []
     @State private var status: Status?
     @State private var probe: Task<Void, Never>?
+    /// The chooser is a mode, not a popover: picking who to talk to is the
+    /// decision, and it deserves the whole pane while it's being made.
+    @State private var choosingProvider = false
+    @State private var providerFilter = ""
 
     private enum Status {
         case working(String)
@@ -34,15 +38,28 @@ struct AISettingsView: View {
                     }
                 }
                 if ai.isEnabled {
-                    endpointSection
-                    messageSection
+                    if choosingProvider {
+                        providerChooser
+                    } else {
+                        endpointSection
+                        messageSection
+                    }
                 }
             }
             .padding(20 * zoom)
         }
         // No frame of its own: SettingsRootView sizes every pane, so the
         // window holds still across pane switches.
-        .onAppear { keyDraft = ai.apiKey }
+        .onAppear {
+            keyDraft = ai.apiKey
+            // Never-finished setup lands on "who do you want to talk to",
+            // not on a form pre-filled with someone else's answer. A local
+            // endpoint legitimately has no key, so it doesn't count.
+            if ai.isEnabled, ai.apiKey.isEmpty, !ai.isLocalEndpoint { choosingProvider = true }
+        }
+        .onChange(of: ai.isEnabled) { _, on in
+            if on, ai.apiKey.isEmpty, !ai.isLocalEndpoint { choosingProvider = true }
+        }
         .onDisappear { probe?.cancel() }
     }
 
@@ -55,21 +72,15 @@ struct AISettingsView: View {
                 ? "This endpoint decides its own model list — fetch it, or type a model id and press ⏎."
                 : nil
         ) {
-            SettingsRow(title: "Provider") {
-                SearchablePicker(
-                    placeholder: "Filter providers",
-                    rows: providerRows,
-                    selection: ai.providerID,
-                    onSelect: { id in
-                        guard let provider = AIProviderCatalog.provider(id: id) else { return }
-                        ai.selectProvider(provider)
-                        keyDraft = ai.apiKey
-                        fetched = []
-                        status = nil
-                    }
-                )
-                .frame(width: 300 * zoom)
-                .accessibilityLabel("Provider")
+            SettingsRow(
+                title: ai.provider?.name ?? "No provider",
+                subtitle: (ai.provider?.baseUrl.isEmpty ?? true)
+                    ? "Your own endpoint" : ai.provider?.baseUrl
+            ) {
+                Button("Change…") {
+                    providerFilter = ""
+                    choosingProvider = true
+                }
             }
             SettingsDivider()
             SettingsRow(title: "Base URL") {
@@ -187,6 +198,112 @@ struct AISettingsView: View {
         }
     }
 
+    // MARK: - Provider chooser
+
+    /// The ids worth a card of their own, in showing order. Everything
+    /// else is one filter away below.
+    private static let featuredIDs = [
+        "openai", "anthropic", "google", "deepseek", "openrouter", "ollama",
+    ]
+
+    /// One human sentence per famous provider — what the catalog's URL
+    /// column can't say. Falls back to the base URL for the long tail.
+    private static let taglines: [String: String] = [
+        "openai": "GPT models, with an OpenAI API key.",
+        "anthropic": "Claude models, with an Anthropic API key.",
+        "google": "Gemini models, with a Google AI key.",
+        "deepseek": "DeepSeek models, with a DeepSeek API key.",
+        "openrouter": "One key that routes to many models.",
+        "ollama": "Local models on this Mac — no key, nothing leaves it.",
+        "custom": "Any OpenAI-compatible endpoint you point it at.",
+    ]
+
+    private var featured: [AIProvider] {
+        Self.featuredIDs.compactMap { AIProviderCatalog.provider(id: $0) }
+    }
+
+    /// The long tail: everything not already a card, filtered by the
+    /// search field.
+    private var others: [AIProvider] {
+        let shown = Set(Self.featuredIDs + ["custom"])
+        let needle = providerFilter.trimmingCharacters(in: .whitespaces).lowercased()
+        return AIProviderCatalog.all
+            .filter { needle.isEmpty ? !shown.contains($0.id) : true }
+            .filter {
+                needle.isEmpty
+                    || $0.name.lowercased().contains(needle)
+                    || $0.id.lowercased().contains(needle)
+            }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private func detail(for provider: AIProvider) -> String {
+        Self.taglines[provider.id]
+            ?? (provider.baseUrl.isEmpty ? "Your own endpoint." : provider.baseUrl)
+    }
+
+    private func choose(_ provider: AIProvider) {
+        ai.selectProvider(provider)
+        keyDraft = ai.apiKey
+        fetched = []
+        status = nil
+        providerFilter = ""
+        choosingProvider = false
+    }
+
+    @ViewBuilder
+    private var providerChooser: some View {
+        HStack {
+            Text("Choose a provider")
+                .zoomFont(13, weight: .semibold)
+            Spacer()
+            Button("Cancel") { choosingProvider = false }
+                .controlSize(.small)
+        }
+        SettingsSection(
+            footer: "API keys are stored in your login keychain, never in preferences."
+        ) {
+            ForEach(Array(featured.enumerated()), id: \.element.id) { index, provider in
+                if index > 0 { SettingsDivider() }
+                ProviderChoiceRow(
+                    title: provider.name,
+                    detail: detail(for: provider),
+                    selected: provider.id == ai.providerID
+                ) { choose(provider) }
+            }
+            SettingsDivider()
+            ProviderChoiceRow(
+                title: "Use another API key…",
+                detail: Self.taglines["custom"] ?? "",
+                selected: ai.providerID == AIProviderCatalog.custom.id
+            ) { choose(AIProviderCatalog.custom) }
+        }
+        SettingsSection(title: "All Providers") {
+            TextField("Filter providers", text: $providerFilter)
+                .textFieldStyle(.roundedBorder)
+                .zoomFont(12)
+                .accessibilityLabel("Filter providers")
+                .padding(.horizontal, 12 * zoom)
+                .padding(.vertical, 8 * zoom)
+            ForEach(others) { provider in
+                SettingsDivider()
+                ProviderChoiceRow(
+                    title: provider.name,
+                    detail: detail(for: provider),
+                    selected: provider.id == ai.providerID
+                ) { choose(provider) }
+            }
+            if others.isEmpty {
+                SettingsDivider()
+                Text("No match — \"Use another API key\" above takes any OpenAI-compatible endpoint.")
+                    .zoomFont(11)
+                    .foregroundStyle(.secondary)
+                    .padding(12 * zoom)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
     // MARK: - Pieces
 
     private func statusLine(_ status: Status) -> some View {
@@ -206,12 +323,6 @@ struct AISettingsView: View {
         // One element, so VoiceOver reads "OK, 12 models available" as a
         // sentence instead of an icon and a string.
         .accessibilityElement(children: .combine)
-    }
-
-    private var providerRows: [PickerRow] {
-        AIProviderCatalog.all.map {
-            PickerRow(id: $0.id, title: $0.name, detail: $0.baseUrl.isEmpty ? "your own endpoint" : $0.baseUrl)
-        }
     }
 
     /// Catalog models plus whatever the endpoint reported, the fetched ones
@@ -279,6 +390,56 @@ struct AISettingsView: View {
                 announce("Connection test failed. \(error.localizedDescription)")
             }
         }
+    }
+}
+
+// MARK: - Provider choice row
+
+/// One provider the chooser offers: name, one plain sentence, chevron —
+/// a real Button, so it's keyboard-reachable and announces as one.
+private struct ProviderChoiceRow: View {
+    @Environment(\.uiZoom) private var zoom
+    let title: String
+    let detail: String
+    let selected: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10 * zoom) {
+                VStack(alignment: .leading, spacing: 2 * zoom) {
+                    Text(title).zoomFont(13, weight: .medium)
+                    Text(detail)
+                        .zoomFont(10)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 12 * zoom)
+                if selected {
+                    Image(systemName: "checkmark")
+                        .zoomFont(11, weight: .semibold)
+                        .foregroundStyle(Color.accentColor)
+                        .accessibilityLabel("Current provider")
+                }
+                Image(systemName: "chevron.right")
+                    .zoomFont(10, weight: .semibold)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 12 * zoom)
+            .padding(.vertical, 8 * zoom)
+            .frame(minHeight: 40 * zoom)
+            .background(
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(hovering ? Color.primary.opacity(0.05) : .clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+        .accessibilityAddTraits(selected ? [.isSelected] : [])
     }
 }
 

@@ -126,6 +126,21 @@ final class RepoState: ObservableObject, Identifiable {
     /// disable staging or the commit button while it does.
     @Published var isGeneratingMessage = false
     private var generateTask: Task<Void, Never>?
+    /// Set when a commit or stash consumed the draft while a generation
+    /// was still in flight. A stream can look finished in the box while
+    /// the task waits on the final SSE frame; committing in that window
+    /// used to let the task's epilogue refill the just-cleared box with
+    /// the message that was already pushed. Once discarded, nothing from
+    /// that task may touch `commitMessage` again.
+    private var discardGeneration = false
+
+    /// Cancel an in-flight generation *and* disown its result — unlike
+    /// the user's own cancel, which keeps whatever already streamed in.
+    private func abandonMessageGeneration() {
+        guard generateTask != nil else { return }
+        discardGeneration = true
+        generateTask?.cancel()
+    }
     @Published var errorMessage: String?
     /// Loading the commit's file list hangs off the property itself rather
     /// than off an .onChange in the view: the commit pane is shared between
@@ -591,6 +606,7 @@ final class RepoState: ObservableObject, Identifiable {
                 } else {
                     try await git.commit(message: message)
                 }
+                abandonMessageGeneration()
                 commitMessage = "" // only clear once the commit actually succeeded
             } catch {
                 errorMessage = error.localizedDescription
@@ -610,6 +626,7 @@ final class RepoState: ObservableObject, Identifiable {
         let amending = amend
         let draft = commitMessage
         isGeneratingMessage = true
+        discardGeneration = false
 
         generateTask = Task {
             defer {
@@ -646,8 +663,12 @@ final class RepoState: ObservableObject, Identifiable {
                 var answer = ""
                 for try await delta in AIClient.stream(request, endpoint: endpoint) {
                     answer += delta
+                    guard !discardGeneration else { return }
                     commitMessage = CommitMessageGenerator.clean(answer)
                 }
+                // A commit may have consumed the draft while the stream
+                // was closing; its message is history now, not a draft.
+                guard !discardGeneration else { return }
                 let message = CommitMessageGenerator.clean(answer)
                 if message.isEmpty {
                     commitMessage = draft
@@ -658,6 +679,7 @@ final class RepoState: ObservableObject, Identifiable {
                     commitMessage = message
                 }
             } catch {
+                guard !discardGeneration else { return }
                 commitMessage = draft
                 errorMessage = error.localizedDescription
             }
@@ -684,6 +706,7 @@ final class RepoState: ObservableObject, Identifiable {
             isBusy = true
             do {
                 try await git.stashPush(message: message.isEmpty ? nil : message, paths: paths)
+                abandonMessageGeneration()
                 commitMessage = ""
                 panelMode = .commit
             } catch {
