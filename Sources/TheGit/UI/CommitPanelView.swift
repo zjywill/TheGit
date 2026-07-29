@@ -38,19 +38,22 @@ struct CommitPanelView: View {
                 Divider()
             }
 
+            // Sections size to their content: a one-file list takes one
+            // row, an empty list takes a single hint line. The spacer
+            // below absorbs what's left, so short lists sit together at
+            // the top instead of floating in two half-panel voids. Long
+            // lists still split the available space between them.
             FileSection(
                 title: "Unstaged Files",
                 files: repo.snapshot.unstaged,
                 actionIcon: "plus.circle",
                 actionHelp: "Stage file",
                 bulkTitle: "Stage All",
-                emptyText: "No unstaged changes",
+                emptyText: "No unstaged changes — working tree is clean",
                 action: { repo.stage($0) },
                 bulkAction: { repo.stageAll() },
                 repo: repo
             )
-
-            Divider()
 
             FileSection(
                 title: "Staged Files",
@@ -58,11 +61,13 @@ struct CommitPanelView: View {
                 actionIcon: "minus.circle",
                 actionHelp: "Unstage file",
                 bulkTitle: "Unstage All",
-                emptyText: "No staged changes",
+                emptyText: "No staged changes — stage files to commit them",
                 action: { repo.unstage($0) },
                 bulkAction: { repo.unstageAll() },
                 repo: repo
             )
+
+            Spacer(minLength: 0)
 
             messageResizer
 
@@ -91,8 +96,6 @@ struct CommitPanelView: View {
                         }
                     }
 
-                if ai.isEnabled, repo.panelMode == .commit { generateRow }
-
                 TextEditor(text: $repo.commitMessage)
                     .zoomFont(12)
                     .scrollContentBackground(.hidden)
@@ -106,6 +109,29 @@ struct CommitPanelView: View {
                         RoundedRectangle(cornerRadius: 6)
                             .stroke(Color.primary.opacity(0.1))
                     )
+                    // A TextEditor has no placeholder of its own; without
+                    // one an empty box gives no hint of what belongs here
+                    // (or that a stash message is optional).
+                    .overlay(alignment: .topLeading) {
+                        if repo.commitMessage.isEmpty {
+                            Text(repo.panelMode == .commit
+                                ? "Commit message" : "Stash message (optional)")
+                                .zoomFont(12)
+                                .foregroundStyle(.tertiary)
+                                .padding(.leading, 11)
+                                .padding(.top, 6)
+                                .allowsHitTesting(false)
+                        }
+                    }
+                    // ✨ lives inside the box it writes into — the control
+                    // next to what it affects, instead of a stray row of
+                    // chrome floating above.
+                    .overlay(alignment: .bottomTrailing) {
+                        if ai.isEnabled, repo.panelMode == .commit {
+                            generateControl
+                                .padding(6)
+                        }
+                    }
 
                 if repo.panelMode == .commit {
                     Button {
@@ -122,6 +148,9 @@ struct CommitPanelView: View {
                     .controlSize(.large)
                     .buttonStyle(.borderedProminent)
                     .disabled(!canCommit)
+                    // A grey button with no reason is a dead end; the
+                    // tooltip names the missing step.
+                    .help(canCommit ? "" : cannotCommitReason)
                 } else {
                     // Split button: the whole tree stays the primary action,
                     // but staging a file first is a statement of intent, and
@@ -153,6 +182,17 @@ struct CommitPanelView: View {
             }
             .padding(12)
         }
+        // Staging moves a row from one list to the other; the sections
+        // resize to follow. Critically damped — layout should settle,
+        // not bounce.
+        .animation(
+            .spring(response: 0.3, dampingFraction: 1),
+            value: repo.snapshot.staged.count
+        )
+        .animation(
+            .spring(response: 0.3, dampingFraction: 1),
+            value: repo.snapshot.unstaged.count
+        )
         .background(.background)
         .alert(
             "Discard changes in \(repo.fileToDiscard?.fileName ?? "")?",
@@ -229,10 +269,10 @@ struct CommitPanelView: View {
 
     /// GitKraken's ✨: writes the message from the staged diff. Only ever
     /// shown when AI is switched on — a git client with no AI configured
-    /// shouldn't grow a button advertising it.
-    private var generateRow: some View {
+    /// shouldn't grow a button advertising it. Sits inside the message
+    /// box; the model id moved into the tooltip, where detail belongs.
+    private var generateControl: some View {
         HStack(spacing: 6) {
-            Spacer(minLength: 0)
             if repo.isGeneratingMessage {
                 ProgressView()
                     .controlSize(.small)
@@ -241,13 +281,6 @@ struct CommitPanelView: View {
                     .zoomFont(11)
                     .foregroundStyle(.secondary)
             } else {
-                if ai.isReady {
-                    Text(ai.modelID)
-                        .zoomFont(10)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
                 Button {
                     if ai.didConfirmSending {
                         repo.generateCommitMessage()
@@ -260,10 +293,16 @@ struct CommitPanelView: View {
                         Text("Generate")
                     }
                     .zoomFont(11)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(.regularMaterial, in: Capsule())
                 }
                 .buttonStyle(.pressEffect)
                 .disabled(!canGenerate)
-                .help(ai.notReadyReason ?? "Write the commit message from the staged diff")
+                .help(
+                    ai.notReadyReason
+                        ?? "Write the commit message from the staged diff (\(ai.modelID))"
+                )
             }
         }
         .alert(
@@ -295,6 +334,16 @@ struct CommitPanelView: View {
             && repo.snapshot.conflicted.isEmpty
             && !repo.commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !repo.isBusy
+    }
+
+    /// The first missing step, in the order the user would fix them.
+    private var cannotCommitReason: String {
+        if !repo.snapshot.conflicted.isEmpty { return "Resolve the conflicted files first" }
+        if !repo.amend && repo.snapshot.staged.isEmpty { return "Stage at least one file to commit" }
+        if repo.commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Write a commit message"
+        }
+        return "Working…"
     }
 
     private var hasAnyChanges: Bool {
@@ -452,6 +501,14 @@ struct FileSection: View {
     @ObservedObject var repo: RepoState
     @Environment(\.uiZoom) private var zoom
 
+    /// What the rows genuinely need, so the list never claims more. When
+    /// two long lists both want more than the panel has, the VStack splits
+    /// the space between them — same behaviour as before for full panels.
+    private var contentHeight: CGFloat {
+        let rows = CGFloat(files.count)
+        return (rows * FileListMetrics.row + (rows - 1) * FileListMetrics.spacing) * zoom + 4
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -470,13 +527,19 @@ struct FileSection: View {
                 }
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.top, 10)
+            .padding(.bottom, 6)
 
             if files.isEmpty {
+                // One quiet line under the header, not half a panel of
+                // void: the empty state names the next step and gets out
+                // of the way.
                 Text(emptyText)
                     .zoomFont(11)
                     .foregroundStyle(.tertiary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 10)
             } else {
                 ScrollView {
                     LazyVStack(spacing: FileListMetrics.spacing * zoom) {
@@ -496,9 +559,9 @@ struct FileSection: View {
                     }
                     .padding(.vertical, 2)
                 }
+                .frame(maxHeight: contentHeight)
             }
         }
-        .frame(maxHeight: .infinity)
     }
 }
 
