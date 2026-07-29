@@ -1120,7 +1120,7 @@ final class RepoState: ObservableObject, Identifiable {
         worktreeToRemove = nil
         // Forced: the sidebar's dialog already says the folder and anything
         // uncommitted in it are going.
-        perform { try await $0.removeWorktree(wt.path, force: true) }
+        perform { try await $0.forceRemoveWorktree(wt.path) }
     }
 
     func fetchRemoteOnly(_ name: String) {
@@ -1681,7 +1681,8 @@ final class RepoState: ObservableObject, Identifiable {
                 )
                 // Counted here rather than at the click, so the row can name
                 // what's at stake before the user decides.
-                candidate.dirtyEntries = await GitClient.dirtyEntryCount(at: worktree.path)
+                candidate.dirtyEntries =
+                    (try? await GitClient.dirtyEntryCount(at: worktree.path)) ?? 0
                 found.append(candidate)
             }
         }
@@ -1760,13 +1761,12 @@ final class RepoState: ObservableObject, Identifiable {
             }
             for candidate in folders {
                 guard case .worktree(let path, _) = candidate.target else { continue }
+                touchedWorktrees = true
                 do {
-                    // Forced only for the folders the dialog listed as dirty.
                     try await git.removeWorktree(
-                        path, force: candidate.dirtyEntries > 0
+                        path, expectedDirtyEntries: candidate.dirtyEntries
                     )
                     cleaned.insert(candidate.id)
-                    touchedWorktrees = true
                 } catch {
                     failures.append((candidate.name, error.localizedDescription))
                 }
@@ -1785,7 +1785,7 @@ final class RepoState: ObservableObject, Identifiable {
             if !undone.isEmpty { cleanupUndo.append(CleanBatch(deletes: undone)) }
             // One failure reads as itself; several would overflow the footer,
             // so they collapse to the names and the count.
-            cleanupError = failures.isEmpty ? nil
+            let cleanError = failures.isEmpty ? nil
                 : failures.count == 1 ? failures[0].message
                 : "Couldn't clean \(failures.count) items: "
                     + failures.map(\.name).joined(separator: ", ")
@@ -1802,6 +1802,7 @@ final class RepoState: ObservableObject, Identifiable {
             }
             await refresh(quiet: true)
             if touchedWorktrees { await scanCleanup() }
+            cleanupError = cleanError
         }
     }
 

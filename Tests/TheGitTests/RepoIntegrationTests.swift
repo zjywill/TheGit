@@ -1229,6 +1229,39 @@ final class RepoIntegrationTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: worktree))
     }
 
+    /// The confirmation is valid only for the count it displayed. A change
+    /// made after the scan must survive, along with the worktree that owns it.
+    func testDirtyWorktreeChangedAfterScanIsNotRemoved() async throws {
+        let path = try await makeRepo("clean-dirty-wt-changed")
+        try await makeMergedBranch(path, "wt-branch")
+        let worktree = root.appendingPathComponent("clean-dirty-wt-changed-tree").path
+        try await git(path, ["worktree", "add", "-q", worktree, "wt-branch"])
+        let originalChange = worktree + "/wt-branch.txt"
+        let lateChange = worktree + "/after-scan.txt"
+        try write("edited\n", to: originalChange)
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        await repo.scanCleanup()
+        let candidate = try XCTUnwrap(repo.cleanupCandidates.first { $0.isWorktree })
+        XCTAssertEqual(candidate.dirtyEntries, 1)
+
+        try write("created after confirmation\n", to: lateChange)
+        repo.clean([candidate])
+        try await waitUntil("cleanup refusal and rescan") { !repo.cleaning }
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: originalChange))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: lateChange))
+        XCTAssertEqual(
+            repo.cleanupError,
+            "git worktree remove: The worktree changed after it was scanned. "
+                + "Review its 2 uncommitted changes and try again."
+        )
+        let refreshed = try XCTUnwrap(repo.cleanupCandidates.first { $0.isWorktree })
+        XCTAssertEqual(refreshed.dirtyEntries, 2)
+    }
+
     /// The repo's own working directory is the first thing `git worktree
     /// list` prints. Left unmarked it becomes a Clean row — on a branch
     /// merged long ago, that row offers to delete the repo you're in, and

@@ -845,26 +845,43 @@ actor GitClient {
         try await run(["worktree", "prune"])
     }
 
-    /// `force` is never guessed here: the scan counts what's uncommitted in
-    /// the folder, the dialog says so, and only a yes to that reaches this
-    /// with `force: true`. A clean folder still goes without it, so a change
-    /// made since the scan hits git's own refusal rather than the disk.
-    func removeWorktree(_ path: String, force: Bool) async throws {
-        try await run(["worktree", "remove"] + (force ? ["--force"] : []) + [path])
+    /// The sidebar has its own broad confirmation that the folder and all of
+    /// its uncommitted contents are going. Keep that unconditional operation
+    /// explicit instead of letting cleanup pass a guessed Boolean.
+    func forceRemoveWorktree(_ path: String) async throws {
+        try await run(["worktree", "remove", "--force", path])
+    }
+
+    /// Clean may force removal only while the worktree still has exactly the
+    /// number of uncommitted entries its confirmation displayed.
+    func removeWorktree(_ path: String, expectedDirtyEntries: Int) async throws {
+        let currentDirtyEntries = try await Self.dirtyEntryCount(at: path)
+        guard currentDirtyEntries == expectedDirtyEntries else {
+            throw GitError(
+                command: "worktree remove",
+                message: "The worktree changed after it was scanned. Review its "
+                    + "\(currentDirtyEntries) uncommitted "
+                    + (currentDirtyEntries == 1 ? "change" : "changes")
+                    + " and try again."
+            )
+        }
+        try await run(
+            ["worktree", "remove"]
+                + (expectedDirtyEntries > 0 ? ["--force"] : [])
+                + [path]
+        )
     }
 
     /// Uncommitted and untracked entries in a worktree — run against that
-    /// folder, not the repo we're browsing. Untracked directories stay
-    /// collapsed: a `node_modules` counts once, and counting the 40k files
-    /// inside it would cost more than the answer is worth.
-    nonisolated static func dirtyEntryCount(at path: String) async -> Int {
-        let out = try? await Shell.run(
+    /// folder, not the repo we're browsing. Failure is propagated so a
+    /// destructive caller can never mistake an unreadable worktree for clean.
+    nonisolated static func dirtyEntryCount(at path: String) async throws -> Int {
+        let out = try await Shell.run(
             "/usr/bin/env",
             ["git", "-C", path, "status", "--porcelain"],
             env: ["GIT_EDITOR": "true", "GIT_PAGER": "cat",
                   "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"]
         )
-        guard let out else { return 0 }
         return out.components(separatedBy: "\n").filter { !$0.isEmpty }.count
     }
 
