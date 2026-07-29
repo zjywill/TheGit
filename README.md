@@ -140,10 +140,10 @@ TheGit never handles those tokens itself.
 brew install zjywill/tap/thegit
 ```
 
-The formula builds from source on your machine, which is deliberate: an
-ad-hoc-signed app downloaded over the network gets quarantined and Gatekeeper
-refuses it, so there is no prebuilt bottle or DMG to install. A first build
-takes a minute or two and needs an Xcode 15+ toolchain.
+The formula builds from source on your machine, which is deliberate: a build
+you produced yourself is never quarantined, so nothing has to be talked past
+Gatekeeper. A first build takes a minute or two and needs an Xcode 15+
+toolchain.
 
 Homebrew installs the bundle inside its own prefix and adds a `thegit` command
 to your `PATH`. A formula can't write to `/Applications`, so copy it there
@@ -169,6 +169,29 @@ is being ignored, this re-adds it:
 brew trust --formula zjywill/tap/thegit
 ```
 
+### DMG
+
+Every release ships a universal `.dmg` on the
+[Releases page](https://github.com/zjywill/TheGit/releases/latest) — no
+toolchain, no Homebrew, 4.4 MB.
+
+TheGit isn't signed with an Apple Developer ID yet, so macOS blocks the first
+launch with "TheGit can't be opened". This is Gatekeeper refusing an
+unnotarised download, not a problem with the app, and it only happens once:
+
+1. Open the DMG and drag TheGit to Applications.
+2. Try to open it; macOS refuses.
+3. **System Settings → Privacy & Security**, scroll down, **Open Anyway**.
+
+Or skip the dialog entirely:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/TheGit.app
+```
+
+If that trade doesn't appeal, use Homebrew above — building from source never
+hits this.
+
 ### Let an AI agent install it for you
 
 Using Claude Code, Codex, or any agent with a terminal? Paste this prompt
@@ -192,6 +215,12 @@ brew update && brew upgrade thegit, then redo step 2.
 ```
 
 ### Upgrade
+
+TheGit tells you when there's a new release: it asks GitHub once at launch
+(at most every six hours) and shows a one-line banner above the tab bar if a
+newer version exists. It never downloads or installs anything by itself —
+the banner links to the release page, and dismissing it silences that version
+for good. **Check for Updates…** in the TheGit menu asks on demand.
 
 ```bash
 brew update && brew upgrade thegit

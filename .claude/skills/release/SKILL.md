@@ -19,9 +19,12 @@ One command does the whole release:
 scripts/release.sh <MAJOR.MINOR.PATCH>
 ```
 
-It checks the tree, runs the tests, tags `v<version>`, pushes the tag,
-computes the sha256 of GitHub's tarball, and points the tap
-(`zjywill/homebrew-tap`, `Formula/thegit.rb`) at it. **Never replay these
+It checks the tree, runs the tests, builds the universal DMG, tags
+`v<version>`, pushes the tag, publishes the GitHub Release with the DMG
+attached and generated notes, computes the sha256 of GitHub's tarball, and
+points the tap (`zjywill/homebrew-tap`, `Formula/thegit.rb`) at it. It needs
+`gh` installed and logged in; it checks for that before touching anything.
+**Never replay these
 steps by hand** — the formula's `url` and `sha256` must move together, and
 the sha can only be computed after the tag exists on GitHub. That ordering
 is the reason the script exists; hand-running the steps is how half-releases
@@ -120,11 +123,23 @@ curl -fsSL https://api.github.com/repos/zjywill/homebrew-tap/contents/Formula/th
 demand; the script already retries 5×. Only investigate if all retries
 fail.
 
-**No DMG, no bottle — on purpose.** The app is ad-hoc signed; downloaded
-over the network it would be quarantined and refused by Gatekeeper. The
-formula builds from source on the user's machine instead. Don't "improve"
-the release by publishing binaries unless a Developer ID + notarisation
-exists.
+**Release created but the DMG isn't attached.** `gh release create` uploads
+the asset in the same call, so a release with no asset means the upload was
+rejected after the release existed. Don't rerun the script — the tag is
+already there. Attach it on its own:
+
+```bash
+gh release upload vX.Y.Z dist/TheGit-X.Y.Z.dmg --clobber
+```
+
+**The DMG is unsigned, and that is the current state, not a bug.** It is
+ad-hoc signed, so a downloader hits Gatekeeper's "can't be opened" once; the
+generated release notes and the README both spell out the Open Anyway /
+`xattr -dr com.apple.quarantine` way through. Homebrew stays the recommended
+channel. When a Developer ID exists, sign in `bundle.sh`
+(`codesign --options runtime`, then `notarytool submit --wait`, then
+`stapler staple` the DMG) and delete the warning block from release.sh's
+notes — nothing else in the pipeline changes, and users just replace the app.
 
 ## Clean-slate check (optional)
 
