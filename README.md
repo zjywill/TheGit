@@ -1,134 +1,133 @@
+<div align="center">
+
+<img src="docs/icon.png" width="128" alt="TheGit">
+
 # TheGit
 
-A lightweight native Git client for macOS, written in SwiftUI.
+**A native Git client for macOS that doesn't ship a browser.**
 
-TheGit gives you the things a desktop Git client is actually for — a readable
-commit graph, a stage/diff/commit loop that stays out of your way, and one
-place for branches, stashes, worktrees, submodules, tags and pull requests —
-without the weight of a full IDE or an account to sign into.
+14 MB. One process. ~95 MB of RAM with a repository open.<br>
+No account, no telemetry, no sign-in wall.
 
-It drives the `git` binary you already have. There is no embedded Git engine,
-no daemon, and no service in the middle: your credential helper, SSH keys and
-hooks work exactly as they do in the terminal.
+[![Release](https://img.shields.io/github/v/release/zjywill/TheGit?color=blue)](https://github.com/zjywill/TheGit/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/zjywill/TheGit/total?color=blue)](https://github.com/zjywill/TheGit/releases)
+[![macOS](https://img.shields.io/badge/macOS-14%2B-black?logo=apple)](#requirements)
+[![Swift](https://img.shields.io/badge/SwiftUI-native-orange?logo=swift&logoColor=white)](Sources/TheGit)
+[![License](https://img.shields.io/github/license/zjywill/TheGit?color=green)](LICENSE)
+
+</div>
+
+<img src="docs/screenshot.png" alt="TheGit showing its own repository: branch sidebar, commit graph, staging panel">
+
+## Get it
+
+```bash
+brew install zjywill/tap/thegit
+```
+
+Or [**download the DMG**](https://github.com/zjywill/TheGit/releases/latest) —
+universal, 4.9 MB, no toolchain needed.
+[Install details, including the first-launch Gatekeeper prompt](#install), are below.
 
 ---
 
-## Why it's fast
+## Why it's 45× smaller
 
 The mainstream desktop clients ship a browser to draw a commit graph.
-GitKraken is an Electron app: Chromium, Node, and a fleet of helper
-processes, all resident before it has read a single commit. Sourcetree is
-native, but it bundles its own Git and Git-LFS and keeps a background
-scanning layer over every repository you've ever added.
+GitKraken is an Electron app: Chromium, Node, and a fleet of helper processes,
+all resident before it has read a single commit.
 
-TheGit is a single native SwiftUI process that shells out to `git`. That's
-the whole architecture, and it's the whole performance story.
-
-Measured on this machine — macOS 26.5, Apple M4 Pro:
+TheGit is a single native SwiftUI process that shells out to `git`. That's the
+whole architecture, and it's the whole performance story.
 
 | | TheGit | GitKraken |
 |---|---:|---:|
-| Application bundle | **11 MB** (universal) | 621 MB |
-| Release DMG | **4.4 MB** | — |
-| Processes at rest | **1** | 7+ (main, GPU, renderer, plugin, crashpad…) |
+| Application bundle | **14 MB** (universal) | 621 MB |
+| Release DMG | **4.9 MB** | — |
+| Processes at rest | **1** | 7+ |
 | Resident memory, repo open | **~95 MB** | ~1.6 GB |
-| Chromium bundled | none | 261 MB Electron framework |
+| Chromium bundled | none | 261 MB |
 
-That's roughly **56× smaller on disk and 17× lighter in RAM** than GitKraken
-for the same job — reading a repository and committing to it.
+Where that shows up in use:
 
-Where the difference shows up in use:
-
-- **Launch is instant.** No Chromium bootstrap, no renderer handshake, no
-  splash screen. The window is a native `WindowGroup`.
-- **Nothing indexes in the background.** Repository state comes from `git`
-  when something actually changes; an FSEvents watcher decides when that is,
-  rather than a timer polling every repo you've ever opened.
-- **The graph is laid out in Swift, not in a DOM.** Lane assignment is a
-  single pass over the commit list (see `Core/GraphLayout.swift`), drawn with
-  SwiftUI shapes — no virtual DOM diff between you and a scroll.
-- **Scrolling and zoom are AppKit's.** Five UI zoom levels relayout natively
+- **Launch is instant** — no Chromium bootstrap, no splash screen.
+- **Nothing indexes in the background** — an FSEvents watcher decides when
+  state actually changed, instead of a timer polling every repo you ever opened.
+- **The graph is laid out in Swift, not in a DOM** — one pass over the commit
+  list ([`Core/GraphLayout.swift`](Sources/TheGit/Core/GraphLayout.swift)),
+  drawn with SwiftUI shapes.
+- **Scrolling and zoom are AppKit's** — five zoom levels relayout natively
   instead of scaling a web view.
-- **No account, no telemetry, no sign-in wall.** Nothing has to reach a
-  server before you can look at your own repository.
 
-The trade is deliberate: TheGit is macOS-only and does exactly what `git`
-does. It won't grow a cross-platform UI toolkit, and it won't grow a
-built-in issue tracker.
+It drives the `git` binary you already have. No embedded Git engine, no daemon,
+no service in the middle: your credential helper, SSH keys and hooks work
+exactly as they do in the terminal.
 
-> Numbers above are from one machine with one mid-size repository open;
-> measure your own with Activity Monitor. GitKraken's figures are from the
-> installed 621 MB build, summed across all its processes.
+The trade is deliberate — TheGit is macOS-only and does exactly what `git`
+does. It won't grow a cross-platform UI toolkit or a built-in issue tracker.
+
+> Measured on macOS 26.5 / Apple M4 Pro with one mid-size repository open;
+> GitKraken's figures are summed across all its processes. Measure your own
+> with Activity Monitor.
 
 ---
 
-## Highlights
+## What you get
 
-**A commit graph you can read.** Branch lines carry their own color rather
-than inheriting a lane's, so a branch stays the same color for its whole life
-even when lanes get reused. Your uncommitted work shows up as a dashed WIP
-node at the top, connected to HEAD.
+🌳 **A commit graph you can read.** Branch lines carry their own color rather
+than inheriting a lane's, so a branch stays one color for its whole life even
+when lanes get reused. Uncommitted work shows up as a dashed WIP node at the
+top, connected to HEAD.
 
-**Three panes, one screen.** Branches on the left, graph in the middle,
-staging area on the right. Click a file and the diff overlays the graph
-instead of shoving the panes around; press <kbd>Esc</kbd> to go back.
+🪟 **Three panes, one screen.** Branches left, graph middle, staging right.
+Click a file and the diff overlays the graph instead of shoving the panes
+around; <kbd>Esc</kbd> goes back.
 
-**Everything in the sidebar.** Local and remote branches in a foldable tree
+📚 **Everything in the sidebar.** Local and remote branches in a foldable tree
 with the current branch pinned on top, plus Tags, Stashes, Worktrees,
-Submodules, Git LFS, and — if `gh` or `glab` is installed and logged in —
-your open Pull/Merge Requests.
+Submodules, Git LFS, and — if `gh` or `glab` is logged in — your open
+Pull/Merge Requests.
 
-**Staging that matches how you work.** Stage or unstage per file or all at
-once, discard, ignore (repo-wide or `.git/info/exclude`), stash just the
-staged or just the unstaged files, create a patch from a file's changes, and
-amend the previous commit.
+✅ **Staging that matches how you work.** Stage or unstage per file or all at
+once, discard, ignore (repo-wide or `.git/info/exclude`), stash just the staged
+or just the unstaged, create a patch from a file's changes, amend.
 
-**Branch operations without the man page.** Merge, rebase, cherry-pick,
-revert, reset, fast-forward, tag, push/pull/fetch, set or clear upstream,
-create a worktree — from the branch and commit context menus. When a merge or
-rebase stops on a conflict, the app shows the operation state with Continue
-and Abort, and each conflicted file offers "take ours / take theirs".
+🔀 **Branch operations without the man page.** Merge, rebase, cherry-pick,
+revert, reset, fast-forward, tag, push/pull/fetch, set upstream, create a
+worktree — from the context menus. When a merge or rebase stops on a conflict,
+you get Continue and Abort plus "take ours / take theirs" per file.
 
-**Cleanup.** Finds branches whose PR is merged, branches squash-merged into
+🧹 **Cleanup.** Finds branches whose PR is merged, branches squash-merged into
 the default branch, branches whose upstream is gone, and stale worktrees —
 counts the commits that would be lost, and deletes nothing until you click.
 
-**AI commit messages (optional, off by default).** Point it at any
-OpenAI-compatible or Anthropic-compatible provider, and the **Generate**
-button turns your staged diff into a commit message — Conventional Commits or
-a plain summary, in English, Chinese, or matching whatever the repo already
-uses. The API key goes in the login keychain, never UserDefaults.
+🤖 **AI commit messages** *(optional, off by default)*. Point it at any
+OpenAI- or Anthropic-compatible provider and **Generate** turns your staged
+diff into a commit message — Conventional Commits or a plain summary, in
+English, Chinese, or whatever the repo already uses. The API key goes in the
+login keychain, never UserDefaults.
 
-**It notices changes made elsewhere.** An FSEvents watcher refreshes the view
-when you commit, checkout, or edit files from a terminal.
+👀 **It notices changes made elsewhere.** Commit, checkout or edit from a
+terminal and the view refreshes itself.
 
-**Multiple repositories** in tabs, and five UI zoom levels
-(<kbd>⌘=</kbd> / <kbd>⌘-</kbd> / <kbd>⌘0</kbd>) for whatever display you're on.
+🗂️ **Multiple repositories in tabs**, and five UI zoom levels
+(<kbd>⌘=</kbd> / <kbd>⌘-</kbd> / <kbd>⌘0</kbd>).
 
 ---
 
 ## Privacy
 
 TheGit talks to exactly two things by default: the `git` binary and your
-filesystem.
+filesystem. Three features can reach the network, and you control all three:
 
-Two features can reach the network, and both are opt-in:
-
-- **Author avatars** (View menu) — fetches from Gravatar and GitHub.
-- **AI commit messages** (Settings) — sends your staged diff to the provider
-  you configured, under a size budget you choose.
+| Feature | Reaches | Default |
+|---|---|---|
+| Author avatars | Gravatar, GitHub | **Off** — View menu |
+| AI commit messages | the provider you configured | **Off** — Settings |
+| Update check | `api.github.com`, once per launch | On — one request, no identifiers |
 
 Pull request listing uses the `gh` / `glab` CLI you already authenticated;
 TheGit never handles those tokens itself.
-
----
-
-## Requirements
-
-- macOS 14 (Sonoma) or later
-- Xcode 15+ / Swift 5.9 toolchain to build
-- `git` on your `PATH`
-- Optional: `git-lfs`, and `gh` or `glab` for pull requests
 
 ---
 
@@ -145,39 +144,24 @@ you produced yourself is never quarantined, so nothing has to be talked past
 Gatekeeper. A first build takes a minute or two and needs an Xcode 15+
 toolchain.
 
-Homebrew installs the bundle inside its own prefix and adds a `thegit` command
-to your `PATH`. A formula can't write to `/Applications`, so copy it there
-yourself:
+Homebrew can't write to `/Applications`, so copy the bundle there yourself:
 
 ```bash
-cp -R /opt/homebrew/opt/thegit/TheGit.app /Applications/
+cp -R "$(brew --prefix thegit)/TheGit.app" /Applications/
 ```
 
-(On an Intel Mac the prefix is `/usr/local` instead.)
-
-A **copy**, not a symlink. Symlinking is the tidier-looking option and it does
-give you a working Finder icon, but Spotlight indexes neither the Homebrew
-prefix nor the target of a symlink in `/Applications` — the app then never
-shows up in Spotlight or the Applications view. The cost of copying is one
-command after each upgrade, below.
-
-Homebrew 6 asks you to trust third-party taps. Installing the formula by its
-full name as above records that trust for you; if a later command says the tap
-is being ignored, this re-adds it:
-
-```bash
-brew trust --formula zjywill/tap/thegit
-```
+A **copy**, not a symlink — Spotlight indexes neither the Homebrew prefix nor
+the target of a symlink, and the app would never show up in search.
 
 ### DMG
 
 Every release ships a universal `.dmg` on the
 [Releases page](https://github.com/zjywill/TheGit/releases/latest) — no
-toolchain, no Homebrew, 4.4 MB.
+toolchain, no Homebrew.
 
 TheGit isn't signed with an Apple Developer ID yet, so macOS blocks the first
-launch with "TheGit can't be opened". This is Gatekeeper refusing an
-unnotarised download, not a problem with the app, and it only happens once:
+launch with "TheGit can't be opened". That's Gatekeeper refusing an unnotarised
+download, not a problem with the app, and it happens once:
 
 1. Open the DMG and drag TheGit to Applications.
 2. Try to open it; macOS refuses.
@@ -189,14 +173,28 @@ Or skip the dialog entirely:
 xattr -dr com.apple.quarantine /Applications/TheGit.app
 ```
 
-If that trade doesn't appeal, use Homebrew above — building from source never
-hits this.
+If that trade doesn't appeal, use Homebrew — building from source never hits it.
 
-### Let an AI agent install it for you
+### Upgrade
 
-Using Claude Code, Codex, or any agent with a terminal? Paste this prompt
-and it will handle the whole thing — install, the `/Applications` copy, and
-verification:
+TheGit tells you when a new release exists: it asks GitHub at launch (at most
+every six hours) and shows a one-line banner if there's a newer version. It
+never downloads or installs anything by itself — the banner links to the
+release page, and dismissing it silences that version for good.
+**Check for Updates…** in the TheGit menu asks on demand.
+
+```bash
+brew update && brew upgrade thegit
+rm -rf /Applications/TheGit.app && cp -R "$(brew --prefix thegit)/TheGit.app" /Applications/
+```
+
+Quit TheGit first — a running app keeps its old bundle. `brew update` must
+report "Updated 1 tap"; "Already up-to-date" means the tap never moved.
+
+<details>
+<summary><b>Let an AI agent install it for you</b></summary>
+
+Using Claude Code, Codex, or any agent with a terminal? Paste this:
 
 ```text
 Install TheGit (https://github.com/zjywill/TheGit), a native macOS Git
@@ -214,38 +212,25 @@ If it's already installed, upgrade instead: quit TheGit, run
 brew update && brew upgrade thegit, then redo step 2.
 ```
 
-### Upgrade
+</details>
 
-TheGit tells you when there's a new release: it asks GitHub once at launch
-(at most every six hours) and shows a one-line banner above the tab bar if a
-newer version exists. It never downloads or installs anything by itself —
-the banner links to the release page, and dismissing it silences that version
-for good. **Check for Updates…** in the TheGit menu asks on demand.
+<details>
+<summary><b>Homebrew tap trust, versions, uninstall</b></summary>
 
-```bash
-brew update && brew upgrade thegit
-```
-
-`brew update` refreshes the tap — without it, `brew upgrade` only ever sees
-the formula version you already have. Quit TheGit first: a running app keeps
-using its old bundle until you relaunch it.
-
-Then refresh the copy in `/Applications`:
+Homebrew 6 asks you to trust third-party taps. Installing by full name records
+that trust; if a later command says the tap is being ignored:
 
 ```bash
-rm -rf /Applications/TheGit.app && cp -R /opt/homebrew/opt/thegit/TheGit.app /Applications/
+brew trust --formula zjywill/tap/thegit
 ```
 
-`opt/thegit` always points at whichever version Homebrew currently has, so
-that line is the same after every upgrade.
-
-To see which version you're on:
+Which version you're on:
 
 ```bash
 brew list --versions thegit
 ```
 
-### Uninstall
+Uninstall:
 
 ```bash
 brew uninstall thegit && brew untap zjywill/tap
@@ -254,44 +239,35 @@ brew uninstall thegit && brew untap zjywill/tap
 That doesn't touch the copy in `/Applications` — remove it with
 `rm -rf /Applications/TheGit.app`. Your settings (the `com.zjywill.TheGit`
 `defaults` domain) and the API key in the login keychain survive both an
-upgrade and an uninstall; delete them by hand if you want a clean slate.
+upgrade and an uninstall; delete them by hand for a clean slate.
 
-### Build the app yourself
-
-```bash
-scripts/bundle.sh
-```
-
-This produces a universal (arm64 + x86_64) `dist/TheGit.app` and a
-`dist/TheGit-<version>.dmg`. Useful knobs: `UNIVERSAL=0` builds for this Mac
-only, `DMG=0` assembles the `.app` and stops, `DEST=…` picks the output
-directory. The bundle is **ad-hoc signed**, which is enough
-to run on your own Mac and on any Mac you copy it to by hand — it is not
-enough for network distribution, where Gatekeeper wants a Developer ID and
-notarisation.
-
-If you copy the DMG over the network and macOS refuses to open the app, clear
-the quarantine flag:
-
-```bash
-xattr -dr com.apple.quarantine /Applications/TheGit.app
-```
-
-### Run from source
-
-```bash
-swift run
-```
-
-### Tests
-
-```bash
-swift test
-```
+</details>
 
 ---
 
-## Project layout
+## Requirements
+
+- macOS 14 (Sonoma) or later
+- `git` on your `PATH`
+- Xcode 15+ / Swift 5.9 toolchain **to build** (not needed for the DMG)
+- Optional: `git-lfs`, and `gh` or `glab` for pull requests
+
+<details>
+<summary><b>Build it yourself</b></summary>
+
+```bash
+scripts/bundle.sh     # universal dist/TheGit.app + dist/TheGit-<version>.dmg
+swift run             # run from source
+swift test            # tests
+```
+
+Useful knobs: `UNIVERSAL=0` builds for this Mac only, `DMG=0` assembles the
+`.app` and stops, `DEST=…` picks the output directory. The bundle is **ad-hoc
+signed** — enough to run on your own Mac and on any Mac you copy it to by
+hand, not enough for network distribution, where Gatekeeper wants a Developer
+ID and notarisation.
+
+**Project layout**
 
 ```
 Sources/TheGit/
@@ -299,13 +275,15 @@ Sources/TheGit/
   State/       AppState (open repos) and RepoState (one repository)
   UI/          sidebar, graph, diffs, commit panel, settings
 Tests/         parser, graph, cleanup and repo integration tests
-scripts/       bundle.sh (app + DMG), release.sh (tag + tap), make-icon.py,
-               sync-providers.py
+scripts/       bundle.sh (app + DMG), release.sh (tag + release + tap),
+               make-icon.py, sync-providers.py
 ```
 
 The AI provider catalog in `Sources/TheGit/Resources/providers.json` is
-generated and committed; `scripts/sync-providers.py` regenerates it and is
-only run when someone wants to refresh the list.
+generated and committed; `scripts/sync-providers.py` regenerates it and is only
+run to refresh the list.
+
+</details>
 
 ---
 
