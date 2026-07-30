@@ -490,11 +490,34 @@ struct GraphRowView: View {
             }
     }
 
+    /// The current branch when this row is its upstream tip and the branch is
+    /// purely behind — the one state where `git merge --ff-only` just works, so
+    /// it's also the only state where the offer can't fail.
+    private var fastForwardHere: (branch: Branch, upstream: String)? {
+        guard let branch = repo.snapshot.localBranches.first(where: \.isCurrent),
+              branch.behind > 0, branch.ahead == 0,
+              let upstream = branch.upstream, !branch.upstreamGone,
+              repo.snapshot.remoteBranches.first(where: { $0.name == upstream })?.tipHash
+                  == row.commit.hash
+        else { return nil }
+        return (branch, upstream)
+    }
+
     /// GitKraken-style commit context menu.
     @ViewBuilder
     private var menuItems: some View {
         let commit = row.commit
         let current = repo.snapshot.currentBranch ?? "HEAD"
+
+        // GitKraken leads with the catch-up move, and so do we: right-clicking
+        // the upstream tip while HEAD sits behind it means "get me there", and
+        // Checkout alone leaves you a pull short.
+        if let ff = fastForwardHere {
+            Button("Fast-forward \(ff.branch.name) to \(ff.upstream) (↓\(ff.branch.behind))") {
+                repo.fastForward(ff.branch)
+            }
+            Divider()
+        }
 
         // Branch tips on this commit come first: switching branches is the
         // most common intent when right-clicking a labeled row.
