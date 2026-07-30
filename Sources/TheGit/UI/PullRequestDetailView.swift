@@ -352,7 +352,11 @@ struct PullRequestDetailView: View {
                 .help("Fetch the \(forge.itemNoun.lowercased()) again")
             }
             .padding(.horizontal, FileListMetrics.inset)
-            .padding(.vertical, 8)
+            // The same 34pt as every other header in the app, the diff
+            // header beside this one included — the two columns sit under
+            // one continuous line, and 8pt of padding around a 20pt button
+            // made this side 2pt taller than that one.
+            .frame(height: 34)
 
             Divider()
 
