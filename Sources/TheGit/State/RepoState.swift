@@ -305,6 +305,21 @@ final class RepoState: ObservableObject, Identifiable {
     @Published var missingForgeCLI: Forge?
     @Published var pullRequests: [PullRequest] = []
     @Published var forgeError: ForgeFailure?
+    /// Set once forge detection has concluded, however it concluded — a
+    /// GitHub remote, a missing CLI, a host that is no forge at all. Avatars
+    /// wait on this rather than on `forge`, which stays nil in three of
+    /// those four outcomes.
+    @Published private(set) var forgeChecked = false
+
+    /// Which avatar sources this repo can offer. Telling "not known yet"
+    /// apart from "nothing to ask" is the whole point: a lookup that gives
+    /// up during the first gives up on the instance holding the answer.
+    var avatarForge: AvatarStore.ForgeContext {
+        if forge == .gitlab { return .gitlab(repoPath: path) }
+        // No remote means no forge — nothing to wait for.
+        if forgeChecked || snapshot.remoteNames.isEmpty { return .none }
+        return .unknown
+    }
     @Published var loadingPullRequests = false
     /// The "New Pull Request" sheet. Its fields live here, CleanupView-style,
     /// so the sheet survives a sidebar rebuild without losing a draft.
@@ -1387,18 +1402,22 @@ final class RepoState: ObservableObject, Identifiable {
         guard !forgeDetected, forge == nil else { return }
         guard !snapshot.remoteNames.isEmpty else { return } // no remote yet — try again later
         forgeDetected = true
-        guard let url = try? await git.remoteURL(snapshot.defaultRemote),
-              let found = ForgeClient.detect(remoteURL: url)
-        else { return }
-        forgeHost = ForgeParsers.host(of: url)
-        switch found {
-        case .ready(let forge):
-            self.forge = forge
+        let url = try? await git.remoteURL(snapshot.defaultRemote)
+        if let url { forgeHost = ForgeParsers.host(of: url) }
+        switch url.flatMap({ ForgeClient.detect(remoteURL: $0) }) {
+        case .ready(let found):
+            forge = found
             missingForgeCLI = nil
-            await loadPullRequests()
-        case .missingCLI(let forge):
-            missingForgeCLI = forge
+        case .missingCLI(let found):
+            missingForgeCLI = found
+        case nil:
+            break
         }
+        // Published before the pull-request load, not after: avatars are
+        // waiting on this, and they have no business waiting on a network
+        // round trip for merge requests.
+        forgeChecked = true
+        if forge != nil { await loadPullRequests() }
     }
 
     /// The sidebar's "check again" after the user installs gh/glab: run

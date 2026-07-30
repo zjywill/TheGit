@@ -422,7 +422,8 @@ struct GraphRowView: View {
                 avatar: avatars.isEnabled
                     ? avatars.avatar(
                         for: row.commit.email,
-                        gitlabRepo: repo.forge == .gitlab ? repo.path : nil
+                        name: row.commit.author,
+                        forge: repo.avatarForge
                     )
                     : nil,
                 scrollX: scrollX,

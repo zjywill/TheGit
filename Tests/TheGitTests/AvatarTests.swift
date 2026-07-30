@@ -87,6 +87,131 @@ final class AvatarTests: XCTestCase {
         XCTAssertEqual(onlyGravatar.count, 1)
     }
 
+    // MARK: - Forge context
+
+    /// The distinction the whole GitLab path rests on: detection is async, so
+    /// "not known yet" arrives first and must never be read as "no GitLab
+    /// here" — a miss recorded then would outlive the lookup that owns every
+    /// self-hosted avatar.
+    func testForgeContextSeparatesUnknownFromNone() {
+        XCTAssertFalse(AvatarStore.ForgeContext.unknown.isResolved)
+        XCTAssertNil(AvatarStore.ForgeContext.unknown.repoPath)
+
+        XCTAssertTrue(AvatarStore.ForgeContext.none.isResolved)
+        XCTAssertNil(AvatarStore.ForgeContext.none.repoPath)
+
+        let gitlab = AvatarStore.ForgeContext.gitlab(repoPath: "/tmp/repo")
+        XCTAssertTrue(gitlab.isResolved)
+        XCTAssertEqual(gitlab.repoPath, "/tmp/repo")
+    }
+
+    // MARK: - Resolving a commit author to a GitLab user
+
+    /// Both git conventions, in order: the display name a person configures,
+    /// and the login-shaped address a company instance hands out.
+    func testGitLabSearchTerms() {
+        XCTAssertEqual(
+            AvatarStore.gitlabSearchTerms(name: "Simon He", email: "hejian@acme.cn"),
+            ["Simon He", "hejian"]
+        )
+        // Name equal to the local part is one term, not two lookups.
+        XCTAssertEqual(
+            AvatarStore.gitlabSearchTerms(name: "zhangjunyi", email: "ZhangJunYi@acme.cn"),
+            ["zhangjunyi"]
+        )
+        XCTAssertEqual(
+            AvatarStore.gitlabSearchTerms(name: "  ", email: "zjywill@gmail.com"),
+            ["zjywill"]
+        )
+        XCTAssertTrue(AvatarStore.gitlabSearchTerms(name: "", email: "").isEmpty)
+    }
+
+    /// The uploaded avatar this whole path exists for: the instance knows
+    /// the author as a user, and only the instance has that image.
+    func testGitLabUserAvatarMatchesUsername() {
+        let json = """
+        [{"username":"zhangjunyi","name":"zhangjunyi",\
+        "avatar_url":"https://gitlab.acme.cn/uploads/-/system/user/avatar/45/avatar.png"}]
+        """
+        XCTAssertEqual(
+            AvatarStore.gitlabUserAvatar(json, name: "zhangjunyi", email: "zhangjunyi@acme.cn")?
+                .absoluteString,
+            "https://gitlab.acme.cn/uploads/-/system/user/avatar/45/avatar.png"
+        )
+    }
+
+    /// A display name matches the user's full name, not their login.
+    func testGitLabUserAvatarMatchesFullName() {
+        let json = """
+        [{"username":"simon","name":"Simon He",\
+        "avatar_url":"https://gitlab.acme.cn/uploads/-/system/user/avatar/43/avatar.png"}]
+        """
+        XCTAssertNotNil(
+            AvatarStore.gitlabUserAvatar(json, name: "Simon He", email: "674949287@qq.com")
+        )
+    }
+
+    /// GitLab's search is a substring match, so it returns strangers too.
+    /// Nothing but an exact, unambiguous hit may pick a face.
+    func testGitLabUserAvatarRefusesInexactAndAmbiguousHits() {
+        let strangers = """
+        [{"username":"lisa","name":"Lisa Wu","avatar_url":"https://gitlab.acme.cn/a.png"},\
+        {"username":"lisi","name":"Li Si","avatar_url":"https://gitlab.acme.cn/b.png"}]
+        """
+        XCTAssertNil(AvatarStore.gitlabUserAvatar(strangers, name: "li", email: "li@acme.cn"))
+
+        let twins = """
+        [{"username":"jdoe","name":"John Doe","avatar_url":"https://gitlab.acme.cn/a.png"},\
+        {"username":"jdoe2","name":"John Doe","avatar_url":"https://gitlab.acme.cn/b.png"}]
+        """
+        XCTAssertNil(AvatarStore.gitlabUserAvatar(twins, name: "John Doe", email: "jd@acme.cn"))
+
+        XCTAssertNil(AvatarStore.gitlabUserAvatar("[]", name: "zjywill", email: "z@gmail.com"))
+        XCTAssertNil(AvatarStore.gitlabUserAvatar("not json", name: "a", email: "a@b.c"))
+    }
+
+    // MARK: - The project member list
+
+    /// One call per repo instead of one per author: every member is indexed
+    /// under both their login and their display name, so the graph's authors
+    /// resolve without a process each.
+    func testMemberDirectoryIndexesLoginAndDisplayName() {
+        let json = """
+        [{"username":"yanglingfeng","name":"yanglingfeng",\
+        "avatar_url":"https://gitlab.acme.cn/uploads/-/system/user/avatar/8/avatar.png"},\
+        {"username":"simon","name":"Simon He",\
+        "avatar_url":"https://secure.gravatar.com/avatar/85?s=80&d=identicon"}]
+        """
+        let directory = AvatarStore.gitlabDirectory(json)
+        XCTAssertEqual(
+            directory["yanglingfeng"]?.absoluteString,
+            "https://gitlab.acme.cn/uploads/-/system/user/avatar/8/avatar.png"
+        )
+        // Both keys reach the same member.
+        XCTAssertEqual(directory["simon"], directory["simon he"])
+        XCTAssertNil(directory["Simon He"], "keys are lower-cased for matching")
+    }
+
+    /// Two members sharing a display name is the one case where a directory
+    /// hit would be a coin flip. Drop the key; initials are the honest answer.
+    func testMemberDirectoryDropsSharedNames() {
+        let json = """
+        [{"username":"jdoe","name":"John Doe","avatar_url":"https://gitlab.acme.cn/a.png"},\
+        {"username":"jdoe2","name":"John Doe","avatar_url":"https://gitlab.acme.cn/b.png"}]
+        """
+        let directory = AvatarStore.gitlabDirectory(json)
+        XCTAssertNil(directory["john doe"])
+        // The logins are still unambiguous.
+        XCTAssertEqual(directory["jdoe"]?.absoluteString, "https://gitlab.acme.cn/a.png")
+        XCTAssertEqual(directory["jdoe2"]?.absoluteString, "https://gitlab.acme.cn/b.png")
+    }
+
+    func testMemberDirectorySurvivesJunk() {
+        XCTAssertTrue(AvatarStore.gitlabDirectory("not json").isEmpty)
+        XCTAssertTrue(AvatarStore.gitlabDirectory("[]").isEmpty)
+        XCTAssertTrue(AvatarStore.gitlabDirectory(#"[{"username":"a"}]"#).isEmpty)
+    }
+
     // MARK: - Forge-provided URLs
 
     /// The forge is the authority: its identicon choice is what its own web

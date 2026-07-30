@@ -171,7 +171,7 @@ struct AppearanceSettingsView: View {
                 }
                 SettingsSection(
                     title: "Commit Graph",
-                    footer: "Avatars are looked up on Gravatar and GitHub by commit author email — the one feature that talks to a server you didn't configure, which is why it's off until you turn it on."
+                    footer: "On a GitLab remote, avatars come from that instance — including a self-hosted one — by matching the commit author against its user list through `glab`, so uploaded faces work with no token to paste here. Everyone else falls back to Gravatar and GitHub. This is the one feature that talks to a server you didn't configure, which is why it's off until you turn it on."
                 ) {
                     SettingsRow(title: "Author avatars") {
                         Toggle("Author avatars", isOn: $avatars.isEnabled)

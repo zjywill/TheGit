@@ -73,8 +73,16 @@ struct TheGitApp: App {
             CommandGroup(after: .toolbar) {
                 // Off by default and opt-in from here: avatars are the one
                 // feature that reaches a server the user didn't configure.
-                Toggle("Author Avatars", isOn: $avatars.isEnabled)
-                    .help("Fetch author avatars from Gravatar and GitHub")
+                //
+                // A title that swaps, not a Toggle: a Toggle draws its
+                // checkmark inside the label, which pushes the title left of
+                // every other item in a menu that reserves an icon column —
+                // and "Show / Hide" is what the View menu does elsewhere on
+                // this Mac anyway.
+                Button(avatars.isEnabled ? "Hide Author Avatars" : "Show Author Avatars") {
+                    avatars.isEnabled.toggle()
+                }
+                .help("Look up author avatars on GitLab, Gravatar, and GitHub")
                 Divider()
                 // ⌘= rather than ⌘⇧= : matches what browsers actually bind.
                 // The level change is deferred out of the key-event cycle
