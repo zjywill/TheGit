@@ -362,13 +362,13 @@ struct RepoTabsBar: View {
 
     private var centers: [CGFloat] {
         TabStrip.centers(
-            widths: appState.repos.map { widths[$0.id] ?? 0 },
+            widths: appState.openRepos.map { widths[$0.id] ?? 0 },
             spacing: Self.spacing
         )
     }
 
     private func dragChanged(_ id: String, _ translation: CGFloat) {
-        guard let current = appState.repos.firstIndex(where: { $0.id == id }) else { return }
+        guard let current = appState.openTabIDs.firstIndex(of: id) else { return }
         if draggingID != id {
             draggingID = id
             dragStartCenter = centers[current]
@@ -406,8 +406,8 @@ struct RepoTabsBar: View {
             DashboardTab()
             // Pinned: it sits outside the reorderable ForEach below, so it
             // can't be dragged out of first place and the drag arithmetic
-            // (which indexes appState.repos) never has to know about it.
-            ForEach(appState.repos) { repo in
+            // (which indexes appState.openTabIDs) never has to know about it.
+            ForEach(appState.openRepos) { repo in
                 RepoTab(
                     repo: repo,
                     isActive: repo.id == appState.activeRepoID,
@@ -592,7 +592,7 @@ struct RepoTab: View {
                 .zoomFont(12, weight: isActive ? .semibold : .regular)
                 .lineLimit(1)
             Button {
-                appState.close(repo: repo)
+                appState.closeTab(repo: repo)
             } label: {
                 Image(systemName: "xmark")
                     .zoomFont(8, weight: .bold)
@@ -662,12 +662,16 @@ struct RepoTab: View {
         )
         .contextTarget("tab:" + repo.id, repo)
         .contextMenu {
-            Button("Close Tab") { appState.close(repo: repo) }
+            Button("Close Tab") { appState.closeTab(repo: repo) }
             Button("Close Other Tabs") {
-                for other in appState.repos where other.id != repo.id {
-                    appState.close(repo: other)
+                for other in appState.openRepos where other.id != repo.id {
+                    appState.closeTab(repo: other)
                 }
             }
+            Divider()
+            // Closing a tab keeps the repo on the Dashboard, so the one action
+            // that actually forgets it has to be sayable from here too.
+            Button("Remove from TheGit") { appState.remove(repo: repo) }
             Divider()
             Button("Copy Repository Path") { RepoState.copyToPasteboard(repo.path) }
             Button("Show in Finder") {
