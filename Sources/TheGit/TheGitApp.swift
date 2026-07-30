@@ -408,21 +408,7 @@ struct RepoTabsBar: View {
                     dragEnded: dragEnded
                 )
             }
-            Button {
-                appState.openRepoPanel()
-            } label: {
-                Image(systemName: "plus")
-                    .frame(width: 28 * zoom, height: 28 * zoom)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.pressEffect)
-            .foregroundStyle(.secondary)
-            // The one ⌘O in the window: this bar is on every screen, so the
-            // shortcut lives here rather than in a toolbar or empty state
-            // that comes and goes with the screen.
-            .keyboardShortcut("o")
-            .help("Open Repository (⌘O)")
-            .onHover { AppState.pointerOverTopControl = $0 }
+            NewTabButton()
             Spacer()
         }
         .coordinateSpace(name: Self.coordinateSpace)
@@ -434,6 +420,46 @@ struct RepoTabsBar: View {
         .frame(height: 38 * zoom)
         .background(.bar)
         .onPreferenceChange(TabWidthKey.self) { widths = $0 }
+    }
+}
+
+/// The + at the end of the tab strip. Its own view, not four modifiers on a
+/// Button inside `TabStrip`: hover is @State, and inside TabStrip every
+/// pointer crossing would invalidate the whole strip — including the tabs
+/// mid-drag.
+struct NewTabButton: View {
+    @EnvironmentObject var appState: AppState
+    @Environment(\.uiZoom) private var zoom
+    @State private var hovering = false
+
+    var body: some View {
+        Button {
+            appState.openRepoPanel()
+        } label: {
+            Image(systemName: "plus")
+                .frame(width: 28 * zoom, height: 28 * zoom)
+                // The same fill the tabs light up with, at the same corner:
+                // it sits in their row, so it answers the pointer the way
+                // they do. Without it the + was the one thing in the strip
+                // that stayed dead under the cursor.
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(hovering ? Color.primary.opacity(0.04) : .clear)
+                        .animation(.easeOut(duration: 0.12), value: hovering)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.pressEffect)
+        .foregroundStyle(hovering ? Color.primary.opacity(0.8) : .secondary)
+        // The one ⌘O in the window: this bar is on every screen, so the
+        // shortcut lives here rather than in a toolbar or empty state
+        // that comes and goes with the screen.
+        .keyboardShortcut("o")
+        .help("Open Repository (⌘O)")
+        .onHover {
+            hovering = $0
+            AppState.pointerOverTopControl = $0
+        }
     }
 }
 
