@@ -5,6 +5,31 @@ import SwiftUI
 struct RepoView: View {
     @ObservedObject var repo: RepoState
 
+    /// User-dragged pane widths, persisted across relaunches and Launchpad
+    /// round-trips. Read once per view identity into @State: idealWidth
+    /// only matters on the split's first layout, and a live value would
+    /// have every UserDefaults echo re-entering layout mid-drag.
+    @State private var sidebarIdealWidth = RepoView.storedWidth(
+        key: RepoView.sidebarWidthKey, fallback: 240)
+    @State private var commitIdealWidth = RepoView.storedWidth(
+        key: RepoView.commitWidthKey, fallback: 300)
+
+    private static let sidebarWidthKey = "sidebarPaneWidth"
+    private static let commitWidthKey = "commitPanelWidth"
+
+    private static func storedWidth(key: String, fallback: CGFloat) -> CGFloat {
+        let width = UserDefaults.standard.double(forKey: key)
+        return width > 0 ? CGFloat(width) : fallback
+    }
+
+    /// Direct UserDefaults, not @AppStorage: the divider reports a width
+    /// per frame while dragged, and @AppStorage would republish and
+    /// rebuild all three panes at 60fps (same trap as the commit message
+    /// box, see CommitPanelView).
+    private static func store(_ width: CGFloat, key: String) {
+        UserDefaults.standard.set(Double(width), forKey: key)
+    }
+
     var body: some View {
         // Only the sidebar is keyed on the repo, and nothing above it is.
         // An id here is a demolition order: it makes SwiftUI throw the
@@ -16,9 +41,20 @@ struct RepoView: View {
         // The sidebar keeps its id — its filter box is genuinely view-local
         // and has to reset per tab.
         HSplitView {
-            SidebarView(repo: repo)
-                .id(repo.id)
-                .frame(minWidth: 200, idealWidth: 240, maxWidth: 360)
+            // The .id lives on the sidebar INSIDE a stable wrapper, never
+            // on the split child itself: an id there hands HSplitView a
+            // brand-new pane on every tab switch, and it re-balances all
+            // three panes back to ideal widths — user-dragged widths died
+            // on every switch. The ZStack keeps the pane's identity; only
+            // the sidebar (and its per-tab filter box) resets.
+            ZStack {
+                SidebarView(repo: repo)
+                    .id(repo.id)
+            }
+            .frame(minWidth: 200, idealWidth: sidebarIdealWidth, maxWidth: 360)
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
+                Self.store($0, key: Self.sidebarWidthKey)
+            }
             // The diff OVERLAYS the graph instead of replacing it: swapping
             // the split child makes HSplitView re-balance all three panes
             // (the right panel visibly changed width on every file click).
@@ -50,7 +86,10 @@ struct RepoView: View {
                     }
                 }
             }
-            .frame(minWidth: 260, idealWidth: 300, maxWidth: 420)
+            .frame(minWidth: 260, idealWidth: commitIdealWidth, maxWidth: 420)
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
+                Self.store($0, key: Self.commitWidthKey)
+            }
         }
         // Bottom centre of the panes, which lands over the oldest loaded
         // commits — the one part of this window nobody is reading when a
