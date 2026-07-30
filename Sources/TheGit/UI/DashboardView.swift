@@ -1,7 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// The window's home: every open repository on one wall of cards, each
+/// The window's home: every repository the user has added on one wall of
+/// cards — whether or not it has a tab open — each
 /// answering the two questions a tab bar can't — is there uncommitted work
 /// in there, and what happened in it most recently — under one grid that
 /// answers the question no single card can: what the last year of work has
@@ -103,11 +104,16 @@ struct DashboardView: View {
 
     /// What the count line used to say from a pinned bar above the wall. It
     /// belongs to the wall, so it moved onto the wall's own heading — one
-    /// place saying how many repos are open, not two.
+    /// place saying how big the wall is, not two.
     private var repoSummary: String {
-        let count = appState.repos.count
-        let open = "\(count) open"
-        return dirtyCount > 0 ? "\(open) · \(dirtyCount) with changes" : open
+        // How many repos there are, then how many are open — since a closed
+        // tab now leaves its card here, "N open" on its own would be a count
+        // of the wall claiming to be a count of the tab strip.
+        var parts = ["\(appState.repos.count) repositor\(appState.repos.count == 1 ? "y" : "ies")"]
+        let open = appState.openTabIDs.count
+        if open > 0 { parts.append("\(open) open") }
+        if dirtyCount > 0 { parts.append("\(dirtyCount) with changes") }
+        return parts.joined(separator: " · ")
     }
 }
 
@@ -259,7 +265,7 @@ struct ActivityLayout {
     }
 }
 
-/// The last year across every open repository, under a heading of its own:
+/// The last year across every repository on the wall, under a heading of its own:
 /// the total, the contribution grid, and which repos the grid is made of.
 /// The cards below say where each repo is standing right now; this says what
 /// the work across all of them has actually looked like, which is the one
@@ -573,9 +579,15 @@ struct RepoCardView: View {
     private var inset: CGFloat { 12 * zoom }
     private var radius: CGFloat { 10 * zoom }
 
+    /// Whether this repo already has a tab. The card does the same thing
+    /// either way — show me this repo — but what that means in words differs,
+    /// and a menu offering "Close Tab" on a repo with no tab is a no-op with a
+    /// name.
+    private var isOpen: Bool { appState.openTabIDs.contains(repo.id) }
+
     var body: some View {
         Button {
-            appState.activeRepoID = repo.id
+            appState.openTab(repo)
         } label: {
             VStack(alignment: .leading, spacing: 8 * zoom) {
                 title
@@ -618,16 +630,22 @@ struct RepoCardView: View {
         }
         .buttonStyle(.rowPressEffect)
         .onHover { hovering = $0 }
-        .help("Open \(repo.displayName)")
+        .help(isOpen ? "Switch to \(repo.displayName)" : "Open \(repo.displayName)")
         .contextMenu {
-            Button("Open") { appState.activeRepoID = repo.id }
+            Button(isOpen ? "Switch to Tab" : "Open in a Tab") { appState.openTab(repo) }
+            if isOpen {
+                Button("Close Tab") { appState.closeTab(repo: repo) }
+            }
             Divider()
             Button("Copy Repository Path") { RepoState.copyToPasteboard(repo.path) }
             Button("Show in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: repo.path)])
             }
             Divider()
-            Button("Close") { appState.close(repo: repo) }
+            // Not "Close": closing is what the tab's × does, and it now keeps
+            // the repo on this wall. This is the one that forgets it — and it
+            // touches nothing on disk, which the wording has to imply.
+            Button("Remove from TheGit") { appState.remove(repo: repo) }
         }
     }
 

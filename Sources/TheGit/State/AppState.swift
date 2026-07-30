@@ -1,10 +1,24 @@
 import AppKit
 import SwiftUI
 
-/// Top-level state: the set of open repositories (tabs).
+/// Top-level state: the repositories the user has added, and which of them
+/// currently have a tab.
+///
+/// Two lists, deliberately. They used to be one, and closing a tab therefore
+/// meant forgetting the repository: the path came off the restored list, its
+/// card left the Dashboard, and getting back to it was another trip through
+/// the open panel. A tab is a window onto a repo, not the record that it
+/// exists — so `repos` is the library (persisted, what the Dashboard is a wall
+/// of) and `openTabIDs` is the subset with a tab open, in tab order.
 @MainActor
 final class AppState: ObservableObject {
+    /// Every repository the user has added, in the order they were added
+    /// (which is the order the Dashboard's wall is laid out in).
     @Published var repos: [RepoState] = []
+    /// The repos with a tab, in tab order. Ids, not objects: the tab strip is
+    /// a view onto the library, and a second array of references is a second
+    /// place for the same repo to be — or to fail to be.
+    @Published var openTabIDs: [String] = []
     @Published var activeRepoID: String?
     /// A folder the user tried to open that isn't a git repository.
     @Published var nonGitPath: String?
@@ -14,7 +28,13 @@ final class AppState: ObservableObject {
     /// installer finishes.
     @Published var gitMissing = false
 
-    private static let recentKey = "TheGit.openRepos"
+    /// The library. Keeps its old name: the build where tabs and library were
+    /// the same thing wrote every repo it knew about here, so an upgrade finds
+    /// its whole wall waiting.
+    static let libraryKey = "TheGit.openRepos"
+    /// Which of them had a tab. Absent on that same upgrade, which is why its
+    /// default is "all of them" — see `init`.
+    static let tabsKey = "TheGit.openTabs"
 
     /// True while the pointer is over a repo tab or the + button, so the
     /// title-bar double-click monitor leaves those clicks alone.
@@ -50,16 +70,27 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// The repos with a tab, in tab order — what the tab strip draws.
+    /// Resolved from the library rather than stored, so a repo can never be
+    /// in a tab and off the wall at the same time.
+    var openRepos: [RepoState] {
+        openTabIDs.compactMap { id in repos.first { $0.id == id } }
+    }
+
+    /// The tab on screen. Only ever a repo with a tab: the Dashboard's cards
+    /// now include repos that have none, and clicking one has to open a tab
+    /// rather than quietly show a repo the strip doesn't list.
     var activeRepo: RepoState? {
-        repos.first { $0.id == activeRepoID }
+        guard let activeRepoID, openTabIDs.contains(activeRepoID) else { return nil }
+        return repos.first { $0.id == activeRepoID }
     }
 
     /// No repo selected means the Dashboard, which is also where a window
     /// with nothing open lands. One selection, not two pieces of state that
-    /// can disagree about what the window is showing — every existing
-    /// `activeRepoID = repos.first?.id` already falls back to it correctly
-    /// when the last tab closes.
-    var showingDashboard: Bool { activeRepoID == nil }
+    /// can disagree about what the window is showing — derived from
+    /// `activeRepo` so a stale id can't leave the strip highlighting a tab
+    /// that isn't there.
+    var showingDashboard: Bool { activeRepo == nil }
 
     func showDashboard() { activeRepoID = nil }
 
@@ -130,10 +161,10 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Driven by `repos`, never by the cache's own keys: a closed repo drops
+    /// Driven by `repos`, never by the cache's own keys: a removed repo drops
     /// out of the grid because it's no longer in the loop, not because
     /// anyone remembered to evict it. Its counts stay in the cache, which is
-    /// what makes reopening it instant.
+    /// what makes adding it back instant.
     private func mergeActivity() {
         var total: [Int: Int] = [:]
         var contributors: [Int: [(name: String, count: Int)]] = [:]
@@ -170,7 +201,7 @@ final class AppState: ObservableObject {
             .sorted { ($0.1.count, -$0.0) > ($1.1.count, -$1.0) }
             .map(\.1)
         // Loaded means a repo ON THE WALL has been read, not that the cache
-        // has ever held anything: a closed repo's counts stay cached, and a
+        // has ever held anything: a removed repo's counts stay cached, and a
         // wall of entirely new repos must say "Reading…" rather than claim a
         // confident zero off the back of a repo that isn't even open.
         activityLoaded = repos.contains { activityByRepo[$0.id] != nil }
@@ -185,13 +216,57 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// The one spelling of a path this app compares, stores and keys by.
+    ///
+    /// A repo's id IS its path, so "already on the wall" is a string
+    /// comparison — and one working copy has more than one spelling. `/tmp`
+    /// and `/var` are symlinks into `/private` on every Mac, `~` isn't a real
+    /// directory, and a trailing slash is free to appear. The two callers of
+    /// `open(path:)` disagree by construction: the open panel hands over what
+    /// the user picked, while the sidebar's worktrees and submodules come from
+    /// git, which always answers with the real path. Left uncanonicalized,
+    /// `/tmp/x` and `/private/tmp/x` became two cards, two tabs and two file
+    /// watchers over the same files, neither seeing the other's refreshes.
+    ///
+    /// Which of the two spellings wins doesn't matter, only that everything
+    /// picks the same one: Foundation resolves symlinks and drops a leading
+    /// `/private`, so both of those land on `/tmp/x`. Same call git's own paths
+    /// go through — see `GitClient.resolved`.
+    static func canonical(path: String) -> String {
+        URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+            .resolvingSymlinksInPath()
+            .path
+    }
+
     init() {
         installTitleBarDoubleClick()
-        let saved = UserDefaults.standard.stringArray(forKey: Self.recentKey) ?? []
-        for path in saved where FileManager.default.fileExists(atPath: path + "/.git") {
+        let saved = UserDefaults.standard.stringArray(forKey: Self.libraryKey) ?? []
+        // Canonicalized on the way in, which also folds any pair of spellings
+        // an older build saved as two separate repos back into one. First
+        // spelling wins: the wall keeps the order it had.
+        var seen = Set<String>()
+        for path in saved.map({ Self.canonical(path: $0) })
+        where seen.insert(path).inserted
+            && FileManager.default.fileExists(atPath: path + "/.git") {
             repos.append(RepoState(path: path))
         }
-        activeRepoID = repos.first?.id
+        // No tab list at all is the upgrade from the build where a tab WAS the
+        // repo: everything it restored was a tab, so keep them as tabs rather
+        // than reopening to a wall of cards and no tabs.
+        let savedTabs = UserDefaults.standard.stringArray(forKey: Self.tabsKey) ?? saved
+        let known = Set(repos.map(\.id))
+        // Filtered from the saved order, not from the library's: the tab strip
+        // has an order of its own and the user dragged it into place. Deduped
+        // for the same reason the library is — two spellings of one repo were
+        // two tabs, and they collapse into the first of them.
+        var seenTabs = Set<String>()
+        openTabIDs = savedTabs
+            .map { Self.canonical(path: $0) }
+            .filter { known.contains($0) && seenTabs.insert($0).inserted }
+        activeRepoID = openTabIDs.first
+        // The folding above can leave what's on disk out of date, and the next
+        // write is whenever the user next opens or closes something.
+        persist()
         Task { await watchForGit() }
     }
 
@@ -206,10 +281,17 @@ final class AppState: ObservableObject {
             try? await Task.sleep(nanoseconds: 3_000_000_000)
         }
         gitMissing = false
-        // Any repos restored before git arrived sat there erroring;
-        // wake them now that their commands can actually run.
-        for repo in repos {
+        // Any repos restored before git arrived sat there erroring; wake them
+        // now that their commands can actually run. A full refresh only for
+        // the ones with a tab — the rest are cards, and a card is two
+        // subprocesses where a snapshot is nine.
+        for repo in openRepos {
             Task { await repo.refresh() }
+        }
+        Task {
+            for repo in repos where !openTabIDs.contains(repo.id) {
+                await repo.loadCard(force: true)
+            }
         }
     }
 
@@ -230,31 +312,64 @@ final class AppState: ObservableObject {
     }
 
     func open(path: String) {
+        // One spelling from here down — see `canonical`. The alert below is the
+        // exception: it quotes the path back at the user, and that has to be
+        // the folder they actually picked.
+        let canonical = Self.canonical(path: path)
         var isDir: ObjCBool = false
-        let gitPath = path + "/.git"
+        let gitPath = canonical + "/.git"
         guard FileManager.default.fileExists(atPath: gitPath, isDirectory: &isDir) else {
             // Never auto-init: a novice picking their home folder would
             // turn it into a repo. Tell them how to do it themselves.
             nonGitPath = path
             return
         }
-        if let existing = repos.first(where: { $0.path == path }) {
-            activeRepoID = existing.id
+        // Already on the wall — with or without a tab. Opening it again is
+        // the same gesture as clicking its card.
+        if let existing = repos.first(where: { $0.path == canonical }) {
+            openTab(existing)
             return
         }
-        let repo = RepoState(path: path)
+        let repo = RepoState(path: canonical)
         repos.append(repo)
-        activeRepoID = repo.id
-        persist()
+        openTab(repo)
         Task { await repo.refresh() }
     }
 
-    func close(repo: RepoState) {
-        repos.removeAll { $0.id == repo.id }
-        if activeRepoID == repo.id {
-            activeRepoID = repos.first?.id
+    /// Give a repo a tab and show it. Every route to a repo goes through here
+    /// — the open panel, the Dashboard's cards, its context menu — so there is
+    /// one place that keeps "showing" and "has a tab" in agreement.
+    func openTab(_ repo: RepoState) {
+        if !openTabIDs.contains(repo.id) {
+            openTabIDs.append(repo.id)
         }
-        // Closing from the Dashboard's own context menu leaves the user
+        activeRepoID = repo.id
+        persist()
+    }
+
+    /// Close a tab. The repository stays on the Dashboard and in the restored
+    /// list: getting back to it is a click on its card, not another trip
+    /// through the open panel. Use `remove` to forget it altogether.
+    func closeTab(repo: RepoState) {
+        guard openTabIDs.contains(repo.id) else { return }
+        openTabIDs.removeAll { $0 == repo.id }
+        if activeRepoID == repo.id {
+            activeRepoID = openTabIDs.first
+        }
+        // A tab used to be the only thing holding a RepoState alive, so
+        // closing one stopped its watcher and its auto-fetch by deinit. The
+        // repo outlives its tab now, so the background work has to be told.
+        repo.tabClosed()
+        persist()
+    }
+
+    /// Forget a repository: its tab, its card on the wall, and its line in the
+    /// restored list. Nothing on disk is touched — this is the app's own list,
+    /// not the working copy.
+    func remove(repo: RepoState) {
+        closeTab(repo: repo)
+        repos.removeAll { $0.id == repo.id }
+        // Removing from the Dashboard's own context menu leaves the user
         // looking at the grid, so it has to lose that repo's cells now
         // rather than on the next visit.
         mergeActivity()
@@ -263,15 +378,22 @@ final class AppState: ObservableObject {
 
     /// Move a tab to another slot, the others closing the gap behind it.
     /// Called repeatedly while a tab is dragged — once per slot it crosses,
-    /// not once per frame — so the list the user sees IS the order, and
+    /// not once per frame — so the strip the user sees IS the order, and
     /// letting go commits nothing extra.
+    ///
+    /// Tab order only: the Dashboard's wall keeps the order repos were added
+    /// in, so dragging tabs around never reshuffles the cards underneath.
     func moveTab(from: Int, to: Int) {
-        guard from != to, repos.indices.contains(from), repos.indices.contains(to) else { return }
-        repos.insert(repos.remove(at: from), at: to)
+        guard from != to,
+              openTabIDs.indices.contains(from),
+              openTabIDs.indices.contains(to)
+        else { return }
+        openTabIDs.insert(openTabIDs.remove(at: from), at: to)
         persist()
     }
 
     private func persist() {
-        UserDefaults.standard.set(repos.map(\.path), forKey: Self.recentKey)
+        UserDefaults.standard.set(repos.map(\.path), forKey: Self.libraryKey)
+        UserDefaults.standard.set(openTabIDs, forKey: Self.tabsKey)
     }
 }

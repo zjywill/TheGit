@@ -114,16 +114,17 @@ final class DashboardActivityTests: XCTestCase {
         XCTAssertEqual(state.activity[key(daysAgo: 0)], 3)
     }
 
-    /// Closing a tab takes its cells with it, and it happens now rather than
-    /// on the next visit: the Dashboard's own context menu can close a repo
-    /// while the user is looking at the grid.
-    func testClosingARepoLeavesTheGrid() async throws {
+    /// Removing a repo takes its cells with it, and it happens now rather
+    /// than on the next visit: the Dashboard's own context menu can remove a
+    /// repo while the user is looking at the grid. (Closing its tab does not
+    /// — the card stays on the wall, so the grid keeps counting it.)
+    func testRemovingARepoLeavesTheGrid() async throws {
         let state = appState([
             try await makeRepo("alpha", commits: 3),
             try await makeRepo("beta", commits: 2),
         ])
         await state.loadActivity()
-        state.close(repo: state.repos[1])
+        state.remove(repo: state.repos[1])
 
         XCTAssertEqual(state.activity[key(daysAgo: 0)], 3)
         // One repo left, so the tooltips stop naming it — see below.
@@ -163,14 +164,14 @@ final class DashboardActivityTests: XCTestCase {
         XCTAssertTrue(state.activityLoaded)
     }
 
-    /// Loaded is a fact about the wall, not about the cache: a closed repo's
+    /// Loaded is a fact about the wall, not about the cache: a removed repo's
     /// counts stay cached (that's what makes reopening it instant), but a
     /// wall of entirely new repos hasn't been read, and saying it has puts
     /// "0 commits in the last year" on screen where "Reading…" belongs.
-    func testANewWallIsNotLoadedByAClosedReposCache() async throws {
+    func testANewWallIsNotLoadedByARemovedReposCache() async throws {
         let state = appState([try await makeRepo("alpha", commits: 3)])
         await state.loadActivity()
-        state.close(repo: state.repos[0])
+        state.remove(repo: state.repos[0])
         XCTAssertFalse(state.activityLoaded)
 
         state.repos = [RepoState(path: try await makeRepo("beta", commits: 2))]

@@ -583,6 +583,23 @@ final class RepoState: ObservableObject, Identifiable {
         }
     }
 
+    /// Called when the repo's tab is closed but the repo stays on the
+    /// Dashboard. A tab used to be the only reference holding this object
+    /// alive, so closing one stopped the watcher and the auto-fetch through
+    /// `deinit`; the repo outlives its tab now, and a closed tab that keeps
+    /// an FSEvents stream open and fetches every five minutes is work the
+    /// user has no way to see, let alone stop.
+    ///
+    /// Everything already read stays: `appeared()` will show it instantly on
+    /// the way back in and freshen quietly, and it restarts both of these.
+    func tabClosed() {
+        autoFetchTask?.cancel()
+        autoFetchTask = nil
+        pendingRefresh?.cancel()
+        pendingRefresh = nil
+        watcher = nil
+    }
+
     func refresh(quiet: Bool = false) async {
         if !quiet { isBusy = true }
         defer { if !quiet { isBusy = false } }
