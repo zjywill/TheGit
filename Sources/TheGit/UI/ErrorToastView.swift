@@ -64,6 +64,19 @@ struct ErrorToast: View {
                     // read as a strip; past that, Copy carries the rest.
                     .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
+                // The cause under the verdict: "failed to push some refs"
+                // says what git refused, "! [rejected] main -> main (fetch
+                // first)" says why. It's the line the user would otherwise
+                // go hunting for in a terminal. Monospaced because it IS
+                // terminal output — but secondary, not tertiary: it out-
+                // ranks the command line below.
+                if let reason = notice.reason {
+                    Text(reason)
+                        .zoomFont(10, design: .monospaced)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 // Which command, not what happened — so it goes under, dim,
                 // and truncated in the middle: the subcommand at the front
                 // and the argument that usually names the file at the back
@@ -76,6 +89,12 @@ struct ErrorToast: View {
                         .truncationMode(.middle)
                 }
             }
+            // The strip is a constant width (the frame below), so without
+            // this the controls trailed the sentence and a short message
+            // left them adrift mid-strip. Pinned to the edge they share
+            // with every other strip's controls — the update banner's ×
+            // is exactly there.
+            Spacer(minLength: 0)
             // A git error gets pasted into a search box or an issue more
             // often than it gets read twice, so this hands over the whole
             // thing — command included — rather than the part that fitted.
@@ -109,8 +128,10 @@ struct ErrorToast: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
-        // Wide enough for a sentence, narrow enough to stay a strip. No
-        // greedy child inside, so a short message gets a short toast.
+        // Wide enough for a sentence, narrow enough to stay a strip. A
+        // bare maxWidth is greedy up to its cap, so the strip is always
+        // this wide — one steady shape wherever it appears, and the reason
+        // the Spacer above has a job.
         .frame(maxWidth: 460 * zoom, alignment: .leading)
         // A floating layer over content, not a region of the window:
         // material and a shadow, and no scrim — dimming the window would
@@ -137,13 +158,15 @@ struct ErrorToast: View {
                 element: NSApplication.shared,
                 notification: .announcementRequested,
                 userInfo: [
-                    .announcement: notice.summary,
+                    .announcement: [notice.summary, notice.reason]
+                        .compactMap { $0 }.joined(separator: ". "),
                     .priority: NSAccessibilityPriorityLevel.high.rawValue,
                 ]
             )
             // Scaled to the reading, not a flat four seconds: a 140-character
             // git sentence needs twice as long as "Nothing is staged".
-            let seconds = min(14, max(6, Double(notice.summary.count) / 14))
+            let reading = notice.summary.count + (notice.reason?.count ?? 0)
+            let seconds = min(14, max(6, Double(reading) / 14))
             try? await Task.sleep(for: .seconds(seconds))
             // A pointer on the strip means someone is still reading it (and
             // is where the tooltip with the full text comes from), so the

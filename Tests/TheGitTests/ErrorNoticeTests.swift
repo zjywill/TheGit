@@ -36,6 +36,54 @@ final class ErrorNoticeTests: XCTestCase {
         XCTAssertTrue(notice.detail.contains("hint: Updates were rejected"))
     }
 
+    /// A failed push opens with "To github.com:…" and doesn't say `error:`
+    /// until line three — the strip shows the error, not the address label.
+    func testPushFailureSurfacesTheErrorLineNotTheRemoteHeader() {
+        let notice = ErrorNotice(GitError(
+            command: "push",
+            message: """
+            To github.com:zjywill/TheGit.git
+             ! [rejected]        main -> main (fetch first)
+            error: failed to push some refs to 'github.com:zjywill/TheGit.git'
+            hint: Updates were rejected because the remote contains work that you do
+            hint: not have locally.
+            """
+        ))
+        XCTAssertEqual(
+            notice.summary,
+            "failed to push some refs to 'github.com:zjywill/TheGit.git'"
+        )
+        // The verdict says what git refused; the status line says why.
+        XCTAssertEqual(notice.reason, "! [rejected] main -> main (fetch first)")
+        // The narration still matters to a bug report — Copy keeps it all.
+        XCTAssertTrue(notice.detail.contains("hint: Updates were rejected"))
+    }
+
+    /// SSH failures put the cause ABOVE the verdict: "Permission denied"
+    /// arrives before the `fatal:` line. The verdict still leads, but the
+    /// cause comes along.
+    func testAuthFailureCarriesThePermissionLineAsTheReason() {
+        let notice = ErrorNotice(GitError(
+            command: "push",
+            message: """
+            git@github.com: Permission denied (publickey).
+            fatal: Could not read from remote repository.
+            """
+        ))
+        XCTAssertEqual(notice.summary, "Could not read from remote repository.")
+        XCTAssertEqual(notice.reason, "git@github.com: Permission denied (publickey).")
+    }
+
+    /// A failure that was one line stays one line — no reason row inventing
+    /// context that isn't there.
+    func testOneLineFailureHasNoReason() {
+        let notice = ErrorNotice(GitError(
+            command: "checkout nope",
+            message: "error: pathspec 'nope' did not match any file(s) known to git\n"
+        ))
+        XCTAssertNil(notice.reason)
+    }
+
     /// Our own sentences arrive whole and stay whole.
     func testPlainTextNoticeHasNoCommand() {
         let notice = ErrorNotice(text: "Nothing is staged to describe.")
