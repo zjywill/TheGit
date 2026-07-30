@@ -304,11 +304,19 @@ final class RepoState: ObservableObject, Identifiable {
     /// exclusive with `forge`; drives the sidebar's install hint.
     @Published var missingForgeCLI: Forge?
     @Published var pullRequests: [PullRequest] = []
-    /// Open issues on the forge, for the Dashboard card's badge. nil until
-    /// a fetch succeeds — a repo with issues disabled keeps erroring and
-    /// therefore keeps showing nothing, which is right: no feature, no
-    /// count. Capped at `ForgeClient.issueCountLimit`.
-    @Published private(set) var openIssueCount: Int?
+    /// Open issues on the forge — the sidebar's section and, counted, the
+    /// Dashboard card's badge. nil until a fetch succeeds: a repo with
+    /// issues disabled keeps erroring and therefore keeps showing nothing,
+    /// which is right — no feature, no section, no count. At most
+    /// `ForgeClient.issueCountLimit` of them.
+    @Published private(set) var issues: [Issue]?
+    /// The issue the viewer sheet is open on, if any.
+    @Published var issueToView: Issue?
+    /// The open issue's thread: nil while it's loading, [] when there are
+    /// no comments. Failures land in `issueCommentsError` instead — an
+    /// empty thread and an unreachable one must not read the same.
+    @Published private(set) var issueComments: [IssueComment]?
+    @Published private(set) var issueCommentsError: String?
     @Published var forgeError: ForgeFailure?
     /// Set once forge detection has concluded, however it concluded — a
     /// GitHub remote, a missing CLI, a host that is no forge at all. Avatars
@@ -445,6 +453,9 @@ final class RepoState: ObservableObject, Identifiable {
         return pullRequests.count
     }
 
+    /// The issue badge's number, on the same contract.
+    var openIssueCount: Int? { issues?.count }
+
     /// The card's PR count, from the same list the sidebar shows. Called by
     /// the Dashboard after the cards land, one repo at a time — it's the
     /// only network on that screen, so it goes last and is cached harder
@@ -498,6 +509,7 @@ final class RepoState: ObservableObject, Identifiable {
     deinit {
         autoFetchTask?.cancel()
         pendingRefresh?.cancel()
+        commentsTask?.cancel()
     }
 
     /// Watch the repo (working tree + .git) and refresh quietly, debounced.
@@ -1566,11 +1578,47 @@ final class RepoState: ObservableObject, Identifiable {
             pullRequests = []
             forgeError = forgeFailure(error)
         }
-        // The issue count rides along on the PR list's schedule and cache.
+        // The issue list rides along on the PR list's schedule and cache.
         // Its own `try?`, not the `do` above: a repo with issues disabled
         // must not read as "can't reach the forge" when the PRs loaded fine.
-        openIssueCount = try? await forgeClient.openIssueCount(forge)
+        issues = try? await forgeClient.issues(forge)
         prsLoadedAt = Date()
+    }
+
+    /// Open the in-app viewer on an issue and start fetching its thread.
+    /// The list already brought the body along, so the sheet has content
+    /// on its first frame and only the comments arrive later.
+    func viewIssue(_ issue: Issue) {
+        issueToView = issue
+        issueComments = nil
+        issueCommentsError = nil
+        commentsTask?.cancel()
+        guard let forge else { return }
+        commentsTask = Task {
+            do {
+                let comments = try await forgeClient.issueComments(issue, forge: forge)
+                // The user may have moved to another issue while this one's
+                // thread was in flight; its comments are not that issue's.
+                guard !Task.isCancelled, issueToView?.number == issue.number else { return }
+                issueComments = comments
+            } catch {
+                guard !Task.isCancelled, issueToView?.number == issue.number else { return }
+                issueCommentsError = forgeFailure(error).summary
+            }
+        }
+    }
+
+    private var commentsTask: Task<Void, Never>?
+
+    func openIssueInBrowser(_ issue: Issue) {
+        guard let forge else { return }
+        Task {
+            do {
+                try await forgeClient.openIssueInBrowser(issue, forge: forge)
+            } catch {
+                errorMessage = forgeFailure(error).alertText
+            }
+        }
     }
 
     func refreshPullRequests() {

@@ -110,6 +110,12 @@ struct RepoView: View {
             Color.clear
                 .sheet(isPresented: $repo.showCreatePR) { CreatePullRequestView(repo: repo) }
         )
+        .background(
+            Color.clear
+                .sheet(item: $repo.issueToView) { issue in
+                    IssueDetailView(repo: repo, issue: issue)
+                }
+        )
         // Keyed on the repo, not on view identity: this view is no longer
         // rebuilt per tab (see the note on the panes above), so a plain
         // `.task` would only ever fire for the first repo shown.

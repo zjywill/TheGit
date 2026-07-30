@@ -12,6 +12,29 @@ struct PullRequest: Identifiable, Hashable {
     var id: Int { number }
 }
 
+/// An open issue, as the CLI reports it. The body comes with the list —
+/// one fetch, and the viewer sheet opens with everything but the thread.
+struct Issue: Identifiable, Hashable {
+    let number: Int
+    let title: String
+    let author: String
+    let body: String
+    let url: String
+    let createdAt: Date?
+
+    var id: Int { number }
+}
+
+/// One comment on an issue's thread. GitLab calls these notes and mixes
+/// system events into them; the parser filters those out — "changed the
+/// description" is history, not conversation.
+struct IssueComment: Identifiable, Hashable {
+    let id: String
+    let author: String
+    let body: String
+    let createdAt: Date?
+}
+
 /// Which CLI drives a repo's pull requests. We never speak to an API
 /// ourselves: hosts, tokens and OAuth stay the CLI's problem, exactly like
 /// the git engine stays the git binary's problem.
@@ -164,16 +187,101 @@ enum ForgeParsers {
         }
     }
 
-    /// How many items a CLI's JSON list holds — all the issue badge needs,
-    /// so the fields inside each item don't matter and aren't decoded. Same
-    /// bracket-hunting as `pullRequests`, same reason.
-    static func listCount(_ output: String) -> Int {
-        guard let start = output.firstIndex(where: { $0 == "[" }),
-              let data = output[start...].data(using: .utf8),
-              let array = try? JSONSerialization.jsonObject(with: data) as? [Any]
-        else { return 0 }
-        return array.count
+    static func issues(_ output: String, forge: Forge) throws -> [Issue] {
+        // Same bracket-hunting as `pullRequests`, same reason.
+        guard let start = output.firstIndex(where: { $0 == "[" || $0 == "{" }),
+              let data = output[start...].data(using: .utf8)
+        else { return [] }
+        do {
+            switch forge {
+            case .github:
+                return try JSONDecoder().decode([GHIssue].self, from: data).map {
+                    Issue(
+                        number: $0.number,
+                        title: $0.title,
+                        author: $0.author?.login ?? "",
+                        body: $0.body ?? "",
+                        url: $0.url,
+                        createdAt: date($0.createdAt)
+                    )
+                }
+            case .gitlab:
+                return try JSONDecoder().decode([GLIssue].self, from: data).compactMap {
+                    guard let number = $0.iid ?? $0.id else { return nil }
+                    return Issue(
+                        number: number,
+                        title: $0.title,
+                        author: $0.author?.username ?? "",
+                        body: $0.description ?? "",
+                        url: $0.webURL ?? "",
+                        createdAt: date($0.createdAt)
+                    )
+                }
+            }
+        } catch {
+            throw ShellError(
+                command: forge.binary,
+                message: "Could not read the issue list: \(error)"
+            )
+        }
     }
+
+    /// The thread under an issue. gh wraps it in `{comments: [...]}`; glab
+    /// has no JSON view for notes, so the client asks its `api` passthrough
+    /// and gets GitLab's own array — system notes ("changed the milestone")
+    /// filtered out, because the sheet shows a conversation.
+    static func issueComments(_ output: String, forge: Forge) throws -> [IssueComment] {
+        guard let start = output.firstIndex(where: { $0 == "[" || $0 == "{" }),
+              let data = output[start...].data(using: .utf8)
+        else { return [] }
+        do {
+            switch forge {
+            case .github:
+                return try JSONDecoder().decode(GHCommentList.self, from: data)
+                    .comments.map {
+                        IssueComment(
+                            id: $0.id ?? UUID().uuidString,
+                            author: $0.author?.login ?? "",
+                            body: $0.body,
+                            createdAt: date($0.createdAt)
+                        )
+                    }
+            case .gitlab:
+                return try JSONDecoder().decode([GLNote].self, from: data)
+                    .filter { $0.system != true }
+                    .map {
+                        IssueComment(
+                            id: $0.id.map(String.init) ?? UUID().uuidString,
+                            author: $0.author?.username ?? "",
+                            body: $0.body ?? "",
+                            createdAt: date($0.createdAt)
+                        )
+                    }
+            }
+        } catch {
+            throw ShellError(
+                command: forge.binary,
+                message: "Could not read the issue's comments: \(error)"
+            )
+        }
+    }
+
+    /// Forge timestamps, which come in both ISO 8601 spellings: gh writes
+    /// "2026-07-27T06:11:28Z", GitLab's REST answers add fractional
+    /// seconds. A date that fails both is nil, and the row shows no age —
+    /// better than refusing the whole list over a timestamp.
+    static func date(_ string: String?) -> Date? {
+        guard let string else { return nil }
+        if let plain = isoPlain.date(from: string) { return plain }
+        return isoFractional.date(from: string)
+    }
+
+    private static let isoPlain = ISO8601DateFormatter()
+    private static let isoFractional: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
 
     /// The created PR's address out of the CLI's chatter: both `gh` and
     /// `glab` print it on its own line, surrounded by human sentences that
@@ -231,6 +339,65 @@ private struct GLMergeRequest: Decodable {
     }
 }
 
+/// Verbatim shape of `gh issue list --json number,title,author,url,body,createdAt`.
+private struct GHIssue: Decodable {
+    struct Author: Decodable { let login: String? }
+    let number: Int
+    let title: String
+    let author: Author?
+    let body: String?
+    let url: String
+    let createdAt: String?
+}
+
+/// `gh issue view N --json comments` — the one field, still enveloped.
+private struct GHCommentList: Decodable {
+    struct Comment: Decodable {
+        struct Author: Decodable { let login: String? }
+        let id: String?
+        let author: Author?
+        let body: String
+        let createdAt: String?
+    }
+    let comments: [Comment]
+}
+
+/// GitLab's REST issue, through `glab issue list --output json`. Optional
+/// for the same reason as `GLMergeRequest`: a missing field should degrade
+/// the row, not fail the list.
+private struct GLIssue: Decodable {
+    struct Author: Decodable { let username: String? }
+    let iid: Int?
+    let id: Int?
+    let title: String
+    let description: String?
+    let author: Author?
+    let webURL: String?
+    let createdAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case iid, id, title, description, author
+        case webURL = "web_url"
+        case createdAt = "created_at"
+    }
+}
+
+/// A note from GitLab's notes endpoint, via `glab api`. `system` notes are
+/// state changes, not conversation.
+private struct GLNote: Decodable {
+    struct Author: Decodable { let username: String? }
+    let id: Int?
+    let body: String?
+    let system: Bool?
+    let author: Author?
+    let createdAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, body, system, author
+        case createdAt = "created_at"
+    }
+}
+
 /// Shells out to `gh` / `glab`. Serialized by the actor like GitClient, so
 /// a checkout can't race a list refresh.
 actor ForgeClient {
@@ -268,25 +435,52 @@ actor ForgeClient {
         return try ForgeParsers.pullRequests(try await run(forge, args), forge: forge)
     }
 
-    /// The most issues the count query asks for — and therefore the most
-    /// the badge can say. Past this it shows "100+", which is honest;
-    /// the exact number of a triage backlog isn't what a card is for.
+    /// The most issues one fetch asks for — so also the most the card's
+    /// badge can say ("100+") and the most rows the sidebar section holds.
+    /// The exact size of a triage backlog isn't what either is for.
     static let issueCountLimit = 100
 
-    /// How many issues are open, by listing their numbers up to
-    /// `issueCountLimit`. A listing rather than a repo-metadata query
-    /// because that's the one shape both CLIs share — GitHub's own
-    /// `open_issues_count` would count PRs into it anyway.
-    func openIssueCount(_ forge: Forge) async throws -> Int {
-        let limit = String(Self.issueCountLimit)
+    /// The open issues, newest first, bodies included — a listing rather
+    /// than a repo-metadata query because that's the one shape both CLIs
+    /// share, and GitHub's own `open_issues_count` would count PRs into it
+    /// anyway.
+    func issues(_ forge: Forge, limit: Int = ForgeClient.issueCountLimit) async throws -> [Issue] {
         let args: [String]
         switch forge {
         case .github:
-            args = ["issue", "list", "--json", "number", "--limit", limit]
+            args = [
+                "issue", "list",
+                "--json", "number,title,author,url,body,createdAt",
+                "--limit", String(limit),
+            ]
         case .gitlab:
-            args = ["issue", "list", "--output", "json", "--per-page", limit]
+            args = ["issue", "list", "--output", "json", "--per-page", String(limit)]
         }
-        return ForgeParsers.listCount(try await run(forge, args))
+        return try ForgeParsers.issues(try await run(forge, args), forge: forge)
+    }
+
+    /// The conversation under one issue. gh has a JSON view for it; glab
+    /// doesn't, so there the CLI's `api` passthrough asks GitLab's notes
+    /// endpoint directly — `:id` is glab's own placeholder for the current
+    /// project, resolved by the CLI, so this stays "the CLI's problem" in
+    /// the same way every other call here is.
+    func issueComments(_ issue: Issue, forge: Forge) async throws -> [IssueComment] {
+        let output: String
+        switch forge {
+        case .github:
+            output = try await run(forge, [
+                "issue", "view", String(issue.number), "--json", "comments",
+            ])
+        case .gitlab:
+            output = try await run(forge, [
+                "api", "projects/:id/issues/\(issue.number)/notes?sort=asc&per_page=100",
+            ])
+        }
+        return try ForgeParsers.issueComments(output, forge: forge)
+    }
+
+    func openIssueInBrowser(_ issue: Issue, forge: Forge) async throws {
+        try await run(forge, ["issue", "view", String(issue.number), "--web"])
     }
 
     /// Head branch → merged PR number. The forge is the only source that

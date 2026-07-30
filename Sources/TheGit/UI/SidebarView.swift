@@ -31,6 +31,7 @@ struct SidebarView: View {
                     localSection
                     remoteSection
                     forgeSection
+                    issueSection
                     worktreeSection
                     tagSection
                     stashSection
@@ -370,6 +371,9 @@ struct SidebarView: View {
     private var matchedPRs: [PullRequest] {
         matching(repo.pullRequests) { "#\($0.number) \($0.title) \($0.branch) \($0.author)" }
     }
+    private var matchedIssues: [Issue] {
+        matching(repo.issues ?? []) { "#\($0.number) \($0.title) \($0.author)" }
+    }
     private var matchedWorktrees: [Worktree] {
         matching(repo.snapshot.worktrees) { "\($0.displayName) \($0.branch ?? "") \($0.path)" }
     }
@@ -382,8 +386,8 @@ struct SidebarView: View {
 
     private var hasAnyMatch: Bool {
         !matchedLocal.isEmpty || !matchedRemote.isEmpty || !matchedPRs.isEmpty
-            || !matchedWorktrees.isEmpty || !matchedTags.isEmpty || !matchedStashes.isEmpty
-            || !matchedLFS.isEmpty || !matchedSubmodules.isEmpty
+            || !matchedIssues.isEmpty || !matchedWorktrees.isEmpty || !matchedTags.isEmpty
+            || !matchedStashes.isEmpty || !matchedLFS.isEmpty || !matchedSubmodules.isEmpty
     }
 
     // MARK: - Sections
@@ -498,6 +502,41 @@ struct SidebarView: View {
                 )
             )
             ForgeInstallHintRow(repo: repo, missing: missing)
+        }
+    }
+
+    /// Under the PR section and on the same terms: only when the forge is
+    /// live. No section while the list has never loaded — an "Issues —"
+    /// header would just restate whatever the PR section's error already
+    /// says — but once a fetch has succeeded, an empty section stays: "no
+    /// open issues" is an answer, and the section vanishing reads as the
+    /// feature breaking.
+    @ViewBuilder
+    private var issueSection: some View {
+        if let forge = repo.forge, repo.issues != nil || repo.loadingPullRequests {
+            let issues = matchedIssues
+            if !filtering || !issues.isEmpty {
+                SectionHeader(
+                    title: "Issues",
+                    count: issues.count,
+                    countLabel: repo.issues == nil ? "…" : nil,
+                    secondary: .init(
+                        icon: "arrow.clockwise",
+                        help: "Refresh issues",
+                        run: { repo.refreshPullRequests() }
+                    )
+                )
+                if !filtering, repo.issues?.isEmpty != false {
+                    SidebarRow(icon: nil, hoverable: false) {
+                        Text(repo.issues == nil ? "Loading…" : "No open issues")
+                            .zoomFont(11)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                ForEach(issues) { issue in
+                    IssueRow(issue: issue, forge: forge, repo: repo)
+                }
+            }
         }
     }
 
@@ -1318,6 +1357,59 @@ struct PullRequestRow: View {
         repo.snapshot.remoteBranches
             .first { $0.shortName == pr.branch }?
             .tipHash
+    }
+}
+
+struct IssueRow: View {
+    let issue: Issue
+    let forge: Forge
+    @ObservedObject var repo: RepoState
+
+    var body: some View {
+        SidebarRow(
+            icon: "smallcircle.filled.circle",
+            iconColor: .green
+        ) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                VStack(alignment: .leading, spacing: SidebarMetrics.lineGap) {
+                    HStack(spacing: 4) {
+                        Text(forge.label(issue.number))
+                            .zoomFont(10, weight: .semibold, design: .monospaced)
+                            .foregroundStyle(.tertiary)
+                        Text(issue.title)
+                            .zoomFont(12)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    if !issue.author.isEmpty {
+                        Text(issue.author)
+                            .zoomFont(10)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 0)
+                if let created = issue.createdAt {
+                    Text(AgeBreaks.compact(date: created))
+                        .zoomFont(9)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .help("\(forge.label(issue.number)) \(issue.title)\n\nClick to read it here, double-click for the browser.")
+        // Unlike a PR row, a single click opens the thread in-app: an
+        // issue has no branch tip to locate, so reading it IS the primary
+        // action — nothing about the graph changes underneath.
+        .onTapGesture(count: 2) { repo.openIssueInBrowser(issue) }
+        .onTapGesture { repo.viewIssue(issue) }
+        .contextMenu {
+            Button("View Issue") { repo.viewIssue(issue) }
+            Button("Open in Browser") { repo.openIssueInBrowser(issue) }
+            Divider()
+            Button("Copy URL") { RepoState.copyToPasteboard(issue.url) }
+            Divider()
+            Button("Refresh") { repo.refreshPullRequests() }
+        }
     }
 }
 

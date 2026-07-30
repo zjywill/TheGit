@@ -163,22 +163,80 @@ final class ForgeParsersTests: XCTestCase {
         XCTAssertLessThanOrEqual(summary(String(repeating: "x", count: 400)).count, 140)
     }
 
-    // MARK: - Issue count
+    // MARK: - Issues
 
-    /// The count is the array's length and nothing else — gh's shape and
-    /// glab's shape count the same, and a stray banner line before the
-    /// JSON is skipped like `pullRequests` skips it.
-    func testListCountAcrossCLIShapes() {
-        XCTAssertEqual(ForgeParsers.listCount(#"[{"number":1},{"number":7}]"#), 2)
-        XCTAssertEqual(
-            ForgeParsers.listCount(#"Showing 1 of 1\n[{"iid":3,"title":"t","web_url":"u"}]"#),
-            1
-        )
-        XCTAssertEqual(ForgeParsers.listCount("[]"), 0)
-        // No JSON at all — a CLI that printed only chatter — is zero, not
-        // a crash: the badge simply stays off.
-        XCTAssertEqual(ForgeParsers.listCount("no issues match"), 0)
-        XCTAssertEqual(ForgeParsers.listCount(""), 0)
+    /// Verbatim shape of `gh issue list --json number,title,author,url,body,createdAt`.
+    func testParseGitHubIssueList() throws {
+        let json = """
+        [{"author":{"id":"MDQ6","is_bot":false,"login":"zjywill","name":"Junyi"},\
+        "body":"## 现状\\n只有内置的 FileDiffView","createdAt":"2026-07-27T06:11:28Z",\
+        "number":16,"title":"外部 diff / merge tool 集成",\
+        "url":"https://github.com/zjywill/TheGit/issues/16"}]
+        """
+        let issues = try ForgeParsers.issues(json, forge: .github)
+        XCTAssertEqual(issues.count, 1)
+        XCTAssertEqual(issues[0].number, 16)
+        XCTAssertEqual(issues[0].author, "zjywill")
+        XCTAssertTrue(issues[0].body.hasPrefix("## 现状"))
+        XCTAssertNotNil(issues[0].createdAt)
+        // No JSON at all — a CLI that printed only chatter — is an empty
+        // list, not a crash: the section just shows nothing.
+        XCTAssertEqual(try ForgeParsers.issues("no issues match", forge: .github), [])
+    }
+
+    /// GitLab's REST shape through `glab issue list --output json` —
+    /// fractional-second timestamps included, which its API writes and
+    /// plain ISO 8601 parsing rejects.
+    func testParseGitLabIssueList() throws {
+        let json = """
+        [{"iid":7,"id":991,"title":"Crash on open","description":"steps to reproduce",\
+        "author":{"username":"tao"},"web_url":"https://gitlab.com/g/a/-/issues/7",\
+        "created_at":"2026-07-01T10:30:00.123Z"}]
+        """
+        let issues = try ForgeParsers.issues(json, forge: .gitlab)
+        XCTAssertEqual(issues.count, 1)
+        XCTAssertEqual(issues[0].number, 7)
+        XCTAssertEqual(issues[0].body, "steps to reproduce")
+        XCTAssertEqual(issues[0].url, "https://gitlab.com/g/a/-/issues/7")
+        XCTAssertNotNil(issues[0].createdAt)
+    }
+
+    /// `gh issue view N --json comments` keeps the envelope even for one
+    /// field; the comments inside it are the thread, oldest first.
+    func testParseGitHubIssueComments() throws {
+        let json = """
+        {"comments":[{"id":"IC_kwDO","author":{"login":"zjywill"},\
+        "authorAssociation":"OWNER","body":"对着代码核了一遍","createdAt":"2026-07-27T06:19:35Z",\
+        "isMinimized":false,"reactionGroups":[],"viewerDidAuthor":false}]}
+        """
+        let comments = try ForgeParsers.issueComments(json, forge: .github)
+        XCTAssertEqual(comments.count, 1)
+        XCTAssertEqual(comments[0].author, "zjywill")
+        XCTAssertEqual(comments[0].body, "对着代码核了一遍")
+    }
+
+    /// GitLab notes arrive as a flat array with system events mixed in —
+    /// "changed the description" is history, not conversation, and must
+    /// not render as a comment card.
+    func testGitLabNotesFilterSystemEvents() throws {
+        let json = """
+        [{"id":1,"body":"changed the description","system":true,\
+        "author":{"username":"tao"},"created_at":"2026-07-01T10:30:00.000Z"},\
+        {"id":2,"body":"I can reproduce this","system":false,\
+        "author":{"username":"alice"},"created_at":"2026-07-02T11:00:00.000Z"}]
+        """
+        let comments = try ForgeParsers.issueComments(json, forge: .gitlab)
+        XCTAssertEqual(comments.count, 1)
+        XCTAssertEqual(comments[0].author, "alice")
+        XCTAssertEqual(comments[0].body, "I can reproduce this")
+    }
+
+    /// Both timestamp spellings parse; garbage is nil, not a thrown list.
+    func testForgeDateSpellings() {
+        XCTAssertNotNil(ForgeParsers.date("2026-07-27T06:11:28Z"))
+        XCTAssertNotNil(ForgeParsers.date("2026-07-27T06:11:28.123Z"))
+        XCTAssertNil(ForgeParsers.date("yesterday"))
+        XCTAssertNil(ForgeParsers.date(nil))
     }
 
     /// The tooltip keeps the command that failed; the summary never does.
