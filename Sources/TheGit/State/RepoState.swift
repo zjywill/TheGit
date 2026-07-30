@@ -1901,7 +1901,8 @@ final class RepoState: ObservableObject, Identifiable {
                     agent,
                     prompt: Handoff.prompt(task, subject: subject, forge: forge, base: base),
                     cwd: path,
-                    label: "\(forge.label(subject.number)) \(task.slug)"
+                    label: "\(forge.label(subject.number)) \(task.slug)",
+                    target: .preferred
                 )
             } catch {
                 report(error)

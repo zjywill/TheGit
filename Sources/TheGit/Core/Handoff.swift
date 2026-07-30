@@ -32,6 +32,106 @@ enum AgentTool: String, CaseIterable, Identifiable {
         case .codex: return .codex
         }
     }
+
+}
+
+/// A terminal the app knows how to open a handoff in.
+///
+/// Bundle identifiers rather than names: an app is found by identifier
+/// wherever it was dragged to, and the name is only ever a label.
+struct TerminalApp: Identifiable, Equatable {
+    let id: String
+    let name: String
+    /// The argv that precedes the script when this terminal has to be
+    /// *told* to run it — `-e`, `start --`, or nothing at all for the ones
+    /// that take a bare command. nil means it has no such flag and can only
+    /// be handed a document.
+    let runFlags: [String]?
+
+    /// Where it's installed, or nil. No permission needed and no launch:
+    /// LaunchServices already knows.
+    var url: URL? {
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: id)
+    }
+
+    /// Whether this installed copy answers for `.command` files.
+    ///
+    /// Asked of LaunchServices rather than written down, because the answer
+    /// belongs to the copy on this Mac and not to a table I maintained once.
+    /// It's also the difference between shipping Warp and leaving it out
+    /// for want of a machine to test it on: whichever route is right, the
+    /// system already knows which.
+    func opensDocuments(like script: URL) -> Bool {
+        guard let url else { return false }
+        return NSWorkspace.shared.urlsForApplications(toOpen: script).contains(url)
+    }
+
+    /// The mainstream macOS terminals, in the order the list shows them:
+    /// the two nearly everyone has, then the rest alphabetically.
+    ///
+    /// An entry costs nothing when the app isn't installed — the list only
+    /// ever shows what's on the box — so the bar for being here is "someone
+    /// might reasonably use this", not "I have it".
+    static let all: [TerminalApp] = [
+        TerminalApp(id: "com.apple.Terminal", name: "Terminal", runFlags: nil),
+        TerminalApp(id: "com.googlecode.iterm2", name: "iTerm2", runFlags: nil),
+        TerminalApp(id: "org.alacritty", name: "Alacritty", runFlags: ["-e"]),
+        TerminalApp(id: "com.mitchellh.ghostty", name: "Ghostty", runFlags: ["-e"]),
+        TerminalApp(id: "co.zeit.hyper", name: "Hyper", runFlags: nil),
+        TerminalApp(id: "net.kovidgoyal.kitty", name: "Kitty", runFlags: []),
+        TerminalApp(id: "com.raphaelamorim.rio", name: "Rio", runFlags: ["-e"]),
+        TerminalApp(id: "org.tabby", name: "Tabby", runFlags: nil),
+        TerminalApp(id: "dev.warp.Warp-Stable", name: "Warp", runFlags: nil),
+        TerminalApp(id: "com.github.wez.wezterm", name: "WezTerm", runFlags: ["start", "--"]),
+    ]
+
+    static var installed: [TerminalApp] { all.filter { $0.url != nil } }
+}
+
+/// Which terminal a handoff opens in.
+///
+/// The default is still whatever LaunchServices opens a `.command` with,
+/// which on a Mac nobody has re-associated is Terminal.app — right for the
+/// user who has only ever used Terminal, and wrong for everyone who spent
+/// an afternoon setting up Ghostty and would rather not be dropped
+/// somewhere else to talk to an agent.
+///
+/// A terminal and nothing else, deliberately. Claude Code does answer a
+/// `claude-cli://open?cwd=…&q=…` deep link, and it works — but what it
+/// opens is a terminal too, chosen by Claude rather than by the person
+/// reading this pane. An option called "Claude's own app" that produces a
+/// terminal window is a lie about what the setting does.
+enum HandoffTarget: Equatable {
+    case systemDefault
+    case terminal(TerminalApp)
+
+    static let storageKey = "TheGit.handoffTarget"
+
+    /// What goes in UserDefaults. Empty string for the default, so an
+    /// install that has never touched the setting reads as one.
+    var stored: String {
+        switch self {
+        case .systemDefault: return ""
+        case .terminal(let app): return app.id
+        }
+    }
+
+    /// Back out of UserDefaults. A terminal that has since been deleted
+    /// quietly becomes the system default — a handoff that opens the wrong
+    /// window beats one that opens no window and says why.
+    static func target(for stored: String, installed: [TerminalApp]) -> HandoffTarget {
+        guard !stored.isEmpty,
+            let app = installed.first(where: { $0.id == stored })
+        else { return .systemDefault }
+        return .terminal(app)
+    }
+
+    static var preferred: HandoffTarget {
+        target(
+            for: UserDefaults.standard.string(forKey: storageKey) ?? "",
+            installed: TerminalApp.installed
+        )
+    }
 }
 
 /// The jobs worth handing over, one per line of the menu.
@@ -275,14 +375,19 @@ enum Handoff {
     ///
     /// A `.command` file, not AppleScript into Terminal: scripting another
     /// app needs Automation permission and pops a TCC dialog the first
-    /// time, and this needs neither. LaunchServices hands the file to
-    /// whatever the user opens `.command` files with, so someone who lives
-    /// in iTerm gets iTerm.
+    /// time, and this needs neither.
+    ///
+    /// Which terminal is the user's to say. `NSWorkspace.open` on its own
+    /// means the `.command` association, which is Terminal.app until
+    /// somebody goes and changes it — and nobody does, so the person who
+    /// lives in Ghostty was being dropped into a terminal they don't use
+    /// to talk to an agent.
     static func launch(
         _ agent: AgentTool,
         prompt: String,
         cwd: String,
-        label: String
+        label: String,
+        target: HandoffTarget = .preferred
     ) throws {
         guard let binary = Shell.which(agent.binary) else {
             throw HandoffError.notInstalled(agent)
@@ -298,7 +403,51 @@ enum Handoff {
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o755], ofItemAtPath: file.path
         )
-        NSWorkspace.shared.open(file)
+        try open(file, in: target)
+    }
+
+    /// Hands the finished script to whichever terminal the user chose.
+    ///
+    /// Two routes, and LaunchServices picks between them: a terminal that
+    /// answers for `.command` files is simply handed the file — which also
+    /// makes the file name the window's title — and one that doesn't is
+    /// started with the script as its first command.
+    ///
+    /// Every dead end lands on the system default rather than throwing. A
+    /// terminal deleted since it was picked, one that turns out to do
+    /// neither, an app that has moved: the handoff is the point, and the
+    /// setting can be fixed afterwards.
+    private static func open(_ script: URL, in target: HandoffTarget) throws {
+        guard case .terminal(let app) = target, let appURL = app.url else {
+            NSWorkspace.shared.open(script)
+            return
+        }
+        if app.opensDocuments(like: script) {
+            NSWorkspace.shared.open(
+                [script], withApplicationAt: appURL,
+                configuration: NSWorkspace.OpenConfiguration()
+            )
+            return
+        }
+        guard let flags = app.runFlags else {
+            NSWorkspace.shared.open(script)
+            return
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = openArguments(app: appURL.path, flags: flags, script: script.path)
+        try process.run()
+    }
+
+    /// `open(1)`'s argv for a terminal that wants the script as the command
+    /// it starts with rather than as a document to open. Pure, so the
+    /// dialects are tested here instead of being discovered by whoever has
+    /// Alacritty installed.
+    ///
+    /// `-n` because these are the terminals people run one window of: a
+    /// second handoff must not be swallowed by the first instance.
+    static func openArguments(app: String, flags: [String], script: String) -> [String] {
+        ["-na", app, "--args"] + flags + [script]
     }
 
     /// The whole script. It deletes itself first: the shell has already read

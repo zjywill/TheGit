@@ -132,6 +132,80 @@ final class HandoffTests: XCTestCase {
         )
     }
 
+    // MARK: - Where it opens
+
+    /// The whole complaint this setting answers: `NSWorkspace.open` on a
+    /// `.command` means Terminal.app on every Mac nobody has re-associated,
+    /// so an unset preference has to stay meaningful and a set one has to
+    /// survive the round trip through UserDefaults.
+    func testTargetRoundTripsThroughItsStoredString() {
+        let ghostty = TerminalApp.all.first { $0.name == "Ghostty" }!
+        for target in [HandoffTarget.systemDefault, .terminal(ghostty)] {
+            XCTAssertEqual(
+                HandoffTarget.target(for: target.stored, installed: TerminalApp.all),
+                target
+            )
+        }
+        XCTAssertEqual(HandoffTarget.systemDefault.stored, "")
+    }
+
+    /// A terminal uninstalled since it was picked must not take the handoff
+    /// down with it.
+    func testAMissingTerminalFallsBackToTheSystemDefault() {
+        XCTAssertEqual(HandoffTarget.target(for: "com.mitchellh.ghostty", installed: []), .systemDefault)
+        XCTAssertEqual(HandoffTarget.target(for: "com.example.nothing", installed: TerminalApp.all), .systemDefault)
+    }
+
+    /// The terminals that don't answer for `.command` files get the script
+    /// as their initial command instead — in each one's own dialect, which
+    /// is exactly the kind of thing that is wrong for a year if only the
+    /// user with Alacritty installed can see it.
+    func testEachDialectHandsOverTheScriptItsOwnWay() {
+        let flags = Dictionary(
+            uniqueKeysWithValues: TerminalApp.all.map { ($0.name, $0.runFlags) }
+        )
+        XCTAssertEqual(flags["Alacritty"], ["-e"])
+        XCTAssertEqual(flags["Kitty"], [])
+        XCTAssertEqual(flags["WezTerm"], ["start", "--"])
+        // Terminal and iTerm2 are document-openers and nothing else; a
+        // stray `-e` handed to them would be a window running the wrong
+        // thing rather than an error anyone sees.
+        XCTAssertEqual(flags["Terminal"], .some(nil))
+        XCTAssertEqual(flags["iTerm2"], .some(nil))
+
+        XCTAssertEqual(
+            Handoff.openArguments(app: "/Applications/kitty.app", flags: [], script: "/tmp/h.command"),
+            ["-na", "/Applications/kitty.app", "--args", "/tmp/h.command"]
+        )
+        XCTAssertEqual(
+            Handoff.openArguments(app: "/Applications/Alacritty.app", flags: ["-e"], script: "/tmp/h.command"),
+            ["-na", "/Applications/Alacritty.app", "--args", "-e", "/tmp/h.command"]
+        )
+        XCTAssertEqual(
+            Handoff.openArguments(app: "/Applications/WezTerm.app", flags: ["start", "--"], script: "/tmp/h.command"),
+            ["-na", "/Applications/WezTerm.app", "--args", "start", "--", "/tmp/h.command"]
+        )
+    }
+
+    /// Every terminal in the list has to be reachable from the picker,
+    /// which means a bundle identifier that isn't a typo and a name that
+    /// isn't a duplicate — a second "Ghostty" would be two rows that look
+    /// the same and behave differently.
+    func testTheTerminalListIsWellFormed() {
+        XCTAssertEqual(Set(TerminalApp.all.map(\.id)).count, TerminalApp.all.count)
+        XCTAssertEqual(Set(TerminalApp.all.map(\.name)).count, TerminalApp.all.count)
+        for terminal in TerminalApp.all {
+            XCTAssertTrue(terminal.id.contains("."), "\(terminal.name) needs a bundle identifier")
+            XCTAssertFalse(terminal.name.isEmpty)
+        }
+        // The mainstream ones, so nobody's terminal is missing from a list
+        // whose whole job is to contain it.
+        let names = Set(TerminalApp.all.map(\.name))
+        for expected in ["Terminal", "iTerm2", "Ghostty", "Alacritty", "Kitty", "WezTerm", "Warp", "Hyper", "Tabby", "Rio"] {
+            XCTAssertTrue(names.contains(expected), "\(expected) should be offered")
+        }
+    }
+
     // MARK: - Finding the agent at all
 
     /// The binaries live wherever their installer put them — ~/.local/bin,

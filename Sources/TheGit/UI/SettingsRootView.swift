@@ -8,6 +8,7 @@ import SwiftUI
 enum SettingsPane: String, CaseIterable, Identifiable {
     case appearance
     case ai
+    case handoff
     case tools
 
     var id: String { rawValue }
@@ -16,6 +17,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         switch self {
         case .appearance: return "Appearance"
         case .ai: return "AI"
+        case .handoff: return "Hand Off"
         case .tools: return "Tools"
         }
     }
@@ -24,6 +26,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         switch self {
         case .appearance: return "paintbrush"
         case .ai: return "sparkles"
+        case .handoff: return "arrowshape.turn.up.right"
         case .tools: return "wrench.and.screwdriver"
         }
     }
@@ -58,6 +61,7 @@ struct SettingsRootView: View {
                 switch pane {
                 case .appearance: AppearanceSettingsView()
                 case .ai: AISettingsView()
+                case .handoff: HandoffSettingsView()
                 case .tools: ToolsSettingsView()
                 }
             }

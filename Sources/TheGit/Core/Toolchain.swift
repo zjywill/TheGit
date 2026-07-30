@@ -36,7 +36,7 @@ enum DevTool: String, CaseIterable, Identifiable {
         case .gh: return "Pull requests on GitHub: the sidebar list, checkout, and Create Pull Request."
         case .glab: return "Merge requests on GitLab: the sidebar list, checkout, and Create Merge Request."
         case .gitLFS: return "Large File Storage — shows LFS-tracked files and keeps their smudge/clean filters working."
-        case .claude, .codex: return "Hand Off: opens a terminal in the repo with this agent already reviewing, fixing, or unpicking the conflicts of what you right-clicked."
+        case .claude, .codex: return "Hand Off: opens this agent in the repo — in the terminal you pick under Hand Off — already reviewing, fixing, or unpicking the conflicts of what you right-clicked."
         }
     }
 
