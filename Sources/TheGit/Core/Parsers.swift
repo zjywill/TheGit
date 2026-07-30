@@ -114,6 +114,90 @@ enum GitParsers {
         return result
     }
 
+    // MARK: - review diff (numstat + name-status)
+
+    /// The file list of a whole-branch diff, out of `git diff -z` run twice:
+    /// once for `--numstat` (the line counts) and once for `--name-status`
+    /// (the letters). Two commands because git prints one or the other, and
+    /// `-z` because a rename is two paths and a path may hold anything at
+    /// all except a NUL.
+    ///
+    /// The record shapes, which the walkers below encode:
+    /// - numstat: `"12\t3\tpath"` per record; a rename instead sends
+    ///   `"12\t3\t"` and then the old and new paths as two records of their
+    ///   own.
+    /// - name-status: `"M"` then its path; `"R100"` then old and new.
+    ///
+    /// Order is the numstat order (git's own), and a file missing from
+    /// either side still lands in the list — a counted file with no letter
+    /// is shown as modified rather than dropped.
+    static func reviewFiles(numstat: String, nameStatus: String) -> [ReviewFile] {
+        var statuses: [String: (status: Character, oldPath: String?)] = [:]
+        let nameFields = nulFields(nameStatus)
+        var index = 0
+        while index + 1 < nameFields.count {
+            let code = nameFields[index]
+            guard let letter = code.first else { index += 1; continue }
+            // R and C carry a similarity score ("R100") and two paths.
+            if letter == "R" || letter == "C", index + 2 < nameFields.count {
+                statuses[nameFields[index + 2]] = (letter, nameFields[index + 1])
+                index += 3
+            } else {
+                statuses[nameFields[index + 1]] = (letter, nil)
+                index += 2
+            }
+        }
+
+        var files: [ReviewFile] = []
+        var seen = Set<String>()
+        let numFields = nulFields(numstat)
+        index = 0
+        while index < numFields.count {
+            let record = numFields[index]
+            let parts = record.split(separator: "\t", omittingEmptySubsequences: false)
+            guard parts.count >= 3 else { index += 1; continue }
+            let adds = String(parts[0])
+            let dels = String(parts[1])
+            var path = String(parts[2])
+            var oldPath: String?
+            if path.isEmpty {
+                // Rename or copy: the two paths follow as their own records.
+                guard index + 2 < numFields.count else { break }
+                oldPath = numFields[index + 1]
+                path = numFields[index + 2]
+                index += 3
+            } else {
+                index += 1
+            }
+            guard !path.isEmpty, seen.insert(path).inserted else { continue }
+            let known = statuses[path]
+            files.append(ReviewFile(
+                path: path,
+                oldPath: oldPath ?? known?.oldPath,
+                status: known?.status ?? "M",
+                additions: Int(adds) ?? 0,
+                deletions: Int(dels) ?? 0,
+                // "-\t-" is git saying the file is binary.
+                isBinary: adds == "-" || dels == "-"
+            ))
+        }
+
+        // Files with no line counts at all — a pure mode change, or a
+        // rename git counted under a path numstat spelled differently.
+        for (path, entry) in statuses where !seen.contains(path) {
+            files.append(ReviewFile(path: path, oldPath: entry.oldPath, status: entry.status))
+        }
+        return files
+    }
+
+    /// A `-z` stream's records: NUL-separated, with the trailing empty tail
+    /// the final separator leaves behind dropped.
+    private static func nulFields(_ output: String) -> [String] {
+        var fields = output.components(separatedBy: "\0")
+        while fields.last?.isEmpty == true { fields.removeLast() }
+        return fields
+    }
+
     // MARK: - status (porcelain v2)
 
     struct StatusResult {

@@ -251,6 +251,84 @@ actor GitClient {
         return try await run(args)
     }
 
+    // MARK: - Review diff
+
+    /// Where a fetched pull/merge request head is parked locally. Under
+    /// `refs/thegit/` on purpose: the graph walks `--branches --remotes
+    /// --tags`, so a review ref adds no rows and draws no badges, and it
+    /// survives relaunches — reopening a review needs no network.
+    nonisolated static func reviewRef(number: Int, forge: Forge) -> String {
+        "refs/thegit/\(forge == .github ? "pr" : "mr")/\(number)"
+    }
+
+    /// The forge's own read-only ref for a pull/merge request, which exists
+    /// whatever repo the branch lives in — a fork's head included, where the
+    /// branch itself is on a remote we've never heard of.
+    private nonisolated static func remoteReviewRef(number: Int, forge: Forge) -> String {
+        forge == .github
+            ? "refs/pull/\(number)/head"
+            : "refs/merge-requests/\(number)/head"
+    }
+
+    /// Fetch what a review needs to be diffed locally: the request's head,
+    /// and the branch it targets. Returns the two revs to diff between.
+    ///
+    /// The head fetch is the one that must work — without it there is
+    /// nothing to review. The base fetch is best-effort: a base ref we
+    /// can't update still has whatever `origin/main` we had, and a stale
+    /// merge base makes a slightly wider diff, not a wrong one.
+    func fetchReviewRefs(
+        number: Int, base: String, remote: String, forge: Forge
+    ) async throws -> (base: String, head: String) {
+        let head = Self.reviewRef(number: number, forge: forge)
+        try await run([
+            "fetch", "--force", remote,
+            "+\(Self.remoteReviewRef(number: number, forge: forge)):\(head)",
+        ])
+        if !base.isEmpty {
+            _ = try? await run([
+                "fetch", "--force", remote,
+                "+refs/heads/\(base):refs/remotes/\(remote)/\(base)",
+            ])
+        }
+        return (await resolvedBase(base, remote: remote), head)
+    }
+
+    /// The rev to diff the review against: the remote's copy of the target
+    /// branch by preference — it is what the forge merges into — then a
+    /// local branch of that name, then the remote's default branch.
+    private func resolvedBase(_ base: String, remote: String) async -> String {
+        for candidate in ["refs/remotes/\(remote)/\(base)", "refs/heads/\(base)"]
+        where !base.isEmpty {
+            if (try? await run(["rev-parse", "--verify", "--quiet", candidate])) != nil {
+                return candidate
+            }
+        }
+        return "refs/remotes/\(remote)/\(await defaultBranch(remote: remote))"
+    }
+
+    /// Every file a review touches, with its line counts. `range` is
+    /// `base...head` — three dots, so commits that landed on the base
+    /// meanwhile don't show up as this request's work, exactly like the AI
+    /// description's diff.
+    func reviewFiles(range: String) async throws -> [ReviewFile] {
+        let numstat = try await run([
+            "diff", "--numstat", "--find-renames", "-z", "--no-ext-diff", range,
+        ])
+        let nameStatus = try await run([
+            "diff", "--name-status", "--find-renames", "-z", "--no-ext-diff", range,
+        ])
+        return GitParsers.reviewFiles(numstat: numstat, nameStatus: nameStatus)
+    }
+
+    /// One file's diff within a review.
+    func reviewFileDiff(range: String, file: ReviewFile) async throws -> String {
+        try await run(
+            ["diff", "--no-color", "--no-ext-diff", "--find-renames", "-U3", range, "--"]
+                + file.diffPaths
+        )
+    }
+
     // MARK: - Conflict resolution
 
     /// Take one side of a conflicted file wholesale, then mark it resolved.

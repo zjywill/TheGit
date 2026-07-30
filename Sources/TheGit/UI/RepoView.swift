@@ -92,6 +92,19 @@ struct RepoView: View {
                         removal: .identity
                     ))
                 }
+                if let pr = repo.prToView {
+                    // Same wrapper/id split as the issue viewer above, for
+                    // the same reason: switching requests swaps content
+                    // instantly, only the panel's arrival fades.
+                    ZStack {
+                        PullRequestDetailView(repo: repo, pr: pr)
+                            .id(pr.id)
+                    }
+                    .transition(.asymmetric(
+                        insertion: .opacity.animation(.easeOut(duration: 0.12)),
+                        removal: .identity
+                    ))
+                }
             }
             .frame(minWidth: 400)
             .layoutPriority(1)
