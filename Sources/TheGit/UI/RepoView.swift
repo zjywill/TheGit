@@ -202,14 +202,10 @@ struct RepoView: View {
 struct RepoToolbar: ToolbarContent {
     @ObservedObject var repo: RepoState
     @FocusState private var searchFocused: Bool
-    /// Default action for the Pull button, GitKraken-style. Picking from the
-    /// dropdown runs that operation immediately AND makes it the button's
-    /// default — it used to only set the default, which meant a one-off
-    /// `--rebase` pull cost three actions: open the menu, click the row,
-    /// then find the button and click that too. The tick in the menu is a
-    /// selection, so selecting it is the act. A Binding into RootView's
-    /// @AppStorage — see the note there.
+    /// Default action for the Pull button, GitKraken-style. A Binding into
+    /// RootView's @AppStorage — see the note there.
     @Binding var pullModeRaw: String
+    @State private var showingPullOptions = false
 
     private var pullMode: RepoState.PullMode {
         RepoState.PullMode(rawValue: pullModeRaw) ?? .ff
@@ -217,32 +213,41 @@ struct RepoToolbar: ToolbarContent {
 
     var body: some ToolbarContent {
         ToolbarItemGroup {
-            Menu {
-                Section("Runs now, and becomes the default") {
-                    ForEach(RepoState.PullMode.allCases, id: \.rawValue) { mode in
-                        Button {
-                            pullModeRaw = mode.rawValue
-                            repo.runPull(mode)
-                        } label: {
-                            HStack {
-                                Text(mode.title)
-                                if mode == pullMode { Image(systemName: "checkmark") }
-                            }
-                        }
-                    }
-                }
+            Button {
+                repo.runPull(pullMode)
             } label: {
                 Label(pullMode == .fetchAll ? "Fetch" : "Pull",
                       systemImage: "arrow.down.to.line")
-            } primaryAction: {
-                repo.runPull(pullMode)
             }
-            // The NSMenu a toolbar Menu builds is a snapshot — it never
-            // re-renders on state change, so the check stayed put (and
-            // primaryAction kept running the old mode). A new id tears the
-            // whole item down and rebuilds it whenever the mode changes.
-            .id(pullModeRaw)
             .help(pullMode.title)
+
+            // A popover rather than the Menu this used to be, because the two
+            // acts in each row need two hit targets and an NSMenu item is one
+            // button — there is nowhere to put a separately-clickable dot. It
+            // also fixes what the old code needed `.id(pullModeRaw)` to work
+            // around: the NSMenu a toolbar Menu builds is a snapshot that
+            // never re-renders, so the tick stayed put after a change. A
+            // popover is live SwiftUI and just updates.
+            Button {
+                showingPullOptions.toggle()
+            } label: {
+                Image(systemName: "chevron.down")
+                    .zoomFont(9, weight: .semibold)
+            }
+            .help("Other pull and fetch operations")
+            .popover(isPresented: $showingPullOptions, arrowEdge: .bottom) {
+                PullOptionsPopover(current: pullMode) { mode, isDefault in
+                    if isDefault {
+                        // Stays open: the dot moving is the whole confirmation
+                        // that the setting took, and closing the sheet you
+                        // just changed a setting in hides the evidence.
+                        pullModeRaw = mode.rawValue
+                    } else {
+                        showingPullOptions = false
+                        repo.runPull(mode)
+                    }
+                }
+            }
 
             Button {
                 repo.push()
@@ -343,5 +348,93 @@ struct RepoToolbar: ToolbarContent {
             }
 #endif
         }
+    }
+}
+
+/// The Pull button's other operations, GitKraken-style — and the reason this
+/// isn't a menu is that each row carries two different acts:
+///
+/// - **The row** runs that operation once, right now, and leaves the button's
+///   default alone. A `--rebase` pull you want this afternoon isn't a
+///   statement about how you pull in general.
+/// - **The dot** makes it the default and runs nothing.
+///
+/// Before this, the menu's rows only set the default, so a one-off rebase pull
+/// cost three acts — open the menu, pick the row, then go back out and press
+/// the button — and silently changed how the button would behave forever
+/// afterwards. The two things were welded together; now they're two targets.
+private struct PullOptionsPopover: View {
+    let current: RepoState.PullMode
+    /// `isDefault` false = run it now, true = adopt it as the default.
+    let choose: (RepoState.PullMode, Bool) -> Void
+
+    @Environment(\.uiZoom) private var zoom
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2 * zoom) {
+            Text("Click an operation to run it now")
+                .zoomFont(11)
+                .foregroundStyle(.secondary)
+            Text("The dot sets the button's default")
+                .zoomFont(10)
+                .foregroundStyle(.tertiary)
+                .padding(.bottom, 4 * zoom)
+            ForEach(RepoState.PullMode.allCases, id: \.rawValue) { mode in
+                PullOptionRow(
+                    mode: mode,
+                    isDefault: mode == current,
+                    run: { choose(mode, false) },
+                    setDefault: { choose(mode, true) }
+                )
+            }
+        }
+        .padding(12 * zoom)
+        .frame(minWidth: 240 * zoom, alignment: .leading)
+    }
+}
+
+private struct PullOptionRow: View {
+    let mode: RepoState.PullMode
+    let isDefault: Bool
+    let run: () -> Void
+    let setDefault: () -> Void
+
+    @Environment(\.uiZoom) private var zoom
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 8 * zoom) {
+            // Its own button, and the only part of the row that isn't the
+            // operation. Filled when it's the default, hollow otherwise —
+            // radio grammar, because exactly one of these is true.
+            Button(action: setDefault) {
+                Image(systemName: isDefault ? "largecircle.fill.circle" : "circle")
+                    .zoomFont(13)
+                    .foregroundStyle(isDefault ? Color.accentColor : .secondary)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.pressEffect)
+            .help(isDefault ? "Already the default" : "Set as default")
+
+            Button(action: run) {
+                Text(mode.title)
+                    .zoomFont(12)
+                    // The row's whole width is the target, not just the
+                    // words — a 4pt-tall click zone on "Pull (rebase)" is
+                    // what made the old menu feel fussy.
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Run \(mode.title.lowercased()) now")
+        }
+        .padding(.horizontal, 6 * zoom)
+        .padding(.vertical, 5 * zoom)
+        .background(
+            RoundedRectangle(cornerRadius: 5)
+                .fill(Color.primary.opacity(hovering ? 0.08 : 0))
+        )
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
     }
 }
