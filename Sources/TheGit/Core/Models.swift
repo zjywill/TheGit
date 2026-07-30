@@ -1,6 +1,6 @@
 import Foundation
 
-struct Commit: Identifiable, Hashable {
+struct Commit: Identifiable, Hashable, Codable {
     let hash: String
     let parents: [String]
     let author: String
@@ -30,12 +30,12 @@ struct Commit: Identifiable, Hashable {
     }
 }
 
-enum BranchKind: Hashable {
+enum BranchKind: Hashable, Codable {
     case local
     case remote(String) // remote name, e.g. "origin"
 }
 
-struct Branch: Identifiable, Hashable {
+struct Branch: Identifiable, Hashable, Codable {
     let name: String      // e.g. "main" or "origin/main"
     let kind: BranchKind
     let isCurrent: Bool
@@ -67,7 +67,7 @@ struct Branch: Identifiable, Hashable {
     }
 }
 
-struct Worktree: Identifiable, Hashable {
+struct Worktree: Identifiable, Hashable, Codable {
     let path: String
     let branch: String?
     let head: String
@@ -83,12 +83,12 @@ struct Worktree: Identifiable, Hashable {
     var displayName: String { (path as NSString).lastPathComponent }
 }
 
-enum ChangeArea {
+enum ChangeArea: String, Codable {
     case staged
     case unstaged
 }
 
-struct FileChange: Identifiable, Hashable {
+struct FileChange: Identifiable, Hashable, Codable {
     let path: String
     let status: Character // M A D R C U ? etc.
     let area: ChangeArea
@@ -99,10 +99,36 @@ struct FileChange: Identifiable, Hashable {
         let dir = (path as NSString).deletingLastPathComponent
         return dir.isEmpty ? "" : dir + "/"
     }
+
+    // `status` is a Character — git's own one-letter code — which JSON has
+    // no notion of. Bridged through a String rather than changed here: the
+    // whole app switches on that Character, and widening it to String for
+    // the sake of the cache would touch every one of those sites.
+    enum CodingKeys: String, CodingKey { case path, status, area }
+
+    init(path: String, status: Character, area: ChangeArea) {
+        self.path = path
+        self.status = status
+        self.area = area
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path = try c.decode(String.self, forKey: .path)
+        status = try c.decode(String.self, forKey: .status).first ?? " "
+        area = try c.decode(ChangeArea.self, forKey: .area)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(path, forKey: .path)
+        try c.encode(String(status), forKey: .status)
+        try c.encode(area, forKey: .area)
+    }
 }
 
 /// A multi-step git operation that is paused mid-flight (usually on conflicts).
-enum OngoingOperation: String {
+enum OngoingOperation: String, Codable {
     case merge = "Merge"
     case rebase = "Rebase"
     case cherryPick = "Cherry-pick"
@@ -127,13 +153,13 @@ enum OngoingOperation: String {
     }
 }
 
-struct Tag: Identifiable, Hashable {
+struct Tag: Identifiable, Hashable, Codable {
     let name: String
     let hash: String
     var id: String { name }
 }
 
-struct Stash: Identifiable, Hashable {
+struct Stash: Identifiable, Hashable, Codable {
     let ref: String      // "stash@{0}"
     let date: Date
     let message: String  // "WIP on main: abc123 subject" or custom -m text
@@ -144,7 +170,7 @@ struct Stash: Identifiable, Hashable {
     var id: String { ref }
 }
 
-struct Submodule: Identifiable, Hashable {
+struct Submodule: Identifiable, Hashable, Codable {
     let path: String
     let sha: String
     /// From `git submodule status`: " " in sync, "+" checked-out commit
@@ -152,6 +178,29 @@ struct Submodule: Identifiable, Hashable {
     let state: Character
 
     var id: String { path }
+
+    /// Same Character-through-String bridge as `FileChange.status`.
+    enum CodingKeys: String, CodingKey { case path, sha, state }
+
+    init(path: String, sha: String, state: Character) {
+        self.path = path
+        self.sha = sha
+        self.state = state
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path = try c.decode(String.self, forKey: .path)
+        sha = try c.decode(String.self, forKey: .sha)
+        state = try c.decode(String.self, forKey: .state).first ?? " "
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(path, forKey: .path)
+        try c.encode(sha, forKey: .sha)
+        try c.encode(String(state), forKey: .state)
+    }
     var displayName: String { (path as NSString).lastPathComponent }
 
     var stateDescription: String {
@@ -194,7 +243,7 @@ enum ActivityDay {
     static let yearWeeks = 53
 }
 
-struct RepoSnapshot: Equatable {
+struct RepoSnapshot: Equatable, Codable {
     var commits: [Commit] = []
     /// Commits per day over the last `ActivityDay.windowWeeks`, all refs.
     var activity: [Int: Int] = [:]
@@ -221,6 +270,21 @@ struct RepoSnapshot: Equatable {
     /// Branch-line color ids that belong to HEAD's history: lines keep
     /// full brightness along their whole run, others dim entirely.
     var brightColors: Set<Int> = []
+
+    /// What the disk cache stores — everything git had to be asked for, and
+    /// nothing that can be recomputed from it. The three omissions
+    /// (`graphRows`, `reachableFromHead`, `brightColors`) are pure functions
+    /// of `commits` plus the file lists, and together they are the bulk of a
+    /// snapshot's bytes: a 500-commit graph is a row per commit, each with
+    /// its own lane arrays. `RepoState.rehydrate` runs the same two
+    /// functions `refresh()` does, so a restored snapshot draws identically
+    /// to a read one — which also means the cache can never disagree with
+    /// the layout code as it changes.
+    enum CodingKeys: String, CodingKey {
+        case commits, activity, localBranches, remoteBranches, worktrees
+        case submodules, lfs, stashes, tags, staged, unstaged, conflicted
+        case currentBranch, operation, mergeMessage
+    }
 
     /// The commit HEAD points at, within the loaded window. Read off the
     /// ref list rather than tracked separately, so it can never disagree

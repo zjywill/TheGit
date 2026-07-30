@@ -113,7 +113,9 @@ final class RepoState: ObservableObject, Identifiable {
         case stash = "Stash"
     }
 
-    @Published var snapshot = RepoSnapshot()
+    @Published var snapshot = RepoSnapshot() {
+        didSet { scheduleSnapshotSave() }
+    }
     @Published var commitMessage = ""
     /// The merge draft last prefilled into `commitMessage`, so it can be
     /// taken back out when the merge ends without it being committed.
@@ -368,7 +370,7 @@ final class RepoState: ObservableObject, Identifiable {
     /// once, and a full `refresh()` is nine subprocesses each — nine repos
     /// would be eighty processes to draw a wall of cards. This is two, and
     /// only for repos whose tab hasn't been opened yet.
-    struct Card: Equatable {
+    struct Card: Equatable, Codable {
         var branch: String?
         var head: String?
         var ahead = 0
@@ -392,7 +394,9 @@ final class RepoState: ObservableObject, Identifiable {
         }
     }
 
-    @Published private(set) var card: Card?
+    @Published private(set) var card: Card? {
+        didSet { scheduleSummarySave() }
+    }
     private var cardLoadedAt: Date?
 
     /// Load (or refresh) the card. Cheap enough to call on every visit to
@@ -501,7 +505,14 @@ final class RepoState: ObservableObject, Identifiable {
         return counts
     }
 
-    private var yearActivityCache: (counts: [Int: Int], at: Date)?
+    private var yearActivityCache: (counts: [Int: Int], at: Date)? {
+        didSet { scheduleSummarySave() }
+    }
+
+    /// The year this repo contributed to the Dashboard's grid on the last
+    /// run, so the wall can be drawn before a single `git log` has finished.
+    /// See `AppState.hydrate`.
+    var cachedYearActivity: [Int: Int]? { yearActivityCache?.counts }
 
     private var hasLoaded = false
     /// When the snapshot was last read from git — see `appeared()`.
@@ -514,6 +525,156 @@ final class RepoState: ObservableObject, Identifiable {
         autoFetchTask?.cancel()
         pendingRefresh?.cancel()
         commentsTask?.cancel()
+    }
+
+    // MARK: - Disk cache
+
+    /// Set while the cache is being read back in, so the `didSet`s that
+    /// restoring trips don't turn around and write what was just read.
+    private var isRehydrating = false
+    private var snapshotSave: Task<Void, Never>?
+    private var summarySave: Task<Void, Never>?
+    private var summaryHydrated = false
+
+    /// Coalesced, because the snapshot is republished far more often than it
+    /// meaningfully changes: the FS watcher fires on every file save in the
+    /// working tree, and each one ends in a refresh. Two seconds of quiet is
+    /// the difference between one write per burst of typing and one per
+    /// keystroke — and losing the last two seconds costs nothing, since the
+    /// next launch refreshes over whatever it restored anyway.
+    private func scheduleSnapshotSave() {
+        guard !isRehydrating else { return }
+        snapshotSave?.cancel()
+        snapshotSave = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled, let self else { return }
+            self.writeSnapshot()
+        }
+    }
+
+    private func scheduleSummarySave() {
+        guard !isRehydrating else { return }
+        summarySave?.cancel()
+        summarySave = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled, let self else { return }
+            self.writeSummary()
+        }
+    }
+
+    /// Encoding happens off the main actor: a 500-commit snapshot is a few
+    /// hundred KB of JSON, and the main actor is drawing a graph.
+    private func writeSnapshot() {
+        let snapshot = snapshot
+        let path = path
+        Task.detached(priority: .utility) { RepoCache.saveSnapshot(snapshot, path: path) }
+    }
+
+    private func summary() -> RepoCache.Summary {
+        RepoCache.Summary(
+            savedAt: Date(),
+            card: card,
+            cardLoadedAt: cardLoadedAt,
+            yearActivity: yearActivityCache?.counts,
+            yearActivityAt: yearActivityCache?.at,
+            forge: forge,
+            missingForgeCLI: missingForgeCLI,
+            pullRequests: pullRequests,
+            issues: issues,
+            prsLoadedAt: prsLoadedAt
+        )
+    }
+
+    private func writeSummary() {
+        let summary = summary()
+        let path = path
+        Task.detached(priority: .utility) { RepoCache.saveSummary(summary, path: path) }
+    }
+
+    /// Write now rather than in a second or two — for quitting, and for
+    /// closing a tab, which is where a debounce would otherwise be the
+    /// difference between restoring that repo and not.
+    ///
+    /// On this thread, not a detached one: at `willTerminate` there is no
+    /// later. A background write scheduled from there races the process
+    /// exiting, and loses often enough that quitting normally — the most
+    /// common way anyone leaves the app — would be the one path that saves
+    /// nothing. A few milliseconds of encoding on the way out is the price.
+    func flushCache() {
+        snapshotSave?.cancel()
+        summarySave?.cancel()
+        RepoCache.saveSnapshot(snapshot, path: path)
+        RepoCache.saveSummary(summary(), path: path)
+    }
+
+    /// Last launch's three panes, put back before git is asked anything.
+    /// Returns whether anything was restored — the caller uses it to decide
+    /// between a busy refresh and a quiet one.
+    ///
+    /// The graph is rebuilt here rather than stored, through the same two
+    /// functions `refresh()` uses: a restored view must be identical to a
+    /// read one, and the only way to guarantee that is to not have a second
+    /// path that produces it.
+    private func rehydrate() async -> Bool {
+        guard snapshot.commits.isEmpty else { return false }
+        let path = path
+        guard var snap = await Task.detached(priority: .userInitiated, operation: {
+            RepoCache.loadSnapshot(path: path)
+        }).value else { return false }
+
+        snap.reachableFromHead = Self.reachableSet(from: snap.headHash, commits: snap.commits)
+        let g = Self.graph(
+            commits: snap.commits,
+            headHash: snap.headHash,
+            dirty: !(snap.staged.isEmpty && snap.unstaged.isEmpty && snap.conflicted.isEmpty),
+            reachable: snap.reachableFromHead,
+            stashes: snap.stashes
+        )
+        snap.graphRows = g.rows
+        snap.brightColors = g.bright
+
+        isRehydrating = true
+        snapshot = snap
+        isRehydrating = false
+        updateLineage()
+        revealCurrentBranch()
+        // Deliberately not `lastRefreshedAt`: nothing here came from git,
+        // and the freshness window belongs to reads that did.
+        return true
+    }
+
+    /// The Dashboard's half of the cache: the card, the year behind the
+    /// heatmap, and what we knew about the forge — including the PR and
+    /// issue lists, whose TTL now spans a restart. Called for every repo in
+    /// the library at launch, which is why it is the small file.
+    func hydrateSummary() async {
+        guard !summaryHydrated else { return }
+        summaryHydrated = true
+        let path = path
+        guard let saved = await Task.detached(priority: .userInitiated, operation: {
+            RepoCache.loadSummary(path: path)
+        }).value else { return }
+
+        isRehydrating = true
+        defer { isRehydrating = false }
+        if card == nil {
+            card = saved.card
+            cardLoadedAt = saved.cardLoadedAt
+        }
+        if yearActivityCache == nil, let counts = saved.yearActivity {
+            yearActivityCache = (counts, saved.yearActivityAt ?? saved.savedAt)
+        }
+        // Only as a head start: `detectForge()` still runs this session and
+        // overwrites all of it. A remote that changed hosts, or a `gh` that
+        // was uninstalled, has to be noticed — the cache is here to fill the
+        // second before that answer lands, not to stand in for it.
+        guard !forgeDetected, forge == nil else { return }
+        forge = saved.forge
+        missingForgeCLI = saved.missingForgeCLI
+        if saved.forge != nil || saved.missingForgeCLI != nil { forgeChecked = true }
+        if pullRequests.isEmpty { pullRequests = saved.pullRequests }
+        if issues == nil { issues = saved.issues }
+        if prsLoadedAt == nil { prsLoadedAt = saved.prsLoadedAt }
     }
 
     /// Watch the repo (working tree + .git) and refresh quietly, debounced.
@@ -559,6 +720,11 @@ final class RepoState: ObservableObject, Identifiable {
     /// only freshen quietly in the background — switching tabs is a
     /// many-times-a-day action and must never flash a spinner.
     func appeared() async {
+        // Before anything that could conclude on its own: the wall hydrates
+        // every repo at launch too, and whichever gets here first must be
+        // the one that fills in the forge — a detection that has already run
+        // this session is never overwritten by a cached one.
+        await hydrateSummary()
         startAutoFetch()
         startWatching()
         if hasLoaded {
@@ -573,7 +739,14 @@ final class RepoState: ObservableObject, Identifiable {
             }
         } else {
             hasLoaded = true
-            await refresh()
+            // Last launch's panes first, then a quiet refresh behind them.
+            // A restored repo never shows the spinner: there is content on
+            // screen the whole time, and the refresh only publishes what
+            // actually differs (see the `snap != snapshot` check in
+            // `refresh`), so the update lands as the handful of rows that
+            // changed rather than as a full redraw.
+            let restored = await rehydrate()
+            await refresh(quiet: restored)
         }
         await detectForge()
         // Coming back to a tab after a while: freshen the PR list, but
@@ -593,6 +766,7 @@ final class RepoState: ObservableObject, Identifiable {
     /// Everything already read stays: `appeared()` will show it instantly on
     /// the way back in and freshen quietly, and it restarts both of these.
     func tabClosed() {
+        flushCache()
         autoFetchTask?.cancel()
         autoFetchTask = nil
         pendingRefresh?.cancel()
@@ -1532,7 +1706,10 @@ final class RepoState: ObservableObject, Identifiable {
     /// One-shot: the remote host decides the CLI, and the CLI has to be
     /// installed. Nothing here is shown or logged when it comes back nil.
     private func detectForge() async {
-        guard !forgeDetected, forge == nil else { return }
+        // Only `forgeDetected` gates this, not `forge == nil`: the cache
+        // restores last launch's answer so the sidebar has its section on
+        // the first frame, and detection has to be free to overwrite it.
+        guard !forgeDetected else { return }
         // The snapshot knows the remotes of a repo whose tab has been
         // opened; the Dashboard asks about repos that never have, so fall
         // back to git's own answer — one subprocess, the same price as the
@@ -1545,20 +1722,31 @@ final class RepoState: ObservableObject, Identifiable {
         let defaultRemote = remotes.contains("origin") ? "origin" : remotes[0]
         let url = try? await git.remoteURL(defaultRemote)
         if let url { forgeHost = ForgeParsers.host(of: url) }
+        // Every branch assigns both, so a stale restored answer can't
+        // survive detection disagreeing with it — a repo whose remote moved
+        // to a host we know nothing about has to lose its PR section.
         switch url.flatMap({ ForgeClient.detect(remoteURL: $0) }) {
         case .ready(let found):
             forge = found
             missingForgeCLI = nil
         case .missingCLI(let found):
+            forge = nil
             missingForgeCLI = found
         case nil:
-            break
+            forge = nil
+            missingForgeCLI = nil
         }
         // Published before the pull-request load, not after: avatars are
         // waiting on this, and they have no business waiting on a network
         // round trip for merge requests.
         forgeChecked = true
-        if forge != nil { await loadPullRequests() }
+        scheduleSummarySave()
+        // The restored list has a TTL of its own, and it outlives the
+        // process now: relaunching twice in a minute is not a reason to
+        // shell out to `gh` twice.
+        guard forge != nil else { return }
+        if let at = prsLoadedAt, Date().timeIntervalSince(at) < Self.prsFreshFor { return }
+        await loadPullRequests()
     }
 
     /// The sidebar's "check again" after the user installs gh/glab: run
@@ -1604,6 +1792,7 @@ final class RepoState: ObservableObject, Identifiable {
         // must not read as "can't reach the forge" when the PRs loaded fine.
         issues = try? await forgeClient.issues(forge)
         prsLoadedAt = Date()
+        scheduleSummarySave()
     }
 
     /// Open the in-app viewer on an issue and start fetching its thread.
