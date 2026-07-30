@@ -1,7 +1,7 @@
 import Foundation
 
 /// A pull request (GitHub) or merge request (GitLab), as the CLI reports it.
-struct PullRequest: Identifiable, Hashable {
+struct PullRequest: Identifiable, Hashable, Codable {
     let number: Int
     let title: String
     let branch: String
@@ -14,7 +14,7 @@ struct PullRequest: Identifiable, Hashable {
 
 /// An open issue, as the CLI reports it. The body comes with the list —
 /// one fetch, and the viewer opens with everything but the thread.
-struct Issue: Identifiable, Hashable {
+struct Issue: Identifiable, Hashable, Codable {
     let number: Int
     let title: String
     let author: String
@@ -31,7 +31,7 @@ struct Issue: Identifiable, Hashable {
 /// A forge label. GitHub and GitLab both pick a colour per label; GitLab's
 /// issue listing sends only the names, so the colour is optional and a
 /// chip without one draws grey.
-struct IssueLabel: Hashable {
+struct IssueLabel: Hashable, Codable {
     let name: String
     /// "a2eeef" (GitHub) or "#428BCA" (GitLab) — normalised by Color init.
     var colorHex: String? = nil
@@ -101,7 +101,7 @@ enum IssueTimelineItem: Identifiable, Hashable {
 /// Which CLI drives a repo's pull requests. We never speak to an API
 /// ourselves: hosts, tokens and OAuth stay the CLI's problem, exactly like
 /// the git engine stays the git binary's problem.
-enum Forge: String {
+enum Forge: String, Codable {
     case github
     case gitlab
 

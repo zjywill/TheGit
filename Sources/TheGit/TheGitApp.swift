@@ -487,6 +487,10 @@ struct NewTabButton: View {
 private struct WindowFloor: NSViewRepresentable {
     let size: CGSize
 
+    /// One window, one saved frame. The name is what AppKit keys the saved
+    /// frame by in the preferences, so it must never change.
+    static let autosaveName = "TheGitMainWindow"
+
     func makeNSView(context: Context) -> NSView { NSView() }
 
     func updateNSView(_ view: NSView, context: Context) {
@@ -494,7 +498,18 @@ private struct WindowFloor: NSViewRepresentable {
         // setting a window's size from inside a layout pass it's running is
         // how you get "Unbalanced calls to begin/end appearance transition".
         DispatchQueue.main.async {
-            guard let window = view.window, window.contentMinSize != size else { return }
+            guard let window = view.window else { return }
+            // The only place in the app that holds an NSWindow, so it is
+            // also where the frame gets a name to be saved under. AppKit
+            // then restores size and position itself, which macOS's implicit
+            // state restoration only does when it feels like it — a window
+            // dragged to a second display and sized to fill it came back
+            // 1100×760 in the middle of the laptop screen often enough to
+            // be worth one line.
+            if window.frameAutosaveName != Self.autosaveName {
+                window.setFrameAutosaveName(Self.autosaveName)
+            }
+            guard window.contentMinSize != size else { return }
             window.contentMinSize = size
             // A window restored from a smaller saved frame keeps that frame
             // until something nudges it — the floor only applies to future

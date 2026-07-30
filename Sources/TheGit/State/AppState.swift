@@ -19,7 +19,9 @@ final class AppState: ObservableObject {
     /// a view onto the library, and a second array of references is a second
     /// place for the same repo to be — or to fail to be.
     @Published var openTabIDs: [String] = []
-    @Published var activeRepoID: String?
+    @Published var activeRepoID: String? {
+        didSet { persistActiveRepo() }
+    }
     /// A folder the user tried to open that isn't a git repository.
     @Published var nonGitPath: String?
     /// No usable git on the box (fresh Mac, no Command Line Tools). The
@@ -35,6 +37,10 @@ final class AppState: ObservableObject {
     /// Which of them had a tab. Absent on that same upgrade, which is why its
     /// default is "all of them" — see `init`.
     static let tabsKey = "TheGit.openTabs"
+    /// The tab that was on screen at quit. Restoring it matters more than it
+    /// sounds: without it every launch lands on the leftmost tab, which for
+    /// anyone with a few repos open is never the one they were working in.
+    static let activeKey = "TheGit.activeRepo"
 
     /// True while the pointer is over a repo tab or the + button, so the
     /// title-bar double-click monitor leaves those clicks alone.
@@ -263,11 +269,51 @@ final class AppState: ObservableObject {
         openTabIDs = savedTabs
             .map { Self.canonical(path: $0) }
             .filter { known.contains($0) && seenTabs.insert($0).inserted }
-        activeRepoID = openTabIDs.first
+        // The tab that was showing at quit, when it still has one; the
+        // leftmost otherwise, which is also what an upgrade from the build
+        // that never saved this gets.
+        let savedActive = UserDefaults.standard.string(forKey: Self.activeKey)
+            .map { Self.canonical(path: $0) }
+        activeRepoID = savedActive.flatMap { openTabIDs.contains($0) ? $0 : nil }
+            ?? openTabIDs.first
         // The folding above can leave what's on disk out of date, and the next
         // write is whenever the user next opens or closes something.
         persist()
+        Task { await hydrate() }
         Task { await watchForGit() }
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.flushCaches() }
+        }
+    }
+
+    /// Fill the wall from last launch's cache before any git command runs:
+    /// each card, and each repo's year in the summed heatmap. The tab that
+    /// opens hydrates its own three panes — see `RepoState.appeared`.
+    ///
+    /// One repo at a time, in wall order, for the same reason `loadActivity`
+    /// is sequential: filling in from the top reads as loading, while a wall
+    /// that pops in at random reads as flicker.
+    private func hydrate() async {
+        // An empty library is not evidence that every cached file is
+        // orphaned — it's also what a first launch, a cleared preference or
+        // a test host looks like, and pruning on that would delete a cache
+        // its owner is still using.
+        guard !repos.isEmpty else { return }
+        RepoCache.prune(keeping: repos.map(\.path))
+        for repo in repos {
+            await repo.hydrateSummary()
+            guard let counts = repo.cachedYearActivity else { continue }
+            activityByRepo[repo.id] = counts
+            mergeActivity()
+        }
+    }
+
+    /// Quitting is the one moment a debounced write would be dropped, and
+    /// it is also the moment the cache exists for.
+    private func flushCaches() {
+        for repo in repos { repo.flushCache() }
     }
 
     /// One probe at launch; while git is missing, keep watching. The CLT
@@ -369,6 +415,9 @@ final class AppState: ObservableObject {
     func remove(repo: RepoState) {
         closeTab(repo: repo)
         repos.removeAll { $0.id == repo.id }
+        // Forgetting a repo means forgetting it: its cached snapshot is a
+        // copy of a working tree the user just told us they're done with.
+        RepoCache.forget(path: repo.path)
         // Removing from the Dashboard's own context menu leaves the user
         // looking at the grid, so it has to lose that repo's cells now
         // rather than on the next visit.
@@ -395,5 +444,12 @@ final class AppState: ObservableObject {
     private func persist() {
         UserDefaults.standard.set(repos.map(\.path), forKey: Self.libraryKey)
         UserDefaults.standard.set(openTabIDs, forKey: Self.tabsKey)
+        persistActiveRepo()
+    }
+
+    /// Its own function because `activeRepoID` changes on every tab click,
+    /// which is far more often than the two lists do.
+    private func persistActiveRepo() {
+        UserDefaults.standard.set(activeRepoID, forKey: Self.activeKey)
     }
 }

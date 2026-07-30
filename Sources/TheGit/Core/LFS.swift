@@ -1,7 +1,7 @@
 import Foundation
 
 /// One file `git lfs ls-files` reports.
-struct LFSFile: Identifiable, Hashable {
+struct LFSFile: Identifiable, Hashable, Codable {
     let oid: String
     let path: String
     /// git prints `*` when the object is in the local cache and `-` when
@@ -14,7 +14,7 @@ struct LFSFile: Identifiable, Hashable {
 
 /// What this repo's LFS setup looks like. Empty means "not an LFS repo",
 /// which is also what we report when the `git-lfs` binary is missing.
-struct LFSStatus: Equatable {
+struct LFSStatus: Equatable, Codable {
     /// Patterns from `.gitattributes` routed through the lfs filter.
     var patterns: [String] = []
     var files: [LFSFile] = []
