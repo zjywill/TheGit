@@ -340,6 +340,21 @@ final class RepoState: ObservableObject, Identifiable {
         return .unknown
     }
     @Published var loadingPullRequests = false
+
+    /// One of the sidebar's two forge sections.
+    enum ForgeSection { case pullRequests, issues }
+
+    /// Which section's refresh button started the fetch in flight, or nil if
+    /// nobody's did.
+    ///
+    /// The two sections share one fetch — the issue list rides along on the PR
+    /// call, see `loadPullRequests()` — so binding both buttons to
+    /// `loadingPullRequests` turned both of them whenever either was pressed,
+    /// which reads as the app refreshing something you didn't ask about. The
+    /// fetch stays shared; the feedback belongs to the button that was
+    /// pressed. Automatic loads set nothing, and the "Loading…" row is what
+    /// speaks for those.
+    @Published private(set) var refreshingForgeSection: ForgeSection?
     /// The "New Pull Request" sheet. Its fields live here, CleanupView-style,
     /// so the sheet survives a sidebar rebuild without losing a draft.
     @Published var showCreatePR = false
@@ -1780,8 +1795,16 @@ final class RepoState: ObservableObject, Identifiable {
         guard let forge else { return }
         loadingPullRequests = true
         defer { loadingPullRequests = false }
+        // Both fetches leave together. They were sequential, and measured on
+        // this repo that cost 2.5s for `gh pr list` and then another 1.5s for
+        // `gh issue list` — four seconds of a Dashboard refresh, per repo,
+        // spent waiting on two requests that have nothing to say to each
+        // other. Two `gh` processes rather than one, and the CLI's own actor
+        // suspends at its subprocess await, so they genuinely overlap.
+        async let fetchedPRs = forgeClient.pullRequests(forge)
+        async let fetchedIssues = forgeClient.issues(forge)
         do {
-            pullRequests = try await forgeClient.pullRequests(forge)
+            pullRequests = try await fetchedPRs
             forgeError = nil
         } catch {
             pullRequests = []
@@ -1790,7 +1813,7 @@ final class RepoState: ObservableObject, Identifiable {
         // The issue list rides along on the PR list's schedule and cache.
         // Its own `try?`, not the `do` above: a repo with issues disabled
         // must not read as "can't reach the forge" when the PRs loaded fine.
-        issues = try? await forgeClient.issues(forge)
+        issues = try? await fetchedIssues
         prsLoadedAt = Date()
         scheduleSummarySave()
     }
@@ -1839,8 +1862,14 @@ final class RepoState: ObservableObject, Identifiable {
         }
     }
 
-    func refreshPullRequests() {
-        Task { await loadPullRequests() }
+    /// `from` is only about which button turns while this runs — the fetch it
+    /// starts is the same either way.
+    func refreshPullRequests(from section: ForgeSection? = nil) {
+        Task {
+            refreshingForgeSection = section
+            await loadPullRequests()
+            refreshingForgeSection = nil
+        }
     }
 
     /// `gh pr checkout` moves HEAD, so it refreshes like any git mutation.

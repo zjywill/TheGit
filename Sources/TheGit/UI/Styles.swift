@@ -130,6 +130,150 @@ extension Animation {
     }
 }
 
+/// A refresh glyph that turns while its own work is in flight, and coasts to
+/// a stop on a whole turn when the work lands.
+///
+/// Linear while it spins. That's the one place in an interface where constant
+/// speed is right — everything else in this app eases out — because a spinner
+/// isn't going anywhere, so there's no arrival to decelerate into.
+///
+/// The coast is the part that matters, and it does two jobs with one
+/// mechanism. Stopping means "ease out to the next whole turn", so the glyph
+/// always lands upright instead of freezing at whatever angle the network
+/// happened to return at — and the shortest possible refresh still shows one
+/// full decelerating revolution. Re-reading the catalogue is forty file reads
+/// and finishes inside a frame; a spinner that appeared and vanished that
+/// fast would read as a glitch rather than as an answer. No minimum-duration
+/// timer, and nothing artificial added to the work itself.
+///
+/// Driven by hand rather than with `.symbolEffect(.rotate)`: that effect is
+/// macOS 15 and this app ships to 14 — and it stops dead anyway.
+///
+/// One single long linear animation carries the whole spin, and this is the
+/// part that took two tries to get right. Both of the obvious ways to build a
+/// spin out of repeated short steps are worse:
+///
+/// - Chaining each turn from the previous one's
+///   `withAnimation(completionCriteria:completion:)` **hangs the app**.
+///   `.removed` fires when an animation is superseded as well as when it
+///   finishes, so a completion that starts the next turn is called again the
+///   instant a re-render supersedes it — an unbounded main-thread loop. The
+///   sidebar re-renders continuously while the list it belongs to is being
+///   fetched, which is exactly when this spins.
+/// - Pacing quarter-turns with `Task.sleep` doesn't hang, but it visibly
+///   stutters: a sleep always overshoots its interval by a few milliseconds,
+///   so every step lands, holds, and restarts. Four dead stops per revolution
+///   read as a wobble rather than as a turn — the glyph looks like it's
+///   tracing an ellipse.
+///
+/// So: one animation, long enough to outlast any refresh, and the elapsed
+/// time is what tells us where the glyph actually is when the work lands.
+/// Nothing to stitch, so nothing to stutter.
+///
+/// Driven by hand rather than with `.symbolEffect(.rotate)`: that effect is
+/// macOS 15 and this app ships to 14 — and it stops dead anyway.
+struct RefreshSpin: ViewModifier {
+    let spinning: Bool
+
+    /// The point the glyph turns about, in its own unit space.
+    var anchor: UnitPoint = RefreshSpin.ringCentre
+
+    /// Where `arrow.clockwise`'s circle actually is.
+    ///
+    /// The glyph hangs an arrowhead off the top of its ring, so the symbol's
+    /// layout box reaches higher than the circle does and the box centre sits
+    /// above the ring the eye is tracking. Turning about that centre swings
+    /// the whole glyph around a point 1.25pt too high at 11pt — a 12%-of-
+    /// diameter orbit, which is precisely what reads as an ellipse rather than
+    /// a spin. Apple's own `.rotate` effect turns about the ring; so does
+    /// this. The ink box centre is no better and was the first thing measured:
+    /// the arrowhead inflates it by exactly as much.
+    ///
+    /// Measured by rasterising the symbol at 16× and taking the widest ink
+    /// row — a scanline through a circle's centre crosses it at both extremes,
+    /// so the widest row IS the centre row, and an arrowhead can't skew it.
+    /// Steady enough across sizes to be a constant: 0.589 at 11pt, 0.592 at
+    /// 13pt, 0.580 at 16pt, 0.582 at 22pt. Rotation anchors don't affect
+    /// layout or the resting frame, so this costs nothing when still.
+    ///
+    /// Glyph-specific. A different icon needs its own measurement, which is
+    /// why it's a parameter rather than baked into the rotation.
+    static let ringCentre = UnitPoint(x: 0.5, y: 0.586)
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// Whole turns, so any resting value is an integer — which is what makes
+    /// "stop upright" expressible as `.rounded(.up)`.
+    @State private var turns: Double = 0
+    /// When the current spin began, and from what angle. A linear animation's
+    /// position is exactly derivable from those two, which is how the coast
+    /// knows where to pick up.
+    @State private var began: Date?
+    @State private var from: Double = 0
+
+    private static let perTurn: Double = 0.9
+    /// An hour of spinning. A refresh that outlives this has bigger problems
+    /// than its button going still.
+    private static let runTurns: Double = 4000
+
+    func body(content: Content) -> some View {
+        content
+            .rotationEffect(.degrees(turns * 360), anchor: anchor)
+            // Reduced motion gets the same fact without the movement: the
+            // glyph dims while the work is out. Fewer and gentler, not none —
+            // dropping it entirely would leave the button saying nothing.
+            .opacity(reduceMotion && spinning ? 0.45 : 1)
+            .animation(.easeOut(duration: 0.16), value: reduceMotion && spinning)
+            .onAppear { if spinning { start() } }
+            .onChange(of: spinning) { _, now in now ? start() : coastToRest() }
+    }
+
+    private func start() {
+        guard !reduceMotion, began == nil else { return }
+        began = Date()
+        from = turns
+        withAnimation(.linear(duration: Self.perTurn * Self.runTurns)) {
+            turns = from + Self.runTurns
+        }
+    }
+
+    /// Ease out to the next whole turn from wherever the glyph got to, so it
+    /// lands upright instead of freezing at whatever angle the network
+    /// happened to return at.
+    ///
+    /// This is also what makes a fast refresh legible. Re-reading the
+    /// catalogue is forty file reads and finishes inside a frame; a spinner
+    /// that appeared and vanished that fast would read as a glitch rather
+    /// than as an answer. Because stopping means "carry on to the next whole
+    /// turn", the shortest possible refresh still shows most of one
+    /// decelerating revolution — no minimum-duration timer, and nothing
+    /// artificial added to the work itself.
+    private func coastToRest() {
+        guard let began else { return }
+        self.began = nil
+        // Where a linear animation is at, by definition.
+        let travelled = from + Date().timeIntervalSince(began) / Self.perTurn
+        let rest = travelled.rounded(.up)
+        let arc = rest - travelled
+        // Duration proportional to the arc, so the coast leaves at roughly
+        // the speed it was already going whether it has 10° left to cover or
+        // 350°. A fixed duration would crawl through the short ones.
+        withAnimation(.easeOut(duration: min(0.7, max(0.16, arc * Self.perTurn)))) {
+            turns = rest
+        }
+    }
+}
+
+extension View {
+    /// Turn this glyph while `spinning`. See `RefreshSpin`. The default anchor
+    /// is measured for `arrow.clockwise`; any other icon needs its own.
+    func refreshSpin(
+        _ spinning: Bool,
+        anchor: UnitPoint = RefreshSpin.ringCentre
+    ) -> some View {
+        modifier(RefreshSpin(spinning: spinning, anchor: anchor))
+    }
+}
+
 /// The pull-request glyph as GitHub draws it — a two-dot rail, and an
 /// elbow with an arrowhead dropping into a third dot — because that shape
 /// is the one a GitHub user already reads as "pull request", and SF

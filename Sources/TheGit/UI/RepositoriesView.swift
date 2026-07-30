@@ -107,6 +107,15 @@ struct RepositoriesView: View {
                         // The count changes as a scan lands; a number that
                         // slides sideways while it does reads as noise.
                         .monospacedDigit()
+                        // And the digits roll rather than cut, which is what
+                        // a refresh that actually found something looks like.
+                        // Same treatment as the graph's change count and the
+                        // commit panel's staged count.
+                        .contentTransition(.numericText())
+                        .animation(
+                            reduceMotion ? nil : .easeOut(duration: 0.2),
+                            value: summary
+                        )
                 }
                 Spacer(minLength: 12 * zoom)
                 filterField.frame(maxWidth: 260 * zoom)
@@ -427,9 +436,16 @@ struct RepositoriesToolbar: ToolbarContent {
             .help("Group repositories under a heading of your own")
 
             Button {
-                appState.refreshCatalog()
+                appState.refreshCatalog(userInitiated: true)
             } label: {
-                Label("Refresh", systemImage: "arrow.clockwise")
+                // Split into its two halves so the spin lands on the glyph
+                // alone: the systemImage form would turn the word with it.
+                Label {
+                    Text("Refresh")
+                } icon: {
+                    Image(systemName: "arrow.clockwise")
+                        .refreshSpin(appState.refreshingCatalog)
+                }
             }
             .keyboardShortcut("r")
             .help("Re-read every folder in the list (⌘R)")

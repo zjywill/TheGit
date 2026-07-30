@@ -167,7 +167,14 @@ struct DashboardToolbar: ToolbarContent {
             Button {
                 appState.refreshDashboard()
             } label: {
-                Label("Refresh", systemImage: "arrow.clockwise")
+                // Split into its two halves so the spin lands on the glyph
+                // alone: the systemImage form would turn the word with it.
+                Label {
+                    Text("Refresh")
+                } icon: {
+                    Image(systemName: "arrow.clockwise")
+                        .refreshSpin(appState.refreshingDashboard)
+                }
             }
             .keyboardShortcut("r")
             .help("Re-read every repository (⌘R)")

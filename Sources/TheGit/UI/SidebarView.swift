@@ -503,7 +503,7 @@ struct SidebarView: View {
                                 // The CLI's own words stay one hover away — the row
                                 // itself is for the sentence you can act on.
                                 .help(error.detail + "\n\nClick to try again.")
-                                .onTapGesture { repo.refreshPullRequests() }
+                                .onTapGesture { repo.refreshPullRequests(from: .pullRequests) }
                             } else if repo.pullRequests.isEmpty {
                                 SidebarRow(icon: nil, hoverable: false) {
                                     Text(repo.loadingPullRequests ? "Loading…" : "No open \(forge.itemNoun.lowercased())s")
@@ -527,7 +527,8 @@ struct SidebarView: View {
                         secondary: .init(
                             icon: "arrow.clockwise",
                             help: "Refresh \(forge.sectionTitle.lowercased())",
-                            run: { repo.refreshPullRequests() }
+                            spinning: repo.refreshingForgeSection == .pullRequests,
+                            run: { repo.refreshPullRequests(from: .pullRequests) }
                         ),
                         collapsed: $prsCollapsed
                     ) { repo.createPullRequest() }
@@ -587,7 +588,8 @@ struct SidebarView: View {
                         secondary: .init(
                             icon: "arrow.clockwise",
                             help: "Refresh issues",
-                            run: { repo.refreshPullRequests() }
+                            spinning: repo.refreshingForgeSection == .issues,
+                            run: { repo.refreshPullRequests(from: .issues) }
                         ),
                         collapsed: $issuesCollapsed
                     )
@@ -929,6 +931,11 @@ struct SectionHeader: View {
     struct Secondary {
         let icon: String
         let help: String
+        /// Work this button started still in flight. Turns the glyph, and
+        /// holds the button on screen while it turns — otherwise the only
+        /// trace of a three-second fetch disappears the moment the pointer
+        /// leaves the header.
+        var spinning = false
         let run: () -> Void
     }
     var secondary: Secondary?
@@ -980,14 +987,19 @@ struct SectionHeader: View {
                 Button(action: secondary.run) {
                     Image(systemName: secondary.icon)
                         .zoomFont(11, weight: .semibold)
+                        .refreshSpin(secondary.spinning)
                         .frame(width: 22, height: 22)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.pressEffect)
                 .foregroundStyle(Color.accentColor)
                 .help(secondary.help)
-                .opacity(hovering ? 1 : 0)
-                .allowsHitTesting(hovering)
+                // Work in flight keeps it up with the pointer gone: a turning
+                // glyph is the only thing on this strip that says the list is
+                // being fetched. Visible means clickable — a button you can
+                // see and can't press is worse than one that isn't there.
+                .opacity(hovering || secondary.spinning ? 1 : 0)
+                .allowsHitTesting(hovering || secondary.spinning)
             }
             // Count and + button share one centered slot, so the swap on
             // hover never shifts anything.
@@ -1458,7 +1470,7 @@ struct PullRequestRow: View {
             Button("Copy URL") { RepoState.copyToPasteboard(pr.url) }
             Button("Copy branch name") { RepoState.copyToPasteboard(pr.branch) }
             Divider()
-            Button("Refresh") { repo.refreshPullRequests() }
+            Button("Refresh") { repo.refreshPullRequests(from: .pullRequests) }
         }
         // Opening the page is what you almost always want from this row,
         // and it changes nothing locally. Checkout moves HEAD, so it stays
@@ -1526,7 +1538,7 @@ struct IssueRow: View {
             Divider()
             Button("Copy URL") { RepoState.copyToPasteboard(issue.url) }
             Divider()
-            Button("Refresh") { repo.refreshPullRequests() }
+            Button("Refresh") { repo.refreshPullRequests(from: .issues) }
         }
     }
 }

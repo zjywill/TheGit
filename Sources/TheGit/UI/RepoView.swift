@@ -202,9 +202,13 @@ struct RepoView: View {
 struct RepoToolbar: ToolbarContent {
     @ObservedObject var repo: RepoState
     @FocusState private var searchFocused: Bool
-    /// Default action for the Pull button, GitKraken-style; the dropdown
-    /// only picks the default, the button itself executes it. A Binding
-    /// into RootView's @AppStorage — see the note there.
+    /// Default action for the Pull button, GitKraken-style. Picking from the
+    /// dropdown runs that operation immediately AND makes it the button's
+    /// default — it used to only set the default, which meant a one-off
+    /// `--rebase` pull cost three actions: open the menu, click the row,
+    /// then find the button and click that too. The tick in the menu is a
+    /// selection, so selecting it is the act. A Binding into RootView's
+    /// @AppStorage — see the note there.
     @Binding var pullModeRaw: String
 
     private var pullMode: RepoState.PullMode {
@@ -214,10 +218,11 @@ struct RepoToolbar: ToolbarContent {
     var body: some ToolbarContent {
         ToolbarItemGroup {
             Menu {
-                Section("Default pull/fetch operation") {
+                Section("Runs now, and becomes the default") {
                     ForEach(RepoState.PullMode.allCases, id: \.rawValue) { mode in
                         Button {
                             pullModeRaw = mode.rawValue
+                            repo.runPull(mode)
                         } label: {
                             HStack {
                                 Text(mode.title)
