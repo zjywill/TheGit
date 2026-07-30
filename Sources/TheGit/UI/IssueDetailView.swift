@@ -138,31 +138,21 @@ struct IssueDetailView: View {
         } else if let thread = repo.issueThread {
             if !thread.isEmpty {
                 // No count line, no headers: the entries string themselves
-                // into a timeline, held together by the rail on the left —
-                // a line down the gutter, behind the avatars and icon
-                // discs (which are opaque so it passes *behind* them).
-                VStack(alignment: .leading, spacing: 16) {
-                    ForEach(thread) { item in
-                        switch item {
-                        case .comment(let comment):
-                            commentCard(comment)
-                        case .event(let event):
-                            eventRow(event)
-                        }
+                // into a timeline, held together by the rail on the left.
+                // Each entry draws its own segment — icon down to the next
+                // entry's icon — so the rail ends AT the last entry
+                // instead of running past it to the bottom of the box.
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(thread.enumerated()), id: \.element.id) { index, item in
+                        timelineEntry(item, isLast: index == thread.count - 1)
                     }
                     if repo.issueThreadTruncated {
                         Text("Showing the first \(thread.count) entries — open in browser for the rest.")
                             .zoomFont(11)
                             .foregroundStyle(.tertiary)
                             .padding(.leading, 32 * zoom)
+                            .padding(.top, 12)
                     }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(alignment: .leading) {
-                    Rectangle()
-                        .fill(Color.primary.opacity(0.09))
-                        .frame(width: 2 * zoom)
-                        .padding(.leading, 11 * zoom)
                 }
                 .padding(.top, 4)
             }
@@ -177,42 +167,82 @@ struct IssueDetailView: View {
         }
     }
 
-    /// A timeline event, GitHub-style: an icon on a solid disc in the
-    /// avatar gutter (solid, so the rail runs behind it, not through it),
-    /// then one grey sentence with the actor in front.
-    private func eventRow(_ event: IssueEvent) -> some View {
-        HStack(alignment: .center, spacing: 8) {
-            Image(systemName: Self.icon(for: event.kind))
-                .zoomFont(10, weight: .medium)
-                .foregroundStyle(Self.iconForeground(for: event.kind))
-                .frame(width: 20 * zoom, height: 20 * zoom)
-                .background(
-                    Circle().fill(Color(nsColor: .textBackgroundColor))
-                        .overlay(Circle().fill(Self.iconDisc(for: event.kind)))
-                )
-                .frame(width: 24 * zoom)
-            HStack(spacing: 4) {
-                if !event.actor.isEmpty {
-                    Text(event.actor)
-                        .zoomFont(11, weight: .semibold)
+    /// One timeline entry: the gutter column (avatar or icon disc, and —
+    /// unless this is the last entry — the rail segment running down to
+    /// the next one) beside the entry's content. Per-entry segments are
+    /// what make the rail stop at the final entry instead of running on
+    /// to the bottom of the container.
+    private func timelineEntry(_ item: IssueTimelineItem, isLast: Bool) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Group {
+                switch item {
+                case .comment(let comment):
+                    AuthorBubble(author: comment.author)
+                case .event(let event):
+                    eventDisc(event.kind)
                 }
-                Text(Self.phrase(for: event))
-                    .zoomFont(11)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                if let label = event.label {
-                    LabelChip(label: label)
+            }
+            .frame(width: 24 * zoom)
+            Group {
+                switch item {
+                case .comment(let comment):
+                    commentCard(comment)
+                case .event(let event):
+                    eventRow(event)
                 }
-                if let created = event.createdAt {
-                    Text("· \(AgeBreaks.compact(date: created))")
-                        .zoomFont(11)
-                        .foregroundStyle(.tertiary)
-                }
-                Spacer(minLength: 0)
+            }
+            .padding(.bottom, isLast ? 0 : 16)
+        }
+        // The rail segment is the entry's own background, full height,
+        // running behind the opaque disc — each entry connects itself to
+        // the next, and the last one simply doesn't. (Not a flexible
+        // frame in the gutter column: an HStack doesn't offer a child
+        // the row height, so the line came up short next to tall cards.)
+        .background(alignment: .leading) {
+            if !isLast {
+                Rectangle()
+                    .fill(Color.primary.opacity(0.09))
+                    .frame(width: 2 * zoom)
+                    .padding(.leading, 11 * zoom)
             }
         }
-        .padding(.vertical, 1)
+    }
+
+    private func eventDisc(_ kind: IssueEvent.Kind) -> some View {
+        Image(systemName: Self.icon(for: kind))
+            .zoomFont(10, weight: .medium)
+            .foregroundStyle(Self.iconForeground(for: kind))
+            .frame(width: 20 * zoom, height: 20 * zoom)
+            .background(
+                Circle().fill(Color(nsColor: .textBackgroundColor))
+                    .overlay(Circle().fill(Self.iconDisc(for: kind)))
+            )
+    }
+
+    /// The grey sentence of an event, actor in front. Sized to the disc
+    /// beside it so the single line sits centred on it.
+    private func eventRow(_ event: IssueEvent) -> some View {
+        HStack(spacing: 4) {
+            if !event.actor.isEmpty {
+                Text(event.actor)
+                    .zoomFont(11, weight: .semibold)
+            }
+            Text(Self.phrase(for: event))
+                .zoomFont(11)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            if let label = event.label {
+                LabelChip(label: label)
+            }
+            if let created = event.createdAt {
+                Text("· \(AgeBreaks.compact(date: created))")
+                    .zoomFont(11)
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(minHeight: 20 * zoom)
     }
 
     /// The sentence after the actor's name. Label events say only
@@ -265,42 +295,39 @@ struct IssueDetailView: View {
         }
     }
 
-    /// GitHub's comment shape: the author's face in a gutter on the left,
-    /// and a bordered bubble whose header strip names them — instead of an
-    /// anonymous grey slab.
+    /// GitHub's comment shape: a bordered bubble whose header strip names
+    /// the author — instead of an anonymous grey slab. The author's face
+    /// sits in the timeline gutter, drawn by `timelineEntry`.
     private func commentCard(_ comment: IssueComment) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            AuthorBubble(author: comment.author)
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 5) {
-                    Text(comment.author.isEmpty ? "unknown" : comment.author)
-                        .zoomFont(11, weight: .semibold)
-                    Text("commented")
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 5) {
+                Text(comment.author.isEmpty ? "unknown" : comment.author)
+                    .zoomFont(11, weight: .semibold)
+                Text("commented")
+                    .zoomFont(11)
+                    .foregroundStyle(.secondary)
+                if let created = comment.createdAt {
+                    Text(AgeBreaks.compact(date: created))
                         .zoomFont(11)
-                        .foregroundStyle(.secondary)
-                    if let created = comment.createdAt {
-                        Text(AgeBreaks.compact(date: created))
-                            .zoomFont(11)
-                            .foregroundStyle(.tertiary)
-                    }
-                    Spacer(minLength: 0)
+                        .foregroundStyle(.tertiary)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .background(Color.primary.opacity(0.045))
-                Divider()
-                Markdown(comment.body)
-                    .markdownTheme(Self.theme(zoom: zoom))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
+                Spacer(minLength: 0)
             }
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.12))
-            )
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(Color.primary.opacity(0.045))
+            Divider()
+            Markdown(comment.body)
+                .markdownTheme(Self.theme(zoom: zoom))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
         }
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.12))
+        )
     }
 
     /// Forge accounts have usernames, not the emails AvatarStore is keyed

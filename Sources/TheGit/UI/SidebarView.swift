@@ -11,12 +11,19 @@ struct SidebarView: View {
     @State private var filter = ""
     @FocusState private var filterFocused: Bool
     @State private var hoveringHead = false
-    /// Folded Issues section. AppStorage, not @State: closing a backlog
-    /// you don't want in your face is a decision about the app, and it
-    /// should hold across tabs and launches — unlike the filter above,
-    /// which is a way of looking and dies with the view.
+    /// Folded sections. AppStorage, not @State: closing a backlog you
+    /// don't want in your face is a decision about the app, and it should
+    /// hold across tabs and launches — unlike the filter above, which is
+    /// a way of looking and dies with the view.
     @AppStorage("TheGit.sidebar.issuesCollapsed") private var issuesCollapsed = false
     @AppStorage("TheGit.sidebar.pullRequestsCollapsed") private var prsCollapsed = false
+    @AppStorage("TheGit.sidebar.localCollapsed") private var localCollapsed = false
+    @AppStorage("TheGit.sidebar.remoteCollapsed") private var remoteCollapsed = false
+    @AppStorage("TheGit.sidebar.worktreesCollapsed") private var worktreesCollapsed = false
+    @AppStorage("TheGit.sidebar.tagsCollapsed") private var tagsCollapsed = false
+    @AppStorage("TheGit.sidebar.stashesCollapsed") private var stashesCollapsed = false
+    @AppStorage("TheGit.sidebar.lfsCollapsed") private var lfsCollapsed = false
+    @AppStorage("TheGit.sidebar.submodulesCollapsed") private var submodulesCollapsed = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -412,10 +419,16 @@ struct SidebarView: View {
                 title: "Local",
                 count: branches.count,
                 topSpace: 0,
-                actionHelp: "Create branch at HEAD"
+                actionHelp: "Create branch at HEAD",
+                collapsed: $localCollapsed
             ) { repo.promptNewBranch() }
-            ForEach(BranchTree.build(branches, path: \.name)) { node in
-                BranchNodeRow(node: node, repo: repo, forceExpanded: filtering)
+            // A filter overrides the fold everywhere in this sidebar:
+            // asking for "crash" and getting a closed section that
+            // secretly holds the match is a wrong answer.
+            if !localCollapsed || filtering {
+                ForEach(BranchTree.build(branches, path: \.name)) { node in
+                    BranchNodeRow(node: node, repo: repo, forceExpanded: filtering)
+                }
             }
         }
     }
@@ -430,18 +443,21 @@ struct SidebarView: View {
                 // what the rows collapse to. Filtering counts branches,
                 // because that's what the user is looking at.
                 count: filtering ? branches.count : repo.snapshot.remoteNames.count,
-                actionHelp: "Add remote"
+                actionHelp: "Add remote",
+                collapsed: $remoteCollapsed
             ) { repo.promptAddRemote() }
-            ForEach(BranchTree.remoteTree(branches)) { node in
-                BranchNodeRow(node: node, repo: repo, forceExpanded: filtering)
-            }
-            if repo.snapshot.remoteBranches.isEmpty {
-                SidebarRow(icon: "plus.circle", iconColor: Color.accentColor) {
-                    Text("Add Remote…")
-                        .zoomFont(12)
-                        .foregroundStyle(Color.accentColor)
+            if !remoteCollapsed || filtering {
+                ForEach(BranchTree.remoteTree(branches)) { node in
+                    BranchNodeRow(node: node, repo: repo, forceExpanded: filtering)
                 }
-                .onTapGesture { repo.promptAddRemote() }
+                if repo.snapshot.remoteBranches.isEmpty {
+                    SidebarRow(icon: "plus.circle", iconColor: Color.accentColor) {
+                        Text("Add Remote…")
+                            .zoomFont(12)
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .onTapGesture { repo.promptAddRemote() }
+                }
             }
         }
     }
@@ -536,9 +552,6 @@ struct SidebarView: View {
                     ),
                     collapsed: $issuesCollapsed
                 )
-                // A filter overrides the fold, like it force-expands the
-                // branch folders: asking for "crash" and getting a closed
-                // section that secretly holds the match is a wrong answer.
                 if !issuesCollapsed || filtering {
                     if !filtering, repo.issues?.isEmpty != false {
                         SidebarRow(icon: nil, hoverable: false) {
@@ -559,8 +572,10 @@ struct SidebarView: View {
     private var worktreeSection: some View {
         let worktrees = matchedWorktrees
         if !filtering || !worktrees.isEmpty {
-            SectionHeader(title: "Worktrees", count: worktrees.count)
-            ForEach(worktrees) { wt in
+            SectionHeader(title: "Worktrees", count: worktrees.count, collapsed: $worktreesCollapsed)
+            // Folded ⇒ iterate nothing; the header still counts the real
+            // list. A filter overrides the fold, here and below.
+            ForEach(worktreesCollapsed && !filtering ? [] : worktrees) { wt in
                 SidebarRow(icon: "folder") {
                     VStack(alignment: .leading, spacing: SidebarMetrics.lineGap) {
                         Text(wt.displayName)
@@ -595,8 +610,8 @@ struct SidebarView: View {
     private var tagSection: some View {
         let tags = matchedTags
         if !tags.isEmpty {
-            SectionHeader(title: "Tags", count: tags.count)
-            ForEach(tags) { tag in
+            SectionHeader(title: "Tags", count: tags.count, collapsed: $tagsCollapsed)
+            ForEach(tagsCollapsed && !filtering ? [] : tags) { tag in
                 // Secondary, not orange: orange is this sidebar's
                 // "needs attention" colour (behind, gone, LFS
                 // missing, dirty submodule). A tag is just a tag.
@@ -633,8 +648,8 @@ struct SidebarView: View {
     private var stashSection: some View {
         let stashes = matchedStashes
         if !stashes.isEmpty {
-            SectionHeader(title: "Stashes", count: stashes.count)
-            ForEach(stashes) { stash in
+            SectionHeader(title: "Stashes", count: stashes.count, collapsed: $stashesCollapsed)
+            ForEach(stashesCollapsed && !filtering ? [] : stashes) { stash in
                 // `selected` lights up when the stash's graph node is clicked.
                 SidebarRow(icon: "tray.full", selected: repo.selectedStashRef == stash.ref) {
                     VStack(alignment: .leading, spacing: SidebarMetrics.lineGap) {
@@ -683,12 +698,13 @@ struct SidebarView: View {
                     title: "Git LFS",
                     count: filtering ? patterns.count : repo.snapshot.lfs.files.count,
                     actionIcon: "arrow.down.circle",
-                    actionHelp: "Download LFS objects (git lfs pull)"
+                    actionHelp: "Download LFS objects (git lfs pull)",
+                    collapsed: $lfsCollapsed
                 ) { repo.pullLFSObjects() }
                 let missing = repo.snapshot.lfsMissing.count
                 // A repo-wide total has nothing to do with the filter, so
                 // it would read as a match that it isn't.
-                if missing > 0, !filtering {
+                if missing > 0, !filtering, !lfsCollapsed {
                     SidebarRow(icon: "arrow.down.circle.dotted", iconColor: .orange) {
                         Text("\(missing) not downloaded")
                             .zoomFont(11)
@@ -698,7 +714,7 @@ struct SidebarView: View {
                     .help("These files are pointers only — click to run git lfs pull")
                     .onTapGesture { repo.pullLFSObjects() }
                 }
-                ForEach(patterns, id: \.self) { pattern in
+                ForEach(lfsCollapsed && !filtering ? [] : patterns, id: \.self) { pattern in
                     // externaldrive, not a second shippingbox: the box is
                     // the submodule icon, and two unrelated things wearing
                     // the same glyph read as one kind at a glance.
@@ -728,9 +744,10 @@ struct SidebarView: View {
             SectionHeader(
                 title: "Submodules",
                 count: submodules.count,
-                actionHelp: "Add submodule"
+                actionHelp: "Add submodule",
+                collapsed: $submodulesCollapsed
             ) { repo.promptAddSubmodule() }
-            ForEach(submodules) { sub in
+            ForEach(submodulesCollapsed && !filtering ? [] : submodules) { sub in
                 SubmoduleRow(sub: sub, repo: repo)
             }
         }
