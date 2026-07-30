@@ -212,7 +212,17 @@ struct RootView: View {
         } message: { result in
             Text(result.message)
         }
-        .onAppear { updates.checkInBackground() }
+        .onAppear {
+            updates.checkInBackground()
+            // Where `claude` and `codex` live is a question only the user's
+            // own shell can answer — a bundled .app inherits launchd's bare
+            // PATH, which has neither. The Hand Off menus appear as soon as
+            // it has answered, which is long before anyone right-clicks.
+            Task {
+                await Shell.resolveLoginPath()
+                AgentTools.shared.recheck()
+            }
+        }
     }
 }
 

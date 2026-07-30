@@ -10,6 +10,7 @@ import SwiftUI
 struct IssueDetailView: View {
     @ObservedObject var repo: RepoState
     let issue: Issue
+    @ObservedObject private var agents = AgentTools.shared
     @Environment(\.uiZoom) private var zoom
 
     private var forge: Forge { repo.forge ?? .github }
@@ -38,6 +39,20 @@ struct IssueDetailView: View {
                 .truncationMode(.tail)
 
             Spacer()
+
+            // The one place the feature is visible without a right-click,
+            // and the right place for it: you've just read the issue, and
+            // "find the cause" is the next thing you were going to do.
+            if !agents.available.isEmpty {
+                Menu("Hand Off") {
+                    HandoffMenu(tasks: HandoffTask.forIssues) { task, agent in
+                        repo.handOff(task, to: agent, issue: issue)
+                    }
+                }
+                .controlSize(.regular)
+                .fixedSize()
+                .help("Open a terminal in this repo with an agent already working on \(forge.label(issue.number)).")
+            }
 
             Button("Open in Browser") { repo.openIssueInBrowser(issue) }
                 .controlSize(.regular)

@@ -1414,6 +1414,7 @@ struct PullRequestRow: View {
     let pr: PullRequest
     let forge: Forge
     @ObservedObject var repo: RepoState
+    @ObservedObject private var agents = AgentTools.shared
 
     var body: some View {
         SidebarRow(
@@ -1454,6 +1455,17 @@ struct PullRequestRow: View {
         .contextMenu {
             Button("Open in Browser") { repo.openPullRequestInBrowser(pr) }
             Button("Checkout \(forge.label(pr.number))") { repo.checkoutPullRequest(pr) }
+            if !agents.available.isEmpty {
+                Divider()
+                // Under the two things you'd do yourself, above the copies:
+                // handing the whole thing to an agent is a bigger move than
+                // reading it, and it belongs next to the reading.
+                Menu("Hand Off") {
+                    HandoffMenu(tasks: HandoffTask.forPullRequests) { task, agent in
+                        repo.handOff(task, to: agent, pullRequest: pr)
+                    }
+                }
+            }
             Divider()
             Button("Copy URL") { RepoState.copyToPasteboard(pr.url) }
             Button("Copy branch name") { RepoState.copyToPasteboard(pr.branch) }
@@ -1482,6 +1494,7 @@ struct IssueRow: View {
     let issue: Issue
     let forge: Forge
     @ObservedObject var repo: RepoState
+    @ObservedObject private var agents = AgentTools.shared
 
     var body: some View {
         SidebarRow(
@@ -1523,6 +1536,14 @@ struct IssueRow: View {
         .contextMenu {
             Button("View Issue") { repo.viewIssue(issue) }
             Button("Open in Browser") { repo.openIssueInBrowser(issue) }
+            if !agents.available.isEmpty {
+                Divider()
+                Menu("Hand Off") {
+                    HandoffMenu(tasks: HandoffTask.forIssues) { task, agent in
+                        repo.handOff(task, to: agent, issue: issue)
+                    }
+                }
+            }
             Divider()
             Button("Copy URL") { RepoState.copyToPasteboard(issue.url) }
             Divider()
