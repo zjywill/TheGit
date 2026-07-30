@@ -36,6 +36,13 @@ struct TheGitApp: App {
         UIZoom.levels[max(0, min(zoomLevel, UIZoom.levels.count - 1))]
     }
 
+    /// The smallest content the window is laid out for: a sidebar, a graph
+    /// with room for lanes, and a commit panel beside it. Declared once and
+    /// used twice — as the root view's frame, which is what stops the content
+    /// from being laid out any smaller, and as the window's own floor, which
+    /// is what stops the window from being dragged under it.
+    private static let minContent = CGSize(width: 1000, height: 620)
+
     private func setZoom(_ level: Int) {
         DispatchQueue.main.async {
             zoomLevel = max(0, min(level, UIZoom.levels.count - 1))
@@ -57,7 +64,9 @@ struct TheGitApp: App {
             RootView()
                 .environmentObject(appState)
                 .environment(\.uiZoom, zoom)
-                .frame(minWidth: 1000, minHeight: 620)
+                .frame(minWidth: Self.minContent.width, minHeight: Self.minContent.height)
+                // The frame alone is not enough — see WindowFloor.
+                .background(WindowFloor(size: Self.minContent))
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
@@ -131,7 +140,7 @@ struct RootView: View {
                 )
                 Divider()
             }
-            // Always present now: the bar's first tab is the Launchpad, so
+            // Always present now: the bar's first tab is the Dashboard, so
             // even a window with nothing open has a tab that means
             // something. (It used to hide itself rather than show one lone
             // + against an empty strip.)
@@ -140,7 +149,7 @@ struct RootView: View {
             if let repo = appState.activeRepo {
                 RepoView(repo: repo)
             } else {
-                LaunchpadView()
+                DashboardView()
             }
         }
         // Here rather than on the banner itself: showing the banner is this
@@ -155,13 +164,13 @@ struct RootView: View {
         // Never empty. A toolbar with no items collapses its strip, and with
         // the title bar hidden that strip is what holds the window's top
         // edge apart from the tab bar — switching to a repo-less screen made
-        // the whole window content jump up and back. The Launchpad gets its
+        // the whole window content jump up and back. The Dashboard gets its
         // own two items rather than a row of disabled repo actions.
         .toolbar {
             if let repo = appState.activeRepo {
                 RepoToolbar(repo: repo, pullModeRaw: $pullModeRaw)
             } else {
-                LaunchpadToolbar()
+                DashboardToolbar()
             }
         }
         .alert(
@@ -394,7 +403,7 @@ struct RepoTabsBar: View {
 
     var body: some View {
         HStack(spacing: Self.spacing) {
-            LaunchpadTab()
+            DashboardTab()
             // Pinned: it sits outside the reorderable ForEach below, so it
             // can't be dragged out of first place and the drag arithmetic
             // (which indexes appState.repos) never has to know about it.
@@ -463,26 +472,80 @@ struct NewTabButton: View {
     }
 }
 
+/// Puts the root view's minimum size onto the window, because SwiftUI didn't.
+///
+/// `.frame(minWidth:minHeight:)` on a window's root view is supposed to become
+/// that window's own minimum. Under `.windowStyle(.hiddenTitleBar)` it isn't:
+/// the window drags smaller quite happily, the content stays laid out at its
+/// minimum, and the difference hangs off *both* edges — the content is centred
+/// in a frame wider than the window, so the leading and trailing column of
+/// everything on screen disappears under the window frame at once. Tiles,
+/// section headings, the first and last card of the wall.
+///
+/// The frame stays: it's what keeps the content from laying itself out any
+/// smaller. This is only what stops the window from disagreeing with it.
+private struct WindowFloor: NSViewRepresentable {
+    let size: CGSize
+
+    func makeNSView(context: Context) -> NSView { NSView() }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        // Deferred: on the first pass the view isn't in a window yet, and
+        // setting a window's size from inside a layout pass it's running is
+        // how you get "Unbalanced calls to begin/end appearance transition".
+        DispatchQueue.main.async {
+            guard let window = view.window, window.contentMinSize != size else { return }
+            window.contentMinSize = size
+            // A window restored from a smaller saved frame keeps that frame
+            // until something nudges it — the floor only applies to future
+            // drags. Nudge it, or the content it was saved too small for is
+            // clipped for the rest of the session.
+            let frame = window.frame
+            let content = window.contentRect(forFrameRect: frame)
+            guard content.width < size.width || content.height < size.height else { return }
+            let grown = window.frameRect(forContentRect: CGRect(
+                origin: content.origin,
+                size: CGSize(
+                    width: max(content.width, size.width),
+                    height: max(content.height, size.height)
+                )
+            ))
+            // Anchored at the top-left, which is where the window's title bar
+            // is: growing downwards from a window near the bottom of the
+            // screen would walk it off the edge.
+            window.setFrame(
+                CGRect(
+                    x: frame.minX,
+                    y: frame.maxY - grown.height,
+                    width: grown.width,
+                    height: grown.height
+                ),
+                display: true
+            )
+        }
+    }
+}
+
 /// The home tab, pinned at the head of the strip. Same shape as a repo tab
 /// so the row reads as one row of tabs — but no close button, because it's
 /// the one tab that can't be closed, and a disabled × on hover would be a
 /// control that exists only to say no.
-struct LaunchpadTab: View {
+struct DashboardTab: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.uiZoom) private var zoom
     @State private var hovering = false
 
-    private var isActive: Bool { appState.showingLaunchpad }
+    private var isActive: Bool { appState.showingDashboard }
 
     var body: some View {
         Button {
-            appState.showLaunchpad()
+            appState.showDashboard()
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "square.grid.2x2")
                     .zoomFont(10)
                     .foregroundStyle(isActive ? Color.accentColor : .secondary)
-                Text("Launchpad")
+                Text("Dashboard")
                     .zoomFont(12, weight: isActive ? .semibold : .regular)
                     .lineLimit(1)
             }
@@ -501,7 +564,7 @@ struct LaunchpadTab: View {
         // ⌘0 alongside the ⌘1…⌘9 a tab bar implies; zero is the one that
         // isn't a repo.
         .keyboardShortcut("0", modifiers: .command)
-        .help("Launchpad — every open repository (⌘0)")
+        .help("Dashboard — every open repository (⌘0)")
         .onHover {
             hovering = $0
             AppState.pointerOverTopControl = $0

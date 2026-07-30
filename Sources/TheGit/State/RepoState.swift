@@ -345,9 +345,9 @@ final class RepoState: ObservableObject, Identifiable {
         self.forgeClient = ForgeClient(repoPath: path)
     }
 
-    /// What the Launchpad needs to draw this repo's card, and nothing more.
+    /// What the Dashboard needs to draw this repo's card, and nothing more.
     ///
-    /// Deliberately not the snapshot: the Launchpad shows every open repo at
+    /// Deliberately not the snapshot: the Dashboard shows every open repo at
     /// once, and a full `refresh()` is nine subprocesses each — nine repos
     /// would be eighty processes to draw a wall of cards. This is two, and
     /// only for repos whose tab hasn't been opened yet.
@@ -367,10 +367,10 @@ final class RepoState: ObservableObject, Identifiable {
     private var cardLoadedAt: Date?
 
     /// Load (or refresh) the card. Cheap enough to call on every visit to
-    /// the Launchpad: a repo whose tab is already open answers from the
+    /// the Dashboard: a repo whose tab is already open answers from the
     /// snapshot it already has, and everyone else is cached for `freshFor`.
     ///
-    /// `force` is the Launchpad's own Refresh: it goes to git for every
+    /// `force` is the Dashboard's own Refresh: it goes to git for every
     /// repo, including the ones with a snapshot, because the reason to press
     /// it is that something outside the app has changed.
     func loadCard(force: Bool = false) async {
@@ -419,6 +419,32 @@ final class RepoState: ObservableObject, Identifiable {
                 .map { $0 }
         )
     }
+
+    /// A year of this repo's commits per day, for the Dashboard's summed
+    /// heatmap. Not the snapshot's histogram: that one covers half a year
+    /// (see `ActivityDay.windowWeeks`), and summing a year of one repo with
+    /// half a year of the next would draw the difference as a quiet spell
+    /// in the older half of the grid.
+    ///
+    /// Returned rather than published, because the sum belongs to the wall
+    /// and not to any one repo — AppState is what holds it. Cached for
+    /// `freshFor` like the card is, and for the same reason: coming back to
+    /// the Dashboard shouldn't re-read every open repo's year.
+    func yearActivity(force: Bool = false) async -> [Int: Int] {
+        if !force, let cached = yearActivityCache,
+           Date().timeIntervalSince(cached.at) < Self.freshFor {
+            return cached.counts
+        }
+        // A failed read isn't cached — an empty repo answers [:] and means
+        // it, a repo that lost its git for a moment doesn't.
+        guard let counts = try? await git.activity(weeks: ActivityDay.yearWeeks) else {
+            return yearActivityCache?.counts ?? [:]
+        }
+        yearActivityCache = (counts, Date())
+        return counts
+    }
+
+    private var yearActivityCache: (counts: [Int: Int], at: Date)?
 
     private var hasLoaded = false
     /// When the snapshot was last read from git — see `appeared()`.

@@ -298,6 +298,114 @@ final class ActivityTests: XCTestCase {
         XCTAssertEqual(window.months.count, window.columns.count)
     }
 
+    // MARK: - The numbers stated beside the grid
+
+    /// The window is exactly `days` long and ends today, newest first — every
+    /// other number here is a sum over it.
+    func testStatsWindow() {
+        let cal = calendar()
+        let keys = ActivityStats.windowKeys(days: 5, today: thursday, calendar: cal)
+        XCTAssertEqual(keys, [
+            key("2025-07-31", cal), key("2025-07-30", cal), key("2025-07-29", cal),
+            key("2025-07-28", cal), key("2025-07-27", cal),
+        ])
+    }
+
+    /// Only days inside the window count. The histograms run a week wider
+    /// than it (see `ActivityDay.yearWeeks`), and a headline that quietly
+    /// included that week wouldn't add up to the breakdown beside it.
+    func testStatsIgnoreDaysOutsideTheWindow() {
+        let cal = calendar()
+        let counts = [key("2025-07-31", cal): 3, key("2025-07-01", cal): 99]
+        let stats = ActivityStats(counts: counts, days: 5, today: thursday, calendar: cal)
+        XCTAssertEqual(stats.total, 3)
+        XCTAssertEqual(stats.activeDays, 1)
+        XCTAssertEqual(
+            ActivityStats.total(
+                of: counts,
+                over: ActivityStats.windowKeys(days: 5, today: thursday, calendar: cal)
+            ),
+            3
+        )
+    }
+
+    /// A streak runs back from today, and today is allowed to be empty: it
+    /// isn't over yet. Otherwise every morning would announce that a habit of
+    /// eleven days had just been broken.
+    func testStreakSurvivesAnUnfinishedToday() {
+        let cal = calendar()
+        var counts: [Int: Int] = [:]
+        for day in 28...30 { counts[key(String(format: "2025-07-%02d", day), cal)] = 2 }
+        let stats = ActivityStats(counts: counts, days: 20, today: thursday, calendar: cal)
+        XCTAssertEqual(stats.streak, 3)
+        // But the day before today is not: a gap there ends the streak.
+        let older = ActivityStats(
+            counts: [key("2025-07-29", cal): 1], days: 20, today: thursday, calendar: cal
+        )
+        XCTAssertEqual(older.streak, 0)
+    }
+
+    /// Today's own commits start a streak of one.
+    func testStreakCountsToday() {
+        let cal = calendar()
+        let stats = ActivityStats(
+            counts: [key("2025-07-31", cal): 1], days: 20, today: thursday, calendar: cal
+        )
+        XCTAssertEqual(stats.streak, 1)
+    }
+
+    /// A blank year says nothing rather than claiming a streak or a peak.
+    func testEmptyStats() {
+        let stats = ActivityStats(counts: [:], days: 30, today: thursday, calendar: calendar())
+        XCTAssertEqual(stats.total, 0)
+        XCTAssertEqual(stats.activeDays, 0)
+        XCTAssertEqual(stats.streak, 0)
+        XCTAssertNil(stats.busiest)
+    }
+
+    /// The busiest day is the biggest, and on a tie the most recent one — the
+    /// older of two equal days is the less interesting answer to "how big
+    /// does a day get around here".
+    func testBusiestDayPrefersTheRecentOfATie() {
+        let cal = calendar()
+        let counts = [
+            key("2025-07-31", cal): 9,
+            key("2025-07-24", cal): 9,
+            key("2025-07-20", cal): 4,
+        ]
+        let stats = ActivityStats(counts: counts, days: 30, today: thursday, calendar: cal)
+        XCTAssertEqual(stats.busiest?.count, 9)
+        XCTAssertEqual(stats.busiest?.label, "\(cal.shortMonthSymbols[6]) 31")
+    }
+
+    /// Weekly buckets run oldest first, so a sparkline drawn from them reads
+    /// left to right like the grid does. Seven days to a bucket, counted back
+    /// from today rather than from the locale's first weekday — the last
+    /// bucket is "the last seven days", not "this calendar week".
+    func testWeeklyTotalsRunOldestFirst() {
+        let cal = calendar()
+        let keys = ActivityStats.windowKeys(days: 21, today: thursday, calendar: cal)
+        let counts = [
+            key("2025-07-31", cal): 5,   // today, so the last bucket
+            key("2025-07-24", cal): 2,   // seven days back, the bucket before
+            key("2025-07-17", cal): 1,   // fourteen back, the first
+        ]
+        XCTAssertEqual(ActivityStats.weeklyTotals(of: counts, over: keys), [1, 2, 5])
+        // The bin boundary is seven days, not the weekend: six days back still
+        // lands in the newest bucket.
+        XCTAssertEqual(
+            ActivityStats.weeklyTotals(of: [key("2025-07-25", cal): 4], over: keys),
+            [0, 0, 4]
+        )
+    }
+
+    /// A year of days is 52 buckets, one per column of the grid it sits under.
+    func testWeeklyTotalsAreOnePerGridColumn() {
+        let keys = ActivityStats.windowKeys(today: thursday, calendar: calendar())
+        XCTAssertEqual(keys.count, ActivityStats.windowDays)
+        XCTAssertEqual(ActivityStats.weeklyTotals(of: [:], over: keys).count, 52)
+    }
+
     private func day(count: Int) -> ActivityWindow.Day {
         ActivityWindow.Day(
             key: 0, count: count, isFuture: false, isPrehistory: false, summary: ""

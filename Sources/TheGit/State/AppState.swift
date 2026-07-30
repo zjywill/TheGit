@@ -54,21 +54,130 @@ final class AppState: ObservableObject {
         repos.first { $0.id == activeRepoID }
     }
 
-    /// No repo selected means the Launchpad, which is also where a window
+    /// No repo selected means the Dashboard, which is also where a window
     /// with nothing open lands. One selection, not two pieces of state that
     /// can disagree about what the window is showing — every existing
     /// `activeRepoID = repos.first?.id` already falls back to it correctly
     /// when the last tab closes.
-    var showingLaunchpad: Bool { activeRepoID == nil }
+    var showingDashboard: Bool { activeRepoID == nil }
 
-    func showLaunchpad() { activeRepoID = nil }
+    func showDashboard() { activeRepoID = nil }
 
-    /// The Launchpad's Refresh: every card straight from git, in the order
+    /// The Dashboard's Refresh: every card straight from git, in the order
     /// they're read in. Sequential for the same reason the first load is —
     /// one wall of cards must not fire twenty subprocesses at once.
-    func refreshLaunchpad() {
+    func refreshDashboard() {
         Task {
             for repo in repos { await repo.loadCard(force: true) }
+            // After the cards, not with them: the cards are what the user is
+            // looking at, and the grid is a year of history that hasn't
+            // changed much in the time it took to read them.
+            await loadActivity(force: true)
+        }
+    }
+
+    /// Commits per day across every open repository — the Dashboard's
+    /// heatmap, which is the one thing on that screen no single card can
+    /// say. Empty until the wall has been visited once.
+    @Published private(set) var activity: [Int: Int] = [:]
+    /// The same, per day, in words: which repositories a day's commits came
+    /// from. See `ActivityGraph.detail`.
+    @Published private(set) var activityDetail: [Int: String] = [:]
+    /// Whether any repo's year has been read yet, so the grid can say it's
+    /// reading rather than draw a confident empty year.
+    @Published private(set) var activityLoaded = false
+    /// The numbers stated beside the grid. Computed here, once per merge,
+    /// rather than in the view: it's a walk over a year of days, and a view
+    /// that derives it in `body` redoes that walk on every hover of every
+    /// one of the grid's cells.
+    @Published private(set) var activityStats = ActivityStats(counts: [:])
+
+    /// The year's commits per repository, busiest first, over exactly the
+    /// days `activityStats` covers — so the parts add up to the headline.
+    ///
+    /// This is what the summed grid trades away: one cell can be five repos,
+    /// and the tooltips only ever say so one day at a time. Repos with
+    /// nothing in the year are left out — a row with no bar on it is a name
+    /// taking up space to say nothing.
+    @Published private(set) var activityRanking: [RepoActivity] = []
+
+    struct RepoActivity: Identifiable {
+        let id: String
+        let name: String
+        let count: Int
+        /// The same year in weekly buckets, oldest first — the shape behind
+        /// the number. See `ActivitySparkline`.
+        let weeks: [Int]
+    }
+
+    /// Kept per repo rather than as a running total, so re-reading one repo
+    /// replaces its contribution instead of doubling it, and closing one
+    /// takes its cells with it.
+    private var activityByRepo: [String: [Int: Int]] = [:]
+
+    /// Read every open repo's year and sum it. Sequential, and merging as
+    /// each repo lands, for the reason `loadCard` is: a wall of nine repos
+    /// must not fire nine `git log`s at once, and filling in from the top is
+    /// also the order they're read in.
+    func loadActivity(force: Bool = false) async {
+        for repo in repos {
+            activityByRepo[repo.id] = await repo.yearActivity(force: force)
+            mergeActivity()
+        }
+    }
+
+    /// Driven by `repos`, never by the cache's own keys: a closed repo drops
+    /// out of the grid because it's no longer in the loop, not because
+    /// anyone remembered to evict it. Its counts stay in the cache, which is
+    /// what makes reopening it instant.
+    private func mergeActivity() {
+        var total: [Int: Int] = [:]
+        var contributors: [Int: [(name: String, count: Int)]] = [:]
+        // With one repo open the grid IS that repo, and naming it in every
+        // tooltip only restates the count next to it.
+        let worthNaming = repos.count > 1
+        for repo in repos {
+            guard let counts = activityByRepo[repo.id] else { continue }
+            for (day, commits) in counts where commits > 0 {
+                total[day, default: 0] += commits
+                if worthNaming {
+                    contributors[day, default: []].append((repo.displayName, commits))
+                }
+            }
+        }
+        activity = total
+        let window = ActivityStats.windowKeys()
+        activityStats = ActivityStats(counts: total, keys: window)
+        let ranked = repos.enumerated().compactMap { position, repo -> (Int, RepoActivity)? in
+            guard let counts = activityByRepo[repo.id] else { return nil }
+            let commits = ActivityStats.total(of: counts, over: window)
+            guard commits > 0 else { return nil }
+            return (position, RepoActivity(
+                id: repo.id,
+                name: repo.displayName,
+                count: commits,
+                weeks: ActivityStats.weeklyTotals(of: counts, over: window)
+            ))
+        }
+        // Busiest first, ties by tab order — `sorted` isn't stable, and a
+        // list that reshuffles two equal rows on every refresh reads as data
+        // changing when nothing has.
+        activityRanking = ranked
+            .sorted { ($0.1.count, -$0.0) > ($1.1.count, -$1.0) }
+            .map(\.1)
+        // Loaded means a repo ON THE WALL has been read, not that the cache
+        // has ever held anything: a closed repo's counts stay cached, and a
+        // wall of entirely new repos must say "Reading…" rather than claim a
+        // confident zero off the back of a repo that isn't even open.
+        activityLoaded = repos.contains { activityByRepo[$0.id] != nil }
+        // Busiest first, and only the top few: a day that a dozen repos
+        // touched is a tooltip too wide to read, and the tail of it is the
+        // part nobody came for.
+        activityDetail = contributors.mapValues { entries in
+            let ranked = entries.sorted { $0.count > $1.count }
+            let named = ranked.prefix(3).map { "\($0.name) \($0.count)" }
+            let rest = ranked.count - named.count
+            return (named + (rest > 0 ? ["+\(rest) more"] : [])).joined(separator: ", ")
         }
     }
 
@@ -141,6 +250,10 @@ final class AppState: ObservableObject {
         if activeRepoID == repo.id {
             activeRepoID = repos.first?.id
         }
+        // Closing from the Dashboard's own context menu leaves the user
+        // looking at the grid, so it has to lose that repo's cells now
+        // rather than on the next visit.
+        mergeActivity()
         persist()
     }
 

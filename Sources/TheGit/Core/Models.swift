@@ -182,6 +182,16 @@ enum ActivityDay {
     /// on a 12k-commit repo, half a year is 100ms against 80ms for a
     /// quarter, concurrent with the eight other reads a refresh makes.
     static let windowWeeks = 27
+
+    /// The Dashboard's aggregate grid draws a year, and reads one week past
+    /// it for the same reason `windowWeeks` does — the window's trailing
+    /// edge is this week, so resizing the wall slides it, and a column the
+    /// histogram doesn't cover would draw as a quiet week.
+    ///
+    /// Twice the sidebar's window is roughly twice its cost, and it's paid
+    /// once per open repository, which is why the wall reads them one at a
+    /// time rather than all at once.
+    static let yearWeeks = 53
 }
 
 struct RepoSnapshot: Equatable {

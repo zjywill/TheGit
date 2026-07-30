@@ -578,7 +578,7 @@ enum AgeBreaks {
     }
 
     /// The same scale, abbreviated, for places with a column instead of a
-    /// pill to put it in — the Launchpad's cards. "3 days ago" at the end of
+    /// pill to put it in — the Dashboard's cards. "3 days ago" at the end of
     /// a 300pt card takes the width the commit subject needs.
     static func compact(date: Date, now: Date = Date()) -> String {
         let d = max(0, Int(now.timeIntervalSince(date) / 86_400))

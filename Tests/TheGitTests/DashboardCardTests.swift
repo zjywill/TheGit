@@ -1,12 +1,12 @@
 import XCTest
 @testable import TheGit
 
-/// The Launchpad's card, against a real repository. Every line on a card is
+/// The Dashboard's card, against a real repository. Every line on a card is
 /// a claim about a repo the user hasn't opened yet — clean vs dirty, ahead
 /// vs level, which branch they're standing on — so each one is checked here
 /// rather than by looking at a wall of cards and believing it.
 @MainActor
-final class LaunchpadCardTests: XCTestCase {
+final class DashboardCardTests: XCTestCase {
     private var root: URL!
 
     override func setUpWithError() throws {
