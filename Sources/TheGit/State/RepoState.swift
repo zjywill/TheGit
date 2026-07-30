@@ -891,6 +891,38 @@ final class RepoState: ObservableObject, Identifiable {
         snapshot.commits.first { $0.refs.contains { $0.hasPrefix("HEAD") } }?.subject
     }
 
+    /// The amend checkbox owns the message box: ticking it loads HEAD's
+    /// message, unticking it empties the box. Unconditional in both
+    /// directions, which is what the checkbox means — "the text below is
+    /// the previous commit's" — and it's the only way to ask for that text
+    /// back after editing it. Only filling an empty box instead turns a
+    /// stray keystroke into a state with no way out.
+    func amendChanged(_ amending: Bool) {
+        // A stream that's still running would type over whatever we put
+        // in the box a second later.
+        abandonMessageGeneration()
+        guard amending else {
+            commitMessage = ""
+            return
+        }
+        // The subject is already in the snapshot, so the box fills on the
+        // click rather than a git call later. It's only the first line,
+        // though — amending with it would drop the body — so the full
+        // message replaces it as soon as it lands.
+        let subject = headSubject ?? ""
+        commitMessage = subject
+        guard let head = snapshot.commits.first(where: { c in
+            c.refs.contains { $0.hasPrefix("HEAD") }
+        }) else { return }
+        Task {
+            guard let full = try? await git.commitMessage(head.hash) else { return }
+            // Only if nothing has changed under us: the box still holds
+            // exactly the stand-in, and amend is still on.
+            guard amend, commitMessage == subject else { return }
+            commitMessage = full
+        }
+    }
+
     /// `paths` empty means the whole working tree. A subset goes through a
     /// pathspec rather than `git stash push --staged`: --staged refuses any
     /// file that has both staged and unstaged changes, and it fails *after*

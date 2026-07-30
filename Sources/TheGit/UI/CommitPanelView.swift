@@ -90,10 +90,7 @@ struct CommitPanelView: View {
                     .opacity(repo.panelMode == .commit ? 1 : 0)
                     .disabled(repo.panelMode != .commit)
                     .onChange(of: repo.amend) { _, amending in
-                        if amending, repo.commitMessage.isEmpty,
-                           let subject = repo.headSubject {
-                            repo.commitMessage = subject
-                        }
+                        repo.amendChanged(amending)
                     }
 
                 TextEditor(text: $repo.commitMessage)
