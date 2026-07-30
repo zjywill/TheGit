@@ -821,6 +821,19 @@ struct SectionHeader: View {
     @State private var hovering = false
     @Environment(\.uiZoom) private var zoom
 
+    /// What the badge shows. It's a badge, not a number field: past two
+    /// digits the exact value tells the eye nothing it can use, and a repo
+    /// with 999999 tags would widen this one header's column and knock the
+    /// whole right-hand strip out of alignment to say so. So anything over
+    /// 99 reads as "99+" and the column stays fixed.
+    ///
+    /// String(count), never "\(count)": SwiftUI localises an Int
+    /// interpolated into a Text and 1000 becomes "1,000".
+    private var countText: String {
+        if let countLabel { return countLabel }
+        return count > 99 ? "99+" : String(count)
+    }
+
     var body: some View {
         HStack(spacing: 6) {
             // Explicit header styling: these used to sit in a List section
@@ -852,10 +865,11 @@ struct SectionHeader: View {
             // Count and + button share one centered slot, so the swap on
             // hover never shifts anything.
             ZStack {
-                // String(count), never "\(count)": SwiftUI localises an Int
-                // interpolated into a Text and 1000 becomes "1,000".
-                Text(countLabel ?? String(count))
+                Text(countText)
                     .zoomFont(11, weight: .semibold)
+                    // Digits of equal width, so a count that ticks 9 → 10
+                    // doesn't shift its own centre inside the column.
+                    .monospacedDigit()
                     .foregroundStyle(
                         countLabel == nil
                             ? Color.accentColor.opacity(0.8) : Color.secondary.opacity(0.8)
@@ -879,7 +893,10 @@ struct SectionHeader: View {
                     .allowsHitTesting(hovering)
                 }
             }
-            .frame(minWidth: 22, minHeight: 22, maxHeight: 22, alignment: .center)
+            // Fixed, not minWidth: the column has to be the same width on
+            // every header for the centres to line up, and a count that
+            // outgrew it would drag its own row's centre off the strip.
+            .frame(width: SidebarMetrics.badge * zoom, height: 22, alignment: .center)
         }
         // Same trailing inset as the rows, so the counts and the branch
         // ahead/behind badges share one right-hand baseline.
@@ -891,6 +908,8 @@ struct SectionHeader: View {
         // accessibility tree too), so VoiceOver gets the header as one
         // element carrying the same acts as custom actions instead.
         .accessibilityElement(children: .ignore)
+        // The exact count, not the capped badge: "99+" is a layout
+        // compromise, and VoiceOver has no column to keep aligned.
         .accessibilityLabel("\(title), \(countLabel ?? String(count))")
         .accessibilityActions {
             if let secondary {
@@ -934,13 +953,22 @@ enum SidebarMetrics {
     /// Between rows. Enough that two highlighted rows read as two rows;
     /// taken back out of the section paddings so the rhythm is unchanged.
     static let rowGap: CGFloat = 2
+    /// The trailing column: section counts, the hover buttons that replace
+    /// them, and the disclosure chevrons all CENTRE in it. Right-aligning
+    /// them instead lines up their edges, which is not what the eye reads —
+    /// a 1, an 11 and a 22pt button ending on the same pixel still look
+    /// like three columns. 22 is the button's own size, and the widest a
+    /// count gets is "99+", which fits inside it.
+    static let badge: CGFloat = 22
     /// Disclosure-chevron column, at the TRAILING edge. Kept off the
     /// leading edge on purpose: only folders have a chevron, so a leading
     /// gutter would be dead space on every branch, PR, tag and stash row
     /// — visible as a hole in front of whole sections that contain no
     /// folders at all. On the right it costs nothing, because the rows
     /// that carry one (folders) are the only rows with no trailing badge.
-    static let chevron: CGFloat = 14
+    /// Same width as `badge` so a folder's chevron sits on the same centre
+    /// as the count of the section it lives in.
+    static let chevron: CGFloat = badge
     /// Icon column, and now the row's first column. SF Symbols have wildly
     /// different intrinsic widths at the same point size (`cloud` ≈ 15pt
     /// against `arrow.triangle.branch` ≈ 10pt), and without a fixed column
@@ -953,7 +981,14 @@ enum SidebarMetrics {
     /// indentation is the only thing carrying depth, so it has to land on
     /// a column the eye already knows.
     static let indent: CGFloat = icon + gap
-    static let trailing: CGFloat = 10
+    /// Inside a row, past the badge column — zero on purpose. The list
+    /// already sits 10pt in from the panel's edge, the same 10 as the HEAD
+    /// chip and the filter field, so anything more here is a second inset
+    /// that only the rows pay. And the hover button is a drawn box: its
+    /// stroke has to land on the filter field's edge, or the sidebar has
+    /// two right edges 4pt apart. The counts and chevrons still read as
+    /// inset, because they're centred in the badge column above.
+    static let trailing: CGFloat = 0
     /// Above a section header: the gap that says "a new group starts here".
     /// The stack's own `rowGap` is subtracted, so the space on screen is
     /// still 18.
