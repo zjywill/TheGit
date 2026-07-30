@@ -40,7 +40,16 @@ struct SidebarView: View {
                 // rows sit on the same grid. The 2pt gap is only so that two
                 // filled rows (hovered, selected) read as two rows and not as
                 // one taller block; the section paddings give it back.
-                LazyVStack(alignment: .leading, spacing: SidebarMetrics.rowGap) {
+                // pinnedViews, so every group's header stays on screen while
+                // its own rows scroll under it: in a repo with fifty branches
+                // the list you are looking at is the one fact the sidebar
+                // used to lose first — you scroll into the middle of it and
+                // nothing says whether these are locals, tags or stashes.
+                LazyVStack(
+                    alignment: .leading,
+                    spacing: SidebarMetrics.rowGap,
+                    pinnedViews: [.sectionHeaders]
+                ) {
                     localSection
                     remoteSection
                     forgeSection
@@ -408,6 +417,22 @@ struct SidebarView: View {
     // Each section is its own property: the body used to be one expression
     // large enough to be slow to type-check, and filtering adds a condition
     // to every branch of it.
+    //
+    // Every one of them is a real `Section` with its header in the header
+    // slot — that, and nothing else, is what the LazyVStack pins. A header
+    // emitted as a plain sibling row (which is how these were written)
+    // scrolls away like any other row.
+
+    /// The gap that separates one group from the next. It sits at the END of
+    /// a section's content rather than above the next header, because a
+    /// pinned header sticks as one block: 16pt of dead air riding along
+    /// above every label would make the sticky strip twice as tall as the
+    /// word on it. Stated net of the stack's own `rowGap` at both ends, so
+    /// the space on screen is unchanged.
+    private var groupGap: some View {
+        Color.clear
+            .frame(height: (SidebarMetrics.sectionGap - SidebarMetrics.rowGap) * zoom)
+    }
 
     @ViewBuilder
     private var localSection: some View {
@@ -415,20 +440,23 @@ struct SidebarView: View {
         // While filtering, a section with nothing in it is noise — the
         // header would claim a "Local" group that isn't there.
         if !filtering || !branches.isEmpty {
-            SectionHeader(
-                title: "Local",
-                count: branches.count,
-                topSpace: 0,
-                actionHelp: "Create branch at HEAD",
-                collapsed: $localCollapsed
-            ) { repo.promptNewBranch() }
-            // A filter overrides the fold everywhere in this sidebar:
-            // asking for "crash" and getting a closed section that
-            // secretly holds the match is a wrong answer.
-            if !localCollapsed || filtering {
-                ForEach(BranchTree.build(branches, path: \.name)) { node in
-                    BranchNodeRow(node: node, repo: repo, forceExpanded: filtering)
+            Section {
+                // A filter overrides the fold everywhere in this sidebar:
+                // asking for "crash" and getting a closed section that
+                // secretly holds the match is a wrong answer.
+                if !localCollapsed || filtering {
+                    ForEach(BranchTree.build(branches, path: \.name)) { node in
+                        BranchNodeRow(node: node, repo: repo, forceExpanded: filtering)
+                    }
                 }
+                groupGap
+            } header: {
+                SectionHeader(
+                    title: "Local",
+                    count: branches.count,
+                    actionHelp: "Create branch at HEAD",
+                    collapsed: $localCollapsed
+                ) { repo.promptNewBranch() }
             }
         }
     }
@@ -437,27 +465,31 @@ struct SidebarView: View {
     private var remoteSection: some View {
         let branches = matchedRemote
         if !filtering || !branches.isEmpty {
-            SectionHeader(
-                title: "Remote",
-                // Unfiltered, this section's unit is the remote — that's
-                // what the rows collapse to. Filtering counts branches,
-                // because that's what the user is looking at.
-                count: filtering ? branches.count : repo.snapshot.remoteNames.count,
-                actionHelp: "Add remote",
-                collapsed: $remoteCollapsed
-            ) { repo.promptAddRemote() }
-            if !remoteCollapsed || filtering {
-                ForEach(BranchTree.remoteTree(branches)) { node in
-                    BranchNodeRow(node: node, repo: repo, forceExpanded: filtering)
-                }
-                if repo.snapshot.remoteBranches.isEmpty {
-                    SidebarRow(icon: "plus.circle", iconColor: Color.accentColor) {
-                        Text("Add Remote…")
-                            .zoomFont(12)
-                            .foregroundStyle(Color.accentColor)
+            Section {
+                if !remoteCollapsed || filtering {
+                    ForEach(BranchTree.remoteTree(branches)) { node in
+                        BranchNodeRow(node: node, repo: repo, forceExpanded: filtering)
                     }
-                    .onTapGesture { repo.promptAddRemote() }
+                    if repo.snapshot.remoteBranches.isEmpty {
+                        SidebarRow(icon: "plus.circle", iconColor: Color.accentColor) {
+                            Text("Add Remote…")
+                                .zoomFont(12)
+                                .foregroundStyle(Color.accentColor)
+                        }
+                        .onTapGesture { repo.promptAddRemote() }
+                    }
                 }
+                groupGap
+            } header: {
+                SectionHeader(
+                    title: "Remote",
+                    // Unfiltered, this section's unit is the remote — that's
+                    // what the rows collapse to. Filtering counts branches,
+                    // because that's what the user is looking at.
+                    count: filtering ? branches.count : repo.snapshot.remoteNames.count,
+                    actionHelp: "Add remote",
+                    collapsed: $remoteCollapsed
+                ) { repo.promptAddRemote() }
             }
         }
     }
@@ -469,46 +501,50 @@ struct SidebarView: View {
         if let forge = repo.forge {
             let prs = matchedPRs
             if !filtering || !prs.isEmpty {
-                SectionHeader(
-                    title: forge.sectionTitle,
-                    count: prs.count,
-                    // A "0" next to a failed list reads as "none open",
-                    // which is exactly the wrong thing to believe.
-                    countLabel: repo.forgeError == nil ? nil : "—",
-                    actionHelp: "New \(forge.itemNoun)…",
-                    secondary: .init(
-                        icon: "arrow.clockwise",
-                        help: "Refresh \(forge.sectionTitle.lowercased())",
-                        run: { repo.refreshPullRequests() }
-                    ),
-                    collapsed: $prsCollapsed
-                ) { repo.createPullRequest() }
-                if !prsCollapsed || filtering {
-                    // Both of these explain an empty section, so they'd be a
-                    // second, contradictory answer while a filter is on.
-                    if !filtering {
-                        if let error = repo.forgeError {
-                            SidebarRow(icon: "exclamationmark.triangle", iconColor: .secondary) {
-                                Text(error.summary)
-                                    .zoomFont(10)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(2)
-                            }
-                            // The CLI's own words stay one hover away — the row
-                            // itself is for the sentence you can act on.
-                            .help(error.detail + "\n\nClick to try again.")
-                            .onTapGesture { repo.refreshPullRequests() }
-                        } else if repo.pullRequests.isEmpty {
-                            SidebarRow(icon: nil, hoverable: false) {
-                                Text(repo.loadingPullRequests ? "Loading…" : "No open \(forge.itemNoun.lowercased())s")
-                                    .zoomFont(11)
-                                    .foregroundStyle(.tertiary)
+                Section {
+                    if !prsCollapsed || filtering {
+                        // Both of these explain an empty section, so they'd be a
+                        // second, contradictory answer while a filter is on.
+                        if !filtering {
+                            if let error = repo.forgeError {
+                                SidebarRow(icon: "exclamationmark.triangle", iconColor: .secondary) {
+                                    Text(error.summary)
+                                        .zoomFont(10)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                }
+                                // The CLI's own words stay one hover away — the row
+                                // itself is for the sentence you can act on.
+                                .help(error.detail + "\n\nClick to try again.")
+                                .onTapGesture { repo.refreshPullRequests() }
+                            } else if repo.pullRequests.isEmpty {
+                                SidebarRow(icon: nil, hoverable: false) {
+                                    Text(repo.loadingPullRequests ? "Loading…" : "No open \(forge.itemNoun.lowercased())s")
+                                        .zoomFont(11)
+                                        .foregroundStyle(.tertiary)
+                                }
                             }
                         }
+                        ForEach(prs) { pr in
+                            PullRequestRow(pr: pr, forge: forge, repo: repo)
+                        }
                     }
-                    ForEach(prs) { pr in
-                        PullRequestRow(pr: pr, forge: forge, repo: repo)
-                    }
+                    groupGap
+                } header: {
+                    SectionHeader(
+                        title: forge.sectionTitle,
+                        count: prs.count,
+                        // A "0" next to a failed list reads as "none open",
+                        // which is exactly the wrong thing to believe.
+                        countLabel: repo.forgeError == nil ? nil : "—",
+                        actionHelp: "New \(forge.itemNoun)…",
+                        secondary: .init(
+                            icon: "arrow.clockwise",
+                            help: "Refresh \(forge.sectionTitle.lowercased())",
+                            run: { repo.refreshPullRequests() }
+                        ),
+                        collapsed: $prsCollapsed
+                    ) { repo.createPullRequest() }
                 }
             }
         } else if let missing = repo.missingForgeCLI, !filtering {
@@ -516,17 +552,21 @@ struct SidebarView: View {
             // hint row instead of an invisible feature: this is the only
             // place a user can learn that installing `gh` puts their pull
             // requests in this sidebar.
-            SectionHeader(
-                title: missing.sectionTitle,
-                count: 0,
-                countLabel: "—",
-                secondary: .init(
-                    icon: "arrow.clockwise",
-                    help: "Check for \(missing.binary) again",
-                    run: { repo.recheckForgeCLI() }
+            Section {
+                ForgeInstallHintRow(repo: repo, missing: missing)
+                groupGap
+            } header: {
+                SectionHeader(
+                    title: missing.sectionTitle,
+                    count: 0,
+                    countLabel: "—",
+                    secondary: .init(
+                        icon: "arrow.clockwise",
+                        help: "Check for \(missing.binary) again",
+                        run: { repo.recheckForgeCLI() }
+                    )
                 )
-            )
-            ForgeInstallHintRow(repo: repo, missing: missing)
+            }
         }
     }
 
@@ -541,28 +581,32 @@ struct SidebarView: View {
         if let forge = repo.forge, repo.issues != nil || repo.loadingPullRequests {
             let issues = matchedIssues
             if !filtering || !issues.isEmpty {
-                SectionHeader(
-                    title: "Issues",
-                    count: issues.count,
-                    countLabel: repo.issues == nil ? "…" : nil,
-                    secondary: .init(
-                        icon: "arrow.clockwise",
-                        help: "Refresh issues",
-                        run: { repo.refreshPullRequests() }
-                    ),
-                    collapsed: $issuesCollapsed
-                )
-                if !issuesCollapsed || filtering {
-                    if !filtering, repo.issues?.isEmpty != false {
-                        SidebarRow(icon: nil, hoverable: false) {
-                            Text(repo.issues == nil ? "Loading…" : "No open issues")
-                                .zoomFont(11)
-                                .foregroundStyle(.tertiary)
+                Section {
+                    if !issuesCollapsed || filtering {
+                        if !filtering, repo.issues?.isEmpty != false {
+                            SidebarRow(icon: nil, hoverable: false) {
+                                Text(repo.issues == nil ? "Loading…" : "No open issues")
+                                    .zoomFont(11)
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                        ForEach(issues) { issue in
+                            IssueRow(issue: issue, forge: forge, repo: repo)
                         }
                     }
-                    ForEach(issues) { issue in
-                        IssueRow(issue: issue, forge: forge, repo: repo)
-                    }
+                    groupGap
+                } header: {
+                    SectionHeader(
+                        title: "Issues",
+                        count: issues.count,
+                        countLabel: repo.issues == nil ? "…" : nil,
+                        secondary: .init(
+                            icon: "arrow.clockwise",
+                            help: "Refresh issues",
+                            run: { repo.refreshPullRequests() }
+                        ),
+                        collapsed: $issuesCollapsed
+                    )
                 }
             }
         }
@@ -572,36 +616,40 @@ struct SidebarView: View {
     private var worktreeSection: some View {
         let worktrees = matchedWorktrees
         if !filtering || !worktrees.isEmpty {
-            SectionHeader(title: "Worktrees", count: worktrees.count, collapsed: $worktreesCollapsed)
-            // Folded ⇒ iterate nothing; the header still counts the real
-            // list. A filter overrides the fold, here and below.
-            ForEach(worktreesCollapsed && !filtering ? [] : worktrees) { wt in
-                SidebarRow(icon: "folder") {
-                    VStack(alignment: .leading, spacing: SidebarMetrics.lineGap) {
-                        Text(wt.displayName)
-                            .zoomFont(12)
-                            .lineLimit(1)
-                        if let branch = wt.branch {
-                            Text(branch)
-                                .zoomFont(10)
-                                .foregroundStyle(.secondary)
+            Section {
+                // Folded ⇒ iterate nothing; the header still counts the real
+                // list. A filter overrides the fold, here and below.
+                ForEach(worktreesCollapsed && !filtering ? [] : worktrees) { wt in
+                    SidebarRow(icon: "folder") {
+                        VStack(alignment: .leading, spacing: SidebarMetrics.lineGap) {
+                            Text(wt.displayName)
+                                .zoomFont(12)
                                 .lineLimit(1)
+                            if let branch = wt.branch {
+                                Text(branch)
+                                    .zoomFont(10)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
                         }
                     }
-                }
-                .help(wt.path)
-                .contextTarget("wt:" + wt.path, repo, corner: SidebarMetrics.corner)
-                .contextMenu {
-                    Button("Open as Tab") { appState.open(path: wt.path) }
-                    Button("Show in Finder") {
-                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: wt.path)])
+                    .help(wt.path)
+                    .contextTarget("wt:" + wt.path, repo, corner: SidebarMetrics.corner)
+                    .contextMenu {
+                        Button("Open as Tab") { appState.open(path: wt.path) }
+                        Button("Show in Finder") {
+                            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: wt.path)])
+                        }
+                        Divider()
+                        Button("Remove Worktree…", role: .destructive) {
+                            repo.worktreeToRemove = wt
+                        }
                     }
-                    Divider()
-                    Button("Remove Worktree…", role: .destructive) {
-                        repo.worktreeToRemove = wt
-                    }
+                    .onTapGesture(count: 2) { appState.open(path: wt.path) }
                 }
-                .onTapGesture(count: 2) { appState.open(path: wt.path) }
+                groupGap
+            } header: {
+                SectionHeader(title: "Worktrees", count: worktrees.count, collapsed: $worktreesCollapsed)
             }
         }
     }
@@ -610,36 +658,40 @@ struct SidebarView: View {
     private var tagSection: some View {
         let tags = matchedTags
         if !tags.isEmpty {
-            SectionHeader(title: "Tags", count: tags.count, collapsed: $tagsCollapsed)
-            ForEach(tagsCollapsed && !filtering ? [] : tags) { tag in
-                // Secondary, not orange: orange is this sidebar's
-                // "needs attention" colour (behind, gone, LFS
-                // missing, dirty submodule). A tag is just a tag.
-                SidebarRow(icon: "tag") {
-                    Text(tag.name)
-                        .zoomFont(12)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                .onTapGesture { repo.locate(tag.hash) }
-                .help("\(tag.name) @ \(String(tag.hash.prefix(7))) — click to locate")
-                .contextTarget("tag:" + tag.name, repo, corner: SidebarMetrics.corner)
-                .contextMenu {
-                    Button("Checkout \(tag.name) (detached)") { repo.checkoutTag(tag) }
-                    Divider()
-                    if repo.snapshot.remoteNames.count > 1 {
-                        Menu("Push tag to") {
-                            ForEach(repo.snapshot.remoteNames, id: \.self) { remote in
-                                Button(remote) { repo.pushTag(tag, to: remote) }
-                            }
-                        }
-                    } else {
-                        Button("Push tag to \(repo.snapshot.defaultRemote)") { repo.pushTag(tag) }
+            Section {
+                ForEach(tagsCollapsed && !filtering ? [] : tags) { tag in
+                    // Secondary, not orange: orange is this sidebar's
+                    // "needs attention" colour (behind, gone, LFS
+                    // missing, dirty submodule). A tag is just a tag.
+                    SidebarRow(icon: "tag") {
+                        Text(tag.name)
+                            .zoomFont(12)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
-                    Button("Copy tag name") { RepoState.copyToPasteboard(tag.name) }
-                    Divider()
-                    Button("Delete tag…", role: .destructive) { repo.tagToDelete = tag }
+                    .onTapGesture { repo.locate(tag.hash) }
+                    .help("\(tag.name) @ \(String(tag.hash.prefix(7))) — click to locate")
+                    .contextTarget("tag:" + tag.name, repo, corner: SidebarMetrics.corner)
+                    .contextMenu {
+                        Button("Checkout \(tag.name) (detached)") { repo.checkoutTag(tag) }
+                        Divider()
+                        if repo.snapshot.remoteNames.count > 1 {
+                            Menu("Push tag to") {
+                                ForEach(repo.snapshot.remoteNames, id: \.self) { remote in
+                                    Button(remote) { repo.pushTag(tag, to: remote) }
+                                }
+                            }
+                        } else {
+                            Button("Push tag to \(repo.snapshot.defaultRemote)") { repo.pushTag(tag) }
+                        }
+                        Button("Copy tag name") { RepoState.copyToPasteboard(tag.name) }
+                        Divider()
+                        Button("Delete tag…", role: .destructive) { repo.tagToDelete = tag }
+                    }
                 }
+                groupGap
+            } header: {
+                SectionHeader(title: "Tags", count: tags.count, collapsed: $tagsCollapsed)
             }
         }
     }
@@ -648,41 +700,45 @@ struct SidebarView: View {
     private var stashSection: some View {
         let stashes = matchedStashes
         if !stashes.isEmpty {
-            SectionHeader(title: "Stashes", count: stashes.count, collapsed: $stashesCollapsed)
-            ForEach(stashesCollapsed && !filtering ? [] : stashes) { stash in
-                // `selected` lights up when the stash's graph node is clicked.
-                SidebarRow(icon: "tray.full", selected: repo.selectedStashRef == stash.ref) {
-                    VStack(alignment: .leading, spacing: SidebarMetrics.lineGap) {
-                        Text(stash.message)
-                            .zoomFont(12)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                        Text("\(stash.ref) · \(stash.date.formatted(.relative(presentation: .named)))")
-                            .zoomFont(10)
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
+            Section {
+                ForEach(stashesCollapsed && !filtering ? [] : stashes) { stash in
+                    // `selected` lights up when the stash's graph node is clicked.
+                    SidebarRow(icon: "tray.full", selected: repo.selectedStashRef == stash.ref) {
+                        VStack(alignment: .leading, spacing: SidebarMetrics.lineGap) {
+                            Text(stash.message)
+                                .zoomFont(12)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            Text("\(stash.ref) · \(stash.date.formatted(.relative(presentation: .named)))")
+                                .zoomFont(10)
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                        }
+                    }
+                    .help(stash.message)
+                    .contextTarget("stash:" + stash.ref, repo, corner: SidebarMetrics.corner)
+                    .contextMenu {
+                        Button("Apply (keep stash)") { repo.applyStash(stash) }
+                        Button("Pop (apply and remove)") { repo.popStash(stash) }
+                        Divider()
+                        Button("Create branch from stash…") {
+                            repo.promptText = ""
+                            repo.branchPrompt = .branchFromStash(stash)
+                        }
+                        Divider()
+                        Button("Drop…", role: .destructive) { repo.stashToDrop = stash }
+                    }
+                    .onTapGesture(count: 2) { repo.applyStash(stash) }
+                    // Single click mirrors the graph node: select, and
+                    // jump the graph to the commit the stash sits on.
+                    .onTapGesture {
+                        repo.selectedStashRef = stash.ref
+                        if !stash.baseHash.isEmpty { repo.locate(stash.baseHash) }
                     }
                 }
-                .help(stash.message)
-                .contextTarget("stash:" + stash.ref, repo, corner: SidebarMetrics.corner)
-                .contextMenu {
-                    Button("Apply (keep stash)") { repo.applyStash(stash) }
-                    Button("Pop (apply and remove)") { repo.popStash(stash) }
-                    Divider()
-                    Button("Create branch from stash…") {
-                        repo.promptText = ""
-                        repo.branchPrompt = .branchFromStash(stash)
-                    }
-                    Divider()
-                    Button("Drop…", role: .destructive) { repo.stashToDrop = stash }
-                }
-                .onTapGesture(count: 2) { repo.applyStash(stash) }
-                // Single click mirrors the graph node: select, and
-                // jump the graph to the commit the stash sits on.
-                .onTapGesture {
-                    repo.selectedStashRef = stash.ref
-                    if !stash.baseHash.isEmpty { repo.locate(stash.baseHash) }
-                }
+                groupGap
+            } header: {
+                SectionHeader(title: "Stashes", count: stashes.count, collapsed: $stashesCollapsed)
             }
         }
     }
@@ -694,42 +750,46 @@ struct SidebarView: View {
         if repo.snapshot.lfs.isEnabled {
             let patterns = matchedLFS
             if !filtering || !patterns.isEmpty {
-                SectionHeader(
-                    title: "Git LFS",
-                    count: filtering ? patterns.count : repo.snapshot.lfs.files.count,
-                    actionIcon: "arrow.down.circle",
-                    actionHelp: "Download LFS objects (git lfs pull)",
-                    collapsed: $lfsCollapsed
-                ) { repo.pullLFSObjects() }
-                let missing = repo.snapshot.lfsMissing.count
-                // A repo-wide total has nothing to do with the filter, so
-                // it would read as a match that it isn't.
-                if missing > 0, !filtering, !lfsCollapsed {
-                    SidebarRow(icon: "arrow.down.circle.dotted", iconColor: .orange) {
-                        Text("\(missing) not downloaded")
-                            .zoomFont(11)
-                            .foregroundStyle(.orange)
-                            .lineLimit(1)
+                Section {
+                    let missing = repo.snapshot.lfsMissing.count
+                    // A repo-wide total has nothing to do with the filter, so
+                    // it would read as a match that it isn't.
+                    if missing > 0, !filtering, !lfsCollapsed {
+                        SidebarRow(icon: "arrow.down.circle.dotted", iconColor: .orange) {
+                            Text("\(missing) not downloaded")
+                                .zoomFont(11)
+                                .foregroundStyle(.orange)
+                                .lineLimit(1)
+                        }
+                        .help("These files are pointers only — click to run git lfs pull")
+                        .onTapGesture { repo.pullLFSObjects() }
                     }
-                    .help("These files are pointers only — click to run git lfs pull")
-                    .onTapGesture { repo.pullLFSObjects() }
-                }
-                ForEach(lfsCollapsed && !filtering ? [] : patterns, id: \.self) { pattern in
-                    // externaldrive, not a second shippingbox: the box is
-                    // the submodule icon, and two unrelated things wearing
-                    // the same glyph read as one kind at a glance.
-                    SidebarRow(icon: "externaldrive") {
-                        Text(pattern)
-                            .zoomFont(12, design: .monospaced)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                    ForEach(lfsCollapsed && !filtering ? [] : patterns, id: \.self) { pattern in
+                        // externaldrive, not a second shippingbox: the box is
+                        // the submodule icon, and two unrelated things wearing
+                        // the same glyph read as one kind at a glance.
+                        SidebarRow(icon: "externaldrive") {
+                            Text(pattern)
+                                .zoomFont(12, design: .monospaced)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        .help("\(pattern) — tracked by Git LFS (.gitattributes)")
+                        .contextTarget("lfs:" + pattern, repo, corner: SidebarMetrics.corner)
+                        .contextMenu {
+                            Button("Copy pattern") { RepoState.copyToPasteboard(pattern) }
+                            Button("Download LFS objects") { repo.pullLFSObjects() }
+                        }
                     }
-                    .help("\(pattern) — tracked by Git LFS (.gitattributes)")
-                    .contextTarget("lfs:" + pattern, repo, corner: SidebarMetrics.corner)
-                    .contextMenu {
-                        Button("Copy pattern") { RepoState.copyToPasteboard(pattern) }
-                        Button("Download LFS objects") { repo.pullLFSObjects() }
-                    }
+                    groupGap
+                } header: {
+                    SectionHeader(
+                        title: "Git LFS",
+                        count: filtering ? patterns.count : repo.snapshot.lfs.files.count,
+                        actionIcon: "arrow.down.circle",
+                        actionHelp: "Download LFS objects (git lfs pull)",
+                        collapsed: $lfsCollapsed
+                    ) { repo.pullLFSObjects() }
                 }
             }
         }
@@ -741,14 +801,18 @@ struct SidebarView: View {
     private var submoduleSection: some View {
         let submodules = matchedSubmodules
         if !filtering || !submodules.isEmpty {
-            SectionHeader(
-                title: "Submodules",
-                count: submodules.count,
-                actionHelp: "Add submodule",
-                collapsed: $submodulesCollapsed
-            ) { repo.promptAddSubmodule() }
-            ForEach(submodulesCollapsed && !filtering ? [] : submodules) { sub in
-                SubmoduleRow(sub: sub, repo: repo)
+            Section {
+                ForEach(submodulesCollapsed && !filtering ? [] : submodules) { sub in
+                    SubmoduleRow(sub: sub, repo: repo)
+                }
+                groupGap
+            } header: {
+                SectionHeader(
+                    title: "Submodules",
+                    count: submodules.count,
+                    actionHelp: "Add submodule",
+                    collapsed: $submodulesCollapsed
+                ) { repo.promptAddSubmodule() }
             }
         }
     }
@@ -867,16 +931,17 @@ struct AddSubmoduleSheet: View {
 
 /// GitKraken-style section header: count on the right, and (when the
 /// section has an action) a large bordered + button that appears on hover.
+///
+/// Pinned by the sidebar's LazyVStack, which is why it carries an opaque
+/// backdrop of its own: a sticky header is drawn OVER the rows still
+/// scrolling past it, and a transparent one lets branch names slide
+/// through the letters of its title.
 struct SectionHeader: View {
     let title: String
     let count: Int
     /// Stands in for the count when the number would lie — an "—" while the
     /// list couldn't be fetched, rather than a confident 0.
     var countLabel: String?
-    /// Space above the header, i.e. the gap that separates this group from
-    /// the previous one. Only the first section overrides it (to 0) — the
-    /// scroller's own top inset already stands in for the gap there.
-    var topSpace: CGFloat = SidebarMetrics.sectionGap
     var actionIcon = "plus"
     var actionHelp: String?
     /// A second, quieter button left of the primary one. A struct, not a
@@ -1015,9 +1080,21 @@ struct SectionHeader: View {
         }
         // Outside the hover shape on purpose: the gaps belong to the layout,
         // not to the header's hit area, or the + would arm itself while the
-        // pointer is still in the space between two sections.
-        .padding(.top, topSpace * zoom)
+        // pointer is still in the space between two sections. The gap ABOVE
+        // a header now lives at the end of the previous section instead —
+        // it would otherwise stick to the ceiling along with the header.
+        .padding(.top, SidebarMetrics.headerLead * zoom)
         .padding(.bottom, SidebarMetrics.headerGap * zoom)
+        // Under the paddings, so the backdrop covers the air the header
+        // owns and no row shows through it — and 10pt wider on both sides,
+        // which is the list's own inset: the gutters have no rows of their
+        // own to hide, but a strip of background that stops short of the
+        // panel edge reads as a floating card rather than as a header.
+        .background {
+            Rectangle()
+                .fill(Color(nsColor: .windowBackgroundColor))
+                .padding(.horizontal, -10)
+        }
     }
 }
 
@@ -1084,9 +1161,16 @@ enum SidebarMetrics {
     /// inset, because they're centred in the badge column above.
     static let trailing: CGFloat = 0
     /// Above a section header: the gap that says "a new group starts here".
-    /// The stack's own `rowGap` is subtracted, so the space on screen is
-    /// still 18.
+    /// Drawn as a spacer at the END of the previous section (see `groupGap`),
+    /// because the header is pinned and anything above it inside the header
+    /// sticks to the ceiling with it. The stack's own `rowGap` is subtracted
+    /// at each end, so the space on screen is still 18.
     static let sectionGap: CGFloat = 16
+    /// Inside a pinned header, above its label. Small on purpose: it is the
+    /// only air the header keeps when it is stuck to the top of the
+    /// scroller, and its job is to stop the 11pt title from sitting flush
+    /// against the edge — the gap BETWEEN groups is `sectionGap`'s work.
+    static let headerLead: CGFloat = 2
     /// Below a section header, before its own first row. Deliberately much
     /// smaller than `sectionGap` — proximity is the only thing telling the
     /// eye which rows the header owns, so the two values have to stay far
