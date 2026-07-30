@@ -2,6 +2,9 @@ import SwiftUI
 
 /// Three-pane layout for one repository:
 /// sidebar (branches) | graph | commit panel.
+///
+/// The right two panes double as the window's reading surface — a diff, a
+/// file history, an issue, a pull request — see `workArea`.
 struct RepoView: View {
     @ObservedObject var repo: RepoState
 
@@ -55,73 +58,11 @@ struct RepoView: View {
             .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
                 Self.store($0, key: Self.sidebarWidthKey)
             }
-            // The diff OVERLAYS the graph instead of replacing it: swapping
-            // the split child makes HSplitView re-balance all three panes
-            // (the right panel visibly changed width on every file click).
-            ZStack {
-                GraphView(repo: repo)
-                if let history = repo.fileHistory {
-                    FileHistoryView(repo: repo, path: history.path, commits: history.commits)
-                }
-                if repo.selectedFile != nil {
-                    FileDiffView(repo: repo)
-                        // Fast fade-in masks the abrupt full-panel swap;
-                        // removal stays instant — close is usually Esc,
-                        // and keyboard actions never animate.
-                        .transition(.asymmetric(
-                            insertion: .opacity.animation(.easeOut(duration: 0.12)),
-                            removal: .identity
-                        ))
-                }
-                if let issue = repo.issueToView {
-                    // The transition lives on a wrapper and the per-issue
-                    // .id on the view inside it: the id change (switching
-                    // issues) must swap content instantly, while the
-                    // fade-in belongs to the wrapper appearing over the
-                    // graph. With both on one view, every issue switch
-                    // replayed the fade and the graph flashed through.
-                    ZStack {
-                        IssueDetailView(repo: repo, issue: issue)
-                            // Identity per issue: switching issues in the
-                            // sidebar must reset the scroll position, not
-                            // keep the old one's offset.
-                            .id(issue.id)
-                    }
-                    .transition(.asymmetric(
-                        insertion: .opacity.animation(.easeOut(duration: 0.12)),
-                        removal: .identity
-                    ))
-                }
-                if let pr = repo.prToView {
-                    // Same wrapper/id split as the issue viewer above, for
-                    // the same reason: switching requests swaps content
-                    // instantly, only the panel's arrival fades.
-                    ZStack {
-                        PullRequestDetailView(repo: repo, pr: pr)
-                            .id(pr.id)
-                    }
-                    .transition(.asymmetric(
-                        insertion: .opacity.animation(.easeOut(duration: 0.12)),
-                        removal: .identity
-                    ))
-                }
-            }
-            .frame(minWidth: 400)
-            .layoutPriority(1)
-            Group {
-                // Selecting a commit swaps the right panel to its details,
-                // GitKraken-style; ZStack keeps the split widths stable.
-                ZStack {
-                    CommitPanelView(repo: repo)
-                    if let commit = repo.selectedCommitObject {
-                        CommitDetailView(repo: repo, commit: commit)
-                    }
-                }
-            }
-            .frame(minWidth: 260, idealWidth: commitIdealWidth, maxWidth: 420)
-            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
-                Self.store($0, key: Self.commitWidthKey)
-            }
+            workArea
+                // The two panes' minimums, so the outer split can't squeeze
+                // the pair below what either of them accepts.
+                .frame(minWidth: 660)
+                .layoutPriority(1)
         }
         // Bottom centre of the panes, which lands over the oldest loaded
         // commits — the one part of this window nobody is reading when a
@@ -208,6 +149,115 @@ struct RepoView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("All uncommitted changes and commits after this point will be permanently discarded.")
+        }
+    }
+
+    /// Everything but the sidebar: the graph and the commit panel, and the
+    /// two sizes of reading pane that cover them.
+    ///
+    /// Two sizes, because the two kinds of reading want different amounts of
+    /// the window:
+    ///
+    /// - A **diff or file history** covers the GRAPH only. The commit panel
+    ///   is where you clicked the file from and where the next one is —
+    ///   covering it would end the review at file one.
+    /// - An **issue or pull request** covers the graph AND the commit panel.
+    ///   Neither has anything to do with staging, and a commit box you can't
+    ///   use while reading is 300pt of a reading column given to nothing.
+    ///
+    /// Both are drawn OVER the panes rather than swapped in place of them,
+    /// and that is not laziness — a swap takes the panes out of the view
+    /// tree, and three things come off with them:
+    ///
+    /// 1. The graph's scroll position, which is ScrollView state and resets
+    ///    to the top on rebuild. Closing a pull request would dump you back
+    ///    at HEAD. (`graphScrollX` was moved onto RepoState for this same
+    ///    reason; the vertical offset hasn't been.)
+    /// 2. ~190ms of rebuild, measured for this subtree — paid on every
+    ///    close, where an overlay pays nothing.
+    /// 3. The commit panel's dragged width: `commitIdealWidth` is read from
+    ///    UserDefaults once per view identity on purpose (a live value
+    ///    re-enters layout mid-drag), so a rebuilt split would come back at
+    ///    whatever width the app launched with.
+    ///
+    /// Behind an opaque pane the panes below don't redraw — nothing changes
+    /// their state — so keeping them alive costs approximately nothing.
+    ///
+    /// Its own property rather than more of `body`: inline, the nested split
+    /// plus four conditional panes is one expression big enough to time the
+    /// type checker out.
+    private var workArea: some View {
+        ZStack {
+            HSplitView {
+                ZStack {
+                    GraphView(repo: repo)
+                    if let history = repo.fileHistory {
+                        FileHistoryView(
+                            repo: repo, path: history.path, commits: history.commits
+                        )
+                    }
+                    if repo.selectedFile != nil {
+                        FileDiffView(repo: repo)
+                            // Fast fade-in masks the abrupt full-panel
+                            // swap; removal stays instant — close is
+                            // usually Esc, and keyboard actions never
+                            // animate.
+                            .transition(.asymmetric(
+                                insertion: .opacity.animation(.easeOut(duration: 0.12)),
+                                removal: .identity
+                            ))
+                    }
+                }
+                .frame(minWidth: 400)
+                .layoutPriority(1)
+                Group {
+                    // Selecting a commit swaps the right panel to its
+                    // details, GitKraken-style; ZStack keeps the split
+                    // widths stable.
+                    ZStack {
+                        CommitPanelView(repo: repo)
+                        if let commit = repo.selectedCommitObject {
+                            CommitDetailView(repo: repo, commit: commit)
+                        }
+                    }
+                }
+                .frame(minWidth: 260, idealWidth: commitIdealWidth, maxWidth: 420)
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
+                    Self.store($0, key: Self.commitWidthKey)
+                }
+            }
+            if let issue = repo.issueToView {
+                // The transition lives on a wrapper and the per-issue
+                // .id on the view inside it: the id change (switching
+                // issues) must swap content instantly, while the
+                // fade-in belongs to the wrapper appearing over the
+                // graph. With both on one view, every issue switch
+                // replayed the fade and the graph flashed through.
+                ZStack {
+                    IssueDetailView(repo: repo, issue: issue)
+                        // Identity per issue: switching issues in the
+                        // sidebar must reset the scroll position, not
+                        // keep the old one's offset.
+                        .id(issue.id)
+                }
+                .transition(.asymmetric(
+                    insertion: .opacity.animation(.easeOut(duration: 0.12)),
+                    removal: .identity
+                ))
+            }
+            if let pr = repo.prToView {
+                // Same wrapper/id split as the issue viewer above, for
+                // the same reason: switching requests swaps content
+                // instantly, only the panel's arrival fades.
+                ZStack {
+                    PullRequestDetailView(repo: repo, pr: pr)
+                        .id(pr.id)
+                }
+                .transition(.asymmetric(
+                    insertion: .opacity.animation(.easeOut(duration: 0.12)),
+                    removal: .identity
+                ))
+            }
         }
     }
 }

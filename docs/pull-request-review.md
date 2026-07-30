@@ -76,10 +76,18 @@ but starts with an empty page, an empty timeline and no ticks.
 
 ### Invariants the code relies on
 
-- **One overlay slot.** Opening a review clears the diff, the file history
-  and the issue viewer; every one of those clears `prToView` in turn. Two
-  overlays stacked doesn't mean both are open — the lower one is
+- **One reading pane at a time.** Opening a review clears the diff, the file
+  history and the issue viewer; every one of those clears `prToView` in
+  turn. Two stacked doesn't mean both are open — the lower one is
   unreachable.
+- **The reading pane is drawn over the panes, not swapped in for them.** A
+  review covers the graph *and* the commit panel (nothing in a review has
+  anything to do with staging), but the panes stay in the view tree
+  underneath. Taking them out would reset the graph's scroll position, cost
+  a subtree rebuild on every close, and bring the commit panel back at the
+  width the app launched with. The reasoning is spelled out on
+  `RepoView.workArea` — the file to read before "simplifying" this into an
+  `if/else`.
 - **A missing signal is not a good one.** `mergeable: "UNKNOWN"`,
   `reviewDecision: ""`, an empty `statusCheckRollup`, a `canceled` GitLab
   pipeline — all become `nil`, and a `nil` draws no chip. Nothing in the
