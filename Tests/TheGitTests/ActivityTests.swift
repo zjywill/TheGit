@@ -48,7 +48,9 @@ final class ActivityTests: XCTestCase {
         let window = ActivityWindow(weeks: 2, counts: counts, today: thursday, calendar: cal)
         let last = window.columns.last!
         XCTAssertEqual(last.map(\.count), [0, 0, 0, 3, 1, 0, 0])
-        XCTAssertEqual(window.summary, "4 commits · 2 weeks")
+        // Two columns wide, but a repo whose first commit was yesterday —
+        // the caption reports the repo, not the grid.
+        XCTAssertEqual(window.summary, "4 commits · 1 week")
     }
 
     /// Every day with work in it shades at least one step, however busy the
@@ -168,7 +170,137 @@ final class ActivityTests: XCTestCase {
         )
     }
 
+    /// A repo younger than the grid's six-column floor. The columns before
+    /// its first commit are prehistory — days it wasn't there for — and not
+    /// weeks it sat idle, which is what they used to be indistinguishable
+    /// from. The window here is Jun 22 – Aug 2; the repo starts Jul 21.
+    func testPrehistoryEndsAtTheFirstCommit() {
+        let cal = calendar()
+        var counts: [Int: Int] = [:]
+        for day in 21...31 { counts[key(String(format: "2025-07-%02d", day), cal)] = 1 }
+        let window = ActivityWindow(weeks: 6, counts: counts, today: thursday, calendar: cal)
+
+        XCTAssertTrue(window.columns[0].allSatisfy(\.isPrehistory))
+        XCTAssertTrue(window.columns[3].allSatisfy(\.isPrehistory))
+        // The boundary falls mid-column: Jul 20 is prehistory, Jul 21 isn't.
+        XCTAssertEqual(
+            window.columns[4].map(\.isPrehistory),
+            [true, false, false, false, false, false, false]
+        )
+        XCTAssertTrue(window.columns[5].allSatisfy { !$0.isPrehistory })
+    }
+
+    /// A repo older than the window has no prehistory on screen — the flag
+    /// marks padding, not the mere fact of a left edge.
+    func testNoPrehistoryWhenTheRepoOutrunsTheWindow() {
+        let cal = calendar()
+        var counts: [Int: Int] = [:]
+        for day in 1...30 { counts[key(String(format: "2025-06-%02d", day), cal)] = 1 }
+        let window = ActivityWindow(weeks: 4, counts: counts, today: thursday, calendar: cal)
+        XCTAssertTrue(window.columns.flatMap { $0 }.allSatisfy { !$0.isPrehistory })
+    }
+
+    /// An empty repo has no first commit to be earlier than, so none of its
+    /// days are prehistory: the caption carries that news on its own.
+    func testEmptyRepoHasNoPrehistory() {
+        let window = ActivityWindow(weeks: 6, counts: [:], today: thursday, calendar: calendar())
+        XCTAssertTrue(window.columns.flatMap { $0 }.allSatisfy { !$0.isPrehistory })
+        XCTAssertEqual(window.summary, "No commits in 6 weeks")
+    }
+
+    /// The caption counts the weeks the repo has been alive for, not the
+    /// columns the floor padded it out to — "6 weeks" over four columns of
+    /// prehistory is the grey cells' old lie, retold in words.
+    func testCaptionReportsTheRepoSpanNotTheGridWidth() {
+        let cal = calendar()
+        var counts: [Int: Int] = [:]
+        for day in 21...31 { counts[key(String(format: "2025-07-%02d", day), cal)] = 1 }
+        XCTAssertEqual(
+            ActivityWindow(weeks: 6, counts: counts, today: thursday, calendar: cal).summary,
+            "11 commits · 2 weeks"
+        )
+        // Singular where it's singular, now that one week is reachable.
+        XCTAssertEqual(
+            ActivityWindow(
+                weeks: 6, counts: [key("2025-07-31", cal): 2], today: thursday, calendar: cal
+            ).summary,
+            "2 commits · 1 week"
+        )
+    }
+
+    /// A window narrower than the repo still describes what's on screen.
+    func testCaptionClampsToTheWindow() {
+        let cal = calendar()
+        var counts: [Int: Int] = [:]
+        for day in 1...31 { counts[key(String(format: "2025-07-%02d", day), cal)] = 1 }
+        for day in 1...30 { counts[key(String(format: "2025-06-%02d", day), cal)] = 1 }
+        let window = ActivityWindow(weeks: 3, counts: counts, today: thursday, calendar: cal)
+        XCTAssertTrue(window.summary.hasSuffix("· 3 weeks"))
+    }
+
+    /// Dragging the splitter must not lose a month. The grid's right edge is
+    /// pinned to this week, so each column dropped slides the window a week
+    /// later and shifts every month one column left — and June used to fall
+    /// off exactly when that put it three columns from the leading label
+    /// instead of four.
+    ///
+    /// Seven columns is where the sweep starts because that's the narrowest
+    /// window in which June still owns three columns. Below it June is one or
+    /// two columns of leftovers at the leading edge, and yielding its name is
+    /// the deliberate trade — see the tail of this test.
+    func testMonthLabelsSurviveEveryWidth() {
+        var cal = calendar()
+        cal.firstWeekday = 2 // Monday
+        for weeks in 7...14 {
+            let months = ActivityWindow(
+                weeks: weeks, counts: [:], today: thursday, calendar: cal
+            ).months.compactMap { $0 }
+            XCTAssertEqual(
+                months.suffix(2), [cal.shortMonthSymbols[5], cal.shortMonthSymbols[6]],
+                "June and July should both be named at \(weeks) columns"
+            )
+        }
+        // Two columns of June left in view, and the name would crowd July's.
+        XCTAssertEqual(
+            ActivityWindow(weeks: 6, counts: [:], today: thursday, calendar: cal)
+                .months.compactMap { $0 },
+            [cal.shortMonthSymbols[6]]
+        )
+    }
+
+    /// The two widths from the report, spelled out. Thirteen columns opens on
+    /// May 5 and has room for all three names; twelve opens on May 12, where
+    /// "May" covers three columns and yields its slot to the real June.
+    func testLeadingPartialMonthYieldsToTheRealOne() {
+        var cal = calendar()
+        cal.firstWeekday = 2 // Monday
+        let wide = ActivityWindow(weeks: 13, counts: [:], today: thursday, calendar: cal)
+        XCTAssertEqual(wide.months[0], cal.shortMonthSymbols[4])   // May, col 0
+        XCTAssertEqual(wide.months[4], cal.shortMonthSymbols[5])   // Jun, col 4
+        XCTAssertEqual(wide.months[9], cal.shortMonthSymbols[6])   // Jul, col 9
+
+        // Three columns of clearance is enough, so May keeps its name here.
+        let narrow = ActivityWindow(weeks: 12, counts: [:], today: thursday, calendar: cal)
+        XCTAssertEqual(narrow.months[0], cal.shortMonthSymbols[4]) // May, col 0
+        XCTAssertEqual(narrow.months[3], cal.shortMonthSymbols[5]) // Jun, col 3
+        XCTAssertEqual(narrow.months[8], cal.shortMonthSymbols[6]) // Jul, col 8
+
+        // Two is not: the window opens May 19, and the leading label goes.
+        let tight = ActivityWindow(weeks: 11, counts: [:], today: thursday, calendar: cal)
+        XCTAssertNil(tight.months[0])
+        XCTAssertEqual(tight.months[2], cal.shortMonthSymbols[5])  // Jun, col 2
+        XCTAssertEqual(tight.months[7], cal.shortMonthSymbols[6])  // Jul, col 7
+    }
+
+    /// One name per column at most, and never more names than columns.
+    func testMonthsIsOnePerColumn() {
+        let window = ActivityWindow(weeks: 9, counts: [:], today: thursday, calendar: calendar())
+        XCTAssertEqual(window.months.count, window.columns.count)
+    }
+
     private func day(count: Int) -> ActivityWindow.Day {
-        ActivityWindow.Day(key: 0, count: count, isFuture: false, summary: "")
+        ActivityWindow.Day(
+            key: 0, count: count, isFuture: false, isPrehistory: false, summary: ""
+        )
     }
 }

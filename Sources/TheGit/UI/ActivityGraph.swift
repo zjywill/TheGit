@@ -12,10 +12,14 @@ import SwiftUI
 ///   fitted for a wide sidebar overflow a narrow one, the overflowed width
 ///   is what gets measured, and the grid never shrinks back — it just hangs
 ///   off both edges of the pane.
-/// - **The window is as long as the repo's own history, up to what fits.**
-///   52 columns in a sidebar is 2pt of ink per week, and a week-old repo
-///   drawn over half a year is nineteen columns of grey waffle with four
-///   green cells in the corner.
+/// - **The window is as long as the panel can hold, capped at half a year.**
+///   Not as long as the repo: a grid sized to each repo's own history makes
+///   a young one a stub beside its neighbours, and six columns where the
+///   panel has room for twelve reads as a grid that got cut off. The cap is
+///   what the sidebar can spare the ink for — 52 columns down here is 2pt a
+///   week. A young repo therefore opens on empty cells, and the caption
+///   (see `ActivityWindow.summary`) is what says how much of the window the
+///   repo has actually been alive for.
 /// - **The shading is relative to how busy this repo actually is** (see
 ///   `ActivityWindow.Day.level`). Fixed thresholds looked right on a solo
 ///   repo and collapsed on a shared one — at 4000 commits a quarter every
@@ -31,9 +35,6 @@ struct ActivityGraph: View {
     /// reads — the grid must never draw a column the histogram doesn't
     /// cover, or missing data would render as a quiet week.
     private static let maxWeeks = 26
-    /// A young repo still gets a frame around its first few days rather
-    /// than a grid the size of its history.
-    private static let minWeeks = 6
 
     /// Fixed, all three of them: the block's height must be declared up
     /// front (see `height`), and a lattice with a horizontal gap that
@@ -55,11 +56,21 @@ struct ActivityGraph: View {
         monthRow + band + (7 * cell + 6 * gap) + band + captionRow
     }
 
+    /// As many columns as the panel can hold, and no fewer for a young repo
+    /// than for an old one: two repos side by side in the same sidebar draw
+    /// the same grid, and the difference between them is what's *in* it.
+    /// Sizing the window to each repo's own history instead made the young
+    /// one a stub — the same panel, the same cells, an unexplained six
+    /// columns where its neighbour has twelve, which reads as a truncated
+    /// grid rather than a short history.
+    ///
+    /// Floored at one rather than at a handful of weeks: the floor exists so
+    /// a vanishing panel doesn't ask for zero columns, and a floor higher
+    /// than `fits` would push the grid off the edge it was measured against.
     private func columns(for width: CGFloat) -> Int {
         let available = width - labelWidth - gap
         let fits = Int((available + gap) / (cell + gap))
-        let history = ActivityWindow.weeksOfHistory(counts: counts)
-        return max(Self.minWeeks, min(Self.maxWeeks, min(fits, history)))
+        return max(1, min(Self.maxWeeks, fits))
     }
 
     private func blockWidth(_ columns: Int) -> CGFloat {
@@ -152,9 +163,9 @@ struct ActivityGraph: View {
         RoundedRectangle(cornerRadius: 2.5 * zoom, style: .continuous)
             .fill(fill(day, peak: peak))
             .frame(width: cell, height: cell)
-            // No tooltip on a day that hasn't happened — there's no fact
+            // No tooltip on a day outside the repo's life — there's no fact
             // about it to report.
-            .help(day.isFuture ? "" : day.summary)
+            .help(day.isOffRecord ? "" : day.summary)
     }
 
     /// Empty days are a visible tint, not nothing: the grid is read as a
@@ -194,50 +205,28 @@ struct ActivityGraph: View {
             ]
     }
 
-    /// Total on the leading edge, scale key on the trailing one — the key
-    /// earns its place now that the steps are relative to the repo.
+    /// The total, and nothing else, centred under the block.
     ///
-    /// Three tiers, widest first: the words go before the swatches, and the
-    /// swatches before the total, because "128 commits · 9 weeks" is the
-    /// line that still means something on its own. Nothing here may
-    /// truncate — a clipped total reads as a smaller number.
+    /// No scale key. All four swatches could ever say is "darker is more",
+    /// which four steps of one hue say on their own, and the number a step
+    /// actually stands for isn't on the key either — the steps are relative
+    /// to the repo, so that number lives in the per-day tooltips and nowhere
+    /// a legend could put it. It was spending a third of the line to
+    /// restate the obvious.
+    ///
+    /// Centred rather than ranged left, because with the key gone the line
+    /// is the only thing on its row: left-aligned under a centred grid it
+    /// hangs off one corner. Never truncated — a clipped "87 commits" reads
+    /// as a smaller number — so it keeps its intrinsic width and overhangs a
+    /// panel too narrow for it rather than losing a digit.
     @ViewBuilder
     private func caption(_ window: ActivityWindow, width: CGFloat) -> some View {
-        ViewThatFits(in: .horizontal) {
-            captionRow(window, words: true, key: true)
-            captionRow(window, words: false, key: true)
-            captionRow(window, words: false, key: false)
-        }
-        .frame(width: width, height: captionRow, alignment: .leading)
-    }
-
-    @ViewBuilder
-    private func captionRow(_ window: ActivityWindow, words: Bool, key: Bool) -> some View {
-        HStack(spacing: 4 * zoom) {
-            Text(window.summary)
-                .zoomFont(10)
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
-                .fixedSize()
-            if key {
-                Spacer(minLength: 8 * zoom)
-                if words {
-                    Text("Less").zoomFont(9).foregroundStyle(.quaternary).fixedSize()
-                }
-                ForEach(0..<5, id: \.self) { level in
-                    RoundedRectangle(cornerRadius: 1.5 * zoom, style: .continuous)
-                        .fill(
-                            level == 0
-                                ? Color.primary.opacity(0.09)
-                                : Self.ramp(scheme)[level - 1]
-                        )
-                        .frame(width: 7 * zoom, height: 7 * zoom)
-                }
-                if words {
-                    Text("More").zoomFont(9).foregroundStyle(.quaternary).fixedSize()
-                }
-            }
-        }
+        Text(window.summary)
+            .zoomFont(10)
+            .foregroundStyle(.tertiary)
+            .lineLimit(1)
+            .fixedSize()
+            .frame(width: width, height: captionRow, alignment: .center)
     }
 }
 
@@ -247,9 +236,19 @@ struct ActivityWindow {
         let key: Int
         let count: Int
         let isFuture: Bool
+        /// Before the repo's first commit. Only ever true when the grid's
+        /// floor is holding columns open that the repo is too young to
+        /// fill — a repo older than the window has no prehistory in view.
+        let isPrehistory: Bool
         let summary: String
 
         var id: Int { key }
+
+        /// The two ends of the same fact: the repo wasn't there. Emptiness
+        /// on a recorded day is a fact about the repo and shades like one;
+        /// emptiness on either side of its life is a fact about the
+        /// calendar, and the grid should stop claiming otherwise.
+        var isOffRecord: Bool { isFuture || isPrehistory }
 
         /// Quartiles of `peak`, GitHub's own scheme — but with a peak that
         /// is the 90th percentile of the repo's *active* days rather than
@@ -293,6 +292,48 @@ struct ActivityWindow {
         return max(1, Int(ceil(Double(days + 1) / 7)))
     }
 
+    /// Columns of clearance a month name needs before the next one. At the
+    /// grid's cell size a name is about twice the width of the column it
+    /// belongs to, so three columns leaves it a comfortable margin and two
+    /// would have "Jun" and "Jul" touching in the locales with the widest
+    /// abbreviations.
+    private static let labelGap = 3
+
+    /// Which columns get a month name.
+    ///
+    /// Real month starts are never a problem: the shortest month is 28 days,
+    /// so consecutive first-of-the-months always land four or five columns
+    /// apart and always both fit. Every crowded pair involves the *first*
+    /// column, which is recorded as an opening whatever week of the month it
+    /// lands in — a window starting May 11 labels "May" over three columns of
+    /// a month that's nearly over.
+    ///
+    /// That borrowed label used to win, and the genuine month start behind it
+    /// was dropped. Worse, which one you got depended on the panel width: the
+    /// grid's right edge is pinned to this week, so every column the splitter
+    /// takes away slides the window a week later and shifts every month one
+    /// column left. At thirteen columns June opened at column 4 and was
+    /// labelled; at twelve it opened at column 3 and vanished. Same repo,
+    /// same month, one drag of the splitter.
+    ///
+    /// So the real month start is the one that stays, and the leading label
+    /// yields to it. Since the gap only ever closes at the leading edge,
+    /// dropping that one entry is enough — nothing behind it can cascade.
+    static func label(_ openings: [(column: Int, name: String)], weeks: Int) -> [String?] {
+        var openings = openings
+        if openings.count > 1, openings[0].column == 0,
+           openings[1].column - openings[0].column < labelGap {
+            openings.removeFirst()
+        }
+        var months = [String?](repeating: nil, count: weeks)
+        var lastLabelled = -labelGap
+        for opening in openings where opening.column - lastLabelled >= labelGap {
+            months[opening.column] = opening.name
+            lastLabelled = opening.column
+        }
+        return months
+    }
+
     init(
         weeks: Int,
         counts: [Int: Int],
@@ -307,12 +348,17 @@ struct ActivityWindow {
             byAdding: .day, value: -(intoWeek + 7 * (weeks - 1)), to: start
         ) ?? start
         let shortMonths = calendar.shortMonthSymbols
+        // The repo's own beginning, which is the boundary the padded columns
+        // sit before. Nil for a repo with nothing recorded at all: there is
+        // no first commit to be earlier than, and an all-outline grid would
+        // say "this repo doesn't exist" where the caption already says the
+        // true and narrower thing.
+        let born = counts.filter { $0.value > 0 }.keys.min()
 
         var columns: [[Day]] = []
-        var months: [String?] = []
+        var openings: [(column: Int, name: String)] = []
         var active: [Int] = []
         var total = 0
-        var lastLabelled = -4
         var previousMonth = 0
         for column in 0..<weeks {
             var days: [Day] = []
@@ -329,25 +375,25 @@ struct ActivityWindow {
                     key: key,
                     count: count,
                     isFuture: date > start,
+                    isPrehistory: born.map { key < $0 } ?? false,
                     summary: "\(count) commit\(count == 1 ? "" : "s") · \(shortMonths[month - 1]) \(day)"
                 ))
-                // A month is labelled by the column its first row falls in.
+                // A month opens in the column its first row falls in. The
+                // first column always counts as an opening, whatever week of
+                // the month it lands in — which the pass below is what
+                // accounts for.
                 if row == 0 {
-                    let opens = month != previousMonth
-                    previousMonth = month
-                    if opens, column - lastLabelled > 3 {
-                        months.append(shortMonths[month - 1])
-                        lastLabelled = column
-                    } else {
-                        months.append(nil)
+                    if month != previousMonth {
+                        openings.append((column, shortMonths[month - 1]))
                     }
+                    previousMonth = month
                 }
             }
             columns.append(days)
         }
 
         self.columns = columns
-        self.months = months
+        self.months = Self.label(openings, weeks: weeks)
         // Rotated to the locale's own first weekday, so the row a label
         // names is the row it actually sits on in every region.
         self.weekdayNames = (0..<7).map { row in
@@ -361,8 +407,18 @@ struct ActivityWindow {
         self.peak = max(4, active.isEmpty
             ? 1
             : active[min(active.count - 1, Int(Double(active.count) * 0.9))])
+        // Weeks the repo has been alive for, never the number of columns
+        // drawn: the floor pads a two-week-old repo out to six, and a caption
+        // reading "6 weeks" over four columns of prehistory is the same lie
+        // the grey cells used to tell, in words. Clamped by the window too,
+        // so a long-lived repo in a narrow panel still reports what's on
+        // screen rather than its whole life.
+        let span = max(1, min(weeks, Self.weeksOfHistory(
+            counts: counts, today: today, calendar: calendar
+        )))
         self.summary = total == 0
             ? "No commits in \(weeks) weeks"
-            : "\(total.formatted()) commit\(total == 1 ? "" : "s") · \(weeks) weeks"
+            : "\(total.formatted()) commit\(total == 1 ? "" : "s") · "
+                + "\(span) week\(span == 1 ? "" : "s")"
     }
 }
