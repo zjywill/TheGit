@@ -11,6 +11,12 @@ struct SidebarView: View {
     @State private var filter = ""
     @FocusState private var filterFocused: Bool
     @State private var hoveringHead = false
+    /// Folded Issues section. AppStorage, not @State: closing a backlog
+    /// you don't want in your face is a decision about the app, and it
+    /// should hold across tabs and launches — unlike the filter above,
+    /// which is a way of looking and dies with the view.
+    @AppStorage("TheGit.sidebar.issuesCollapsed") private var issuesCollapsed = false
+    @AppStorage("TheGit.sidebar.pullRequestsCollapsed") private var prsCollapsed = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -458,32 +464,35 @@ struct SidebarView: View {
                         icon: "arrow.clockwise",
                         help: "Refresh \(forge.sectionTitle.lowercased())",
                         run: { repo.refreshPullRequests() }
-                    )
+                    ),
+                    collapsed: $prsCollapsed
                 ) { repo.createPullRequest() }
-                // Both of these explain an empty section, so they'd be a
-                // second, contradictory answer while a filter is on.
-                if !filtering {
-                    if let error = repo.forgeError {
-                        SidebarRow(icon: "exclamationmark.triangle", iconColor: .secondary) {
-                            Text(error.summary)
-                                .zoomFont(10)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
-                        }
-                        // The CLI's own words stay one hover away — the row
-                        // itself is for the sentence you can act on.
-                        .help(error.detail + "\n\nClick to try again.")
-                        .onTapGesture { repo.refreshPullRequests() }
-                    } else if repo.pullRequests.isEmpty {
-                        SidebarRow(icon: nil, hoverable: false) {
-                            Text(repo.loadingPullRequests ? "Loading…" : "No open \(forge.itemNoun.lowercased())s")
-                                .zoomFont(11)
-                                .foregroundStyle(.tertiary)
+                if !prsCollapsed || filtering {
+                    // Both of these explain an empty section, so they'd be a
+                    // second, contradictory answer while a filter is on.
+                    if !filtering {
+                        if let error = repo.forgeError {
+                            SidebarRow(icon: "exclamationmark.triangle", iconColor: .secondary) {
+                                Text(error.summary)
+                                    .zoomFont(10)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                            // The CLI's own words stay one hover away — the row
+                            // itself is for the sentence you can act on.
+                            .help(error.detail + "\n\nClick to try again.")
+                            .onTapGesture { repo.refreshPullRequests() }
+                        } else if repo.pullRequests.isEmpty {
+                            SidebarRow(icon: nil, hoverable: false) {
+                                Text(repo.loadingPullRequests ? "Loading…" : "No open \(forge.itemNoun.lowercased())s")
+                                    .zoomFont(11)
+                                    .foregroundStyle(.tertiary)
+                            }
                         }
                     }
-                }
-                ForEach(prs) { pr in
-                    PullRequestRow(pr: pr, forge: forge, repo: repo)
+                    ForEach(prs) { pr in
+                        PullRequestRow(pr: pr, forge: forge, repo: repo)
+                    }
                 }
             }
         } else if let missing = repo.missingForgeCLI, !filtering {
@@ -524,17 +533,23 @@ struct SidebarView: View {
                         icon: "arrow.clockwise",
                         help: "Refresh issues",
                         run: { repo.refreshPullRequests() }
-                    )
+                    ),
+                    collapsed: $issuesCollapsed
                 )
-                if !filtering, repo.issues?.isEmpty != false {
-                    SidebarRow(icon: nil, hoverable: false) {
-                        Text(repo.issues == nil ? "Loading…" : "No open issues")
-                            .zoomFont(11)
-                            .foregroundStyle(.tertiary)
+                // A filter overrides the fold, like it force-expands the
+                // branch folders: asking for "crash" and getting a closed
+                // section that secretly holds the match is a wrong answer.
+                if !issuesCollapsed || filtering {
+                    if !filtering, repo.issues?.isEmpty != false {
+                        SidebarRow(icon: nil, hoverable: false) {
+                            Text(repo.issues == nil ? "Loading…" : "No open issues")
+                                .zoomFont(11)
+                                .foregroundStyle(.tertiary)
+                        }
                     }
-                }
-                ForEach(issues) { issue in
-                    IssueRow(issue: issue, forge: forge, repo: repo)
+                    ForEach(issues) { issue in
+                        IssueRow(issue: issue, forge: forge, repo: repo)
+                    }
                 }
             }
         }
@@ -856,6 +871,10 @@ struct SectionHeader: View {
         let run: () -> Void
     }
     var secondary: Secondary?
+    /// A collapsible section hands its state in; the header then wears a
+    /// disclosure chevron and the whole strip toggles on click. nil — most
+    /// sections — means always open, and nothing about the header changes.
+    var collapsed: Binding<Bool>?
     var action: (() -> Void)?
     @State private var hovering = false
     @Environment(\.uiZoom) private var zoom
@@ -885,6 +904,14 @@ struct SectionHeader: View {
                 // read as a label rather than as a 12pt row that shrank.
                 .tracking(0.3)
                 .foregroundStyle(.secondary)
+            // The same chevron the rows carry, in the same rotation
+            // grammar: right is closed, down is open.
+            if let collapsed {
+                Image(systemName: "chevron.right")
+                    .zoomFont(8, weight: .semibold)
+                    .foregroundStyle(.tertiary)
+                    .rotationEffect(.degrees(collapsed.wrappedValue ? 0 : 90))
+            }
             Spacer()
             // Borderless on purpose: two outlined buttons side by side
             // read as a segmented control, and this one is the lesser act.
@@ -941,6 +968,12 @@ struct SectionHeader: View {
         // ahead/behind badges share one right-hand baseline.
         .padding(.trailing, SidebarMetrics.trailing * zoom)
         .contentShape(Rectangle())
+        // The buttons on the strip keep their own clicks; everywhere else
+        // toggles. Deliberately not animated, for the same reason the PR
+        // list pops in unanimated — a section closing is a full-list
+        // reflow, and animating it drags every section below through a
+        // cross-fade.
+        .onTapGesture { collapsed?.wrappedValue.toggle() }
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
         // The buttons only exist on hover (opacity 0 removes them from the
@@ -951,6 +984,11 @@ struct SectionHeader: View {
         // compromise, and VoiceOver has no column to keep aligned.
         .accessibilityLabel("\(title), \(countLabel ?? String(count))")
         .accessibilityActions {
+            if let collapsed {
+                Button(collapsed.wrappedValue ? "Expand" : "Collapse") {
+                    collapsed.wrappedValue.toggle()
+                }
+            }
             if let secondary {
                 Button(secondary.help, action: secondary.run)
             }
