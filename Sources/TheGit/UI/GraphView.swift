@@ -576,6 +576,21 @@ enum AgeBreaks {
         return result
     }
 
+    /// The same scale, abbreviated, for places with a column instead of a
+    /// pill to put it in — the Launchpad's cards. "3 days ago" at the end of
+    /// a 300pt card takes the width the commit subject needs.
+    static func compact(date: Date, now: Date = Date()) -> String {
+        let d = max(0, Int(now.timeIntervalSince(date) / 86_400))
+        switch d {
+        case 0: return "today"
+        case 1: return "1d"
+        case ..<7: return "\(d)d"
+        case ..<31: return "\(d / 7)w"
+        case ..<366: return "\(max(1, d / 30))mo"
+        default: return "\(d / 365)y"
+        }
+    }
+
     static func label(daysAgo d: Int) -> String {
         switch d {
         case 0: return "today"

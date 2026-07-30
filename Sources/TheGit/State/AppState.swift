@@ -54,6 +54,24 @@ final class AppState: ObservableObject {
         repos.first { $0.id == activeRepoID }
     }
 
+    /// No repo selected means the Launchpad, which is also where a window
+    /// with nothing open lands. One selection, not two pieces of state that
+    /// can disagree about what the window is showing — every existing
+    /// `activeRepoID = repos.first?.id` already falls back to it correctly
+    /// when the last tab closes.
+    var showingLaunchpad: Bool { activeRepoID == nil }
+
+    func showLaunchpad() { activeRepoID = nil }
+
+    /// The Launchpad's Refresh: every card straight from git, in the order
+    /// they're read in. Sequential for the same reason the first load is —
+    /// one wall of cards must not fire twenty subprocesses at once.
+    func refreshLaunchpad() {
+        Task {
+            for repo in repos { await repo.loadCard(force: true) }
+        }
+    }
+
     init() {
         installTitleBarDoubleClick()
         let saved = UserDefaults.standard.stringArray(forKey: Self.recentKey) ?? []

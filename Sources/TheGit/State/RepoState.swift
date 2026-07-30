@@ -330,6 +330,81 @@ final class RepoState: ObservableObject, Identifiable {
         self.forgeClient = ForgeClient(repoPath: path)
     }
 
+    /// What the Launchpad needs to draw this repo's card, and nothing more.
+    ///
+    /// Deliberately not the snapshot: the Launchpad shows every open repo at
+    /// once, and a full `refresh()` is nine subprocesses each — nine repos
+    /// would be eighty processes to draw a wall of cards. This is two, and
+    /// only for repos whose tab hasn't been opened yet.
+    struct Card: Equatable {
+        var branch: String?
+        var head: String?
+        var ahead = 0
+        var behind = 0
+        var changed = 0
+        var conflicted = 0
+        var commits: [Commit] = []
+
+        var isClean: Bool { changed == 0 && conflicted == 0 }
+    }
+
+    @Published private(set) var card: Card?
+    private var cardLoadedAt: Date?
+
+    /// Load (or refresh) the card. Cheap enough to call on every visit to
+    /// the Launchpad: a repo whose tab is already open answers from the
+    /// snapshot it already has, and everyone else is cached for `freshFor`.
+    ///
+    /// `force` is the Launchpad's own Refresh: it goes to git for every
+    /// repo, including the ones with a snapshot, because the reason to press
+    /// it is that something outside the app has changed.
+    func loadCard(force: Bool = false) async {
+        if !force, let snapshotCard = cardFromSnapshot() {
+            card = snapshotCard
+            cardLoadedAt = lastRefreshedAt
+            return
+        }
+        if !force, cardLoadedAt.map({ Date().timeIntervalSince($0) < Self.freshFor }) == true {
+            return
+        }
+        // HEAD's own history, not the all-refs log the graph draws: a card
+        // answers "where is this repo standing", and a commit from an
+        // unrelated branch at the top of it answers something else.
+        async let log = git.log(limit: 6, solo: "HEAD")
+        async let status = git.status()
+        guard let s = try? await status else { return }
+        card = Card(
+            branch: s.branch,
+            head: s.head,
+            ahead: s.ahead,
+            behind: s.behind,
+            changed: Set((s.staged + s.unstaged).map(\.path)).count,
+            conflicted: s.conflicted.count,
+            commits: (try? await log) ?? []
+        )
+        cardLoadedAt = Date()
+    }
+
+    /// The same card, free, for a repo the user has already visited.
+    private func cardFromSnapshot() -> Card? {
+        guard !snapshot.commits.isEmpty else { return nil }
+        let head = snapshot.headBranch
+        return Card(
+            branch: snapshot.currentBranch,
+            head: snapshot.headHash,
+            ahead: head?.ahead ?? 0,
+            behind: head?.behind ?? 0,
+            changed: Set((snapshot.staged + snapshot.unstaged).map(\.path)).count,
+            conflicted: snapshot.conflicted.count,
+            // HEAD's line only, taken from rows the graph has already laid
+            // out — the snapshot's log spans every ref.
+            commits: snapshot.commits
+                .filter { !$0.isWip && !$0.isStash && snapshot.reachableFromHead.contains($0.hash) }
+                .prefix(6)
+                .map { $0 }
+        )
+    }
+
     private var hasLoaded = false
     /// When the snapshot was last read from git — see `appeared()`.
     private var lastRefreshedAt: Date?

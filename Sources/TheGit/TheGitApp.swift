@@ -123,18 +123,16 @@ struct RootView: View {
                 )
                 Divider()
             }
-            // With no repo open the bar holds one lone + against an empty
-            // strip, and the empty state below already offers the same
-            // action in a form that reads as the thing to do. A tab bar
-            // with no tabs is chrome describing nothing.
-            if !appState.repos.isEmpty {
-                RepoTabsBar()
-                Divider()
-            }
+            // Always present now: the bar's first tab is the Launchpad, so
+            // even a window with nothing open has a tab that means
+            // something. (It used to hide itself rather than show one lone
+            // + against an empty strip.)
+            RepoTabsBar()
+            Divider()
             if let repo = appState.activeRepo {
                 RepoView(repo: repo)
             } else {
-                EmptyStateView()
+                LaunchpadView()
             }
         }
         // Here rather than on the banner itself: showing the banner is this
@@ -146,9 +144,16 @@ struct RootView: View {
         // switch (1542 samples in -[NSToolbarView layout] plus 745 in
         // ToolbarBridge.makeStorage, ~27% of the main thread). Up here the
         // items keep their identity across repos and only rebind.
+        // Never empty. A toolbar with no items collapses its strip, and with
+        // the title bar hidden that strip is what holds the window's top
+        // edge apart from the tab bar — switching to a repo-less screen made
+        // the whole window content jump up and back. The Launchpad gets its
+        // own two items rather than a row of disabled repo actions.
         .toolbar {
             if let repo = appState.activeRepo {
                 RepoToolbar(repo: repo, pullModeRaw: $pullModeRaw)
+            } else {
+                LaunchpadToolbar()
             }
         }
         .alert(
@@ -294,7 +299,6 @@ struct EmptyStateView: View {
                     .font(.title3)
                     .foregroundStyle(.secondary)
                 Button("Open Repository…") { appState.openRepoPanel() }
-                    .keyboardShortcut("o")
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
             }
@@ -382,6 +386,10 @@ struct RepoTabsBar: View {
 
     var body: some View {
         HStack(spacing: Self.spacing) {
+            LaunchpadTab()
+            // Pinned: it sits outside the reorderable ForEach below, so it
+            // can't be dragged out of first place and the drag arithmetic
+            // (which indexes appState.repos) never has to know about it.
             ForEach(appState.repos) { repo in
                 RepoTab(
                     repo: repo,
@@ -401,6 +409,10 @@ struct RepoTabsBar: View {
             }
             .buttonStyle(.pressEffect)
             .foregroundStyle(.secondary)
+            // The one ⌘O in the window: this bar is on every screen, so the
+            // shortcut lives here rather than in a toolbar or empty state
+            // that comes and goes with the screen.
+            .keyboardShortcut("o")
             .help("Open Repository (⌘O)")
             .onHover { AppState.pointerOverTopControl = $0 }
             Spacer()
@@ -414,6 +426,52 @@ struct RepoTabsBar: View {
         .frame(height: 38 * zoom)
         .background(.bar)
         .onPreferenceChange(TabWidthKey.self) { widths = $0 }
+    }
+}
+
+/// The home tab, pinned at the head of the strip. Same shape as a repo tab
+/// so the row reads as one row of tabs — but no close button, because it's
+/// the one tab that can't be closed, and a disabled × on hover would be a
+/// control that exists only to say no.
+struct LaunchpadTab: View {
+    @EnvironmentObject var appState: AppState
+    @Environment(\.uiZoom) private var zoom
+    @State private var hovering = false
+
+    private var isActive: Bool { appState.showingLaunchpad }
+
+    var body: some View {
+        Button {
+            appState.showLaunchpad()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "square.grid.2x2")
+                    .zoomFont(10)
+                    .foregroundStyle(isActive ? Color.accentColor : .secondary)
+                Text("Launchpad")
+                    .zoomFont(12, weight: isActive ? .semibold : .regular)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 28 * zoom)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isActive
+                        ? Color.primary.opacity(0.08)
+                        : hovering ? Color.primary.opacity(0.04) : .clear)
+                    .animation(.easeOut(duration: 0.12), value: hovering)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.rowPressEffect)
+        // ⌘0 alongside the ⌘1…⌘9 a tab bar implies; zero is the one that
+        // isn't a repo.
+        .keyboardShortcut("0", modifiers: .command)
+        .help("Launchpad — every open repository (⌘0)")
+        .onHover {
+            hovering = $0
+            AppState.pointerOverTopControl = $0
+        }
     }
 }
 

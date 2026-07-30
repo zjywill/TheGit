@@ -121,6 +121,14 @@ enum GitParsers {
         var unstaged: [FileChange] = []
         var conflicted: [FileChange] = []
         var branch: String?
+        /// HEAD's sha — the only name a detached HEAD has.
+        var head: String?
+        /// Commits ahead of / behind the upstream. Both stay zero with no
+        /// upstream configured, which is indistinguishable from being level
+        /// with one; the caller that cares looks at `upstream`.
+        var ahead = 0
+        var behind = 0
+        var upstream: String?
     }
 
     static func parseStatus(_ output: String) -> StatusResult {
@@ -128,11 +136,27 @@ enum GitParsers {
         var unstaged: [FileChange] = []
         var conflicted: [FileChange] = []
         var branch: String?
+        var head: String?
+        var ahead = 0
+        var behind = 0
+        var upstream: String?
 
         for line in output.split(separator: "\n") {
             if line.hasPrefix("# branch.head ") {
                 let name = String(line.dropFirst("# branch.head ".count))
                 branch = name == "(detached)" ? nil : name
+            } else if line.hasPrefix("# branch.oid ") {
+                let oid = String(line.dropFirst("# branch.oid ".count))
+                head = oid == "(initial)" ? nil : oid
+            } else if line.hasPrefix("# branch.upstream ") {
+                upstream = String(line.dropFirst("# branch.upstream ".count))
+            } else if line.hasPrefix("# branch.ab ") {
+                // "# branch.ab +2 -1"
+                for field in line.dropFirst("# branch.ab ".count).split(separator: " ") {
+                    let value = Int(field.dropFirst()) ?? 0
+                    if field.hasPrefix("+") { ahead = value }
+                    if field.hasPrefix("-") { behind = value }
+                }
             } else if line.hasPrefix("1 ") || line.hasPrefix("2 ") {
                 // "1 XY sub mH mI mW hH hI path" / "2 ... path\torigPath"
                 let fields = line.split(separator: " ", maxSplits: 8, omittingEmptySubsequences: false)
@@ -159,6 +183,15 @@ enum GitParsers {
                 conflicted.append(FileChange(path: String(fields[10]), status: "U", area: .unstaged))
             }
         }
-        return StatusResult(staged: staged, unstaged: unstaged, conflicted: conflicted, branch: branch)
+        return StatusResult(
+            staged: staged,
+            unstaged: unstaged,
+            conflicted: conflicted,
+            branch: branch,
+            head: head,
+            ahead: ahead,
+            behind: behind,
+            upstream: upstream
+        )
     }
 }
