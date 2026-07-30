@@ -73,6 +73,10 @@ final class AppState: ObservableObject {
             // looking at, and the grid is a year of history that hasn't
             // changed much in the time it took to read them.
             await loadActivity(force: true)
+            // Last, because it's the only network in the pass — and forced,
+            // because "did that PR land yet" is a reason this button gets
+            // pressed.
+            for repo in repos { await repo.loadCardPullRequests(force: true) }
         }
     }
 

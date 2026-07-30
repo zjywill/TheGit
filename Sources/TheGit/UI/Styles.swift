@@ -129,3 +129,59 @@ extension Animation {
         .timingCurve(0.23, 1, 0.32, 1, duration: duration)
     }
 }
+
+/// The pull-request glyph as GitHub draws it — a two-dot rail, and an
+/// elbow with an arrowhead dropping into a third dot — because that shape
+/// is the one a GitHub user already reads as "pull request", and SF
+/// Symbols has nothing that looks like it (arrow.triangle.pull doesn't).
+/// Drawn on the octicon's own 16-unit grid so it can be checked against
+/// the original coordinate for coordinate. Takes its color from
+/// `foregroundStyle`, like the symbol it stands in for. Used on the
+/// Dashboard's cards and in the sidebar's PR rows.
+struct PullRequestGlyph: View {
+    var body: some View {
+        Canvas { ctx, size in
+            let u = size.width / 16
+            let stroke = StrokeStyle(lineWidth: 1.7 * u, lineCap: .round)
+            let r = 2.1 * u
+            let leftX = 3.5 * u, rightX = 12.5 * u
+            let topY = 3.5 * u, bottomY = 12.5 * u
+
+            var lines = Path()
+            // The rail, between its dots rather than through them: the
+            // dots are hollow, and a line crossing one shows inside it.
+            lines.move(to: CGPoint(x: leftX, y: topY + r))
+            lines.addLine(to: CGPoint(x: leftX, y: bottomY - r))
+            // The elbow: out of the arrowhead, around the corner, down
+            // into the bottom-right dot.
+            lines.move(to: CGPoint(x: 9.2 * u, y: topY))
+            lines.addLine(to: CGPoint(x: 10 * u, y: topY))
+            lines.addQuadCurve(
+                to: CGPoint(x: rightX, y: topY + 2.5 * u),
+                control: CGPoint(x: rightX, y: topY)
+            )
+            lines.addLine(to: CGPoint(x: rightX, y: bottomY - r))
+            ctx.stroke(lines, with: .foreground, style: stroke)
+
+            var dots = Path()
+            for center in [
+                CGPoint(x: leftX, y: topY),
+                CGPoint(x: leftX, y: bottomY),
+                CGPoint(x: rightX, y: bottomY),
+            ] {
+                dots.addEllipse(in: CGRect(
+                    x: center.x - r, y: center.y - r, width: 2 * r, height: 2 * r
+                ))
+            }
+            ctx.stroke(dots, with: .foreground, style: stroke)
+
+            // The arrowhead, pointing back at the rail it came from.
+            var head = Path()
+            head.move(to: CGPoint(x: 6.9 * u, y: topY))
+            head.addLine(to: CGPoint(x: 9.4 * u, y: topY - 2.2 * u))
+            head.addLine(to: CGPoint(x: 9.4 * u, y: topY + 2.2 * u))
+            head.closeSubpath()
+            ctx.fill(head, with: .foreground)
+        }
+    }
+}

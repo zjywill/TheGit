@@ -163,6 +163,24 @@ final class ForgeParsersTests: XCTestCase {
         XCTAssertLessThanOrEqual(summary(String(repeating: "x", count: 400)).count, 140)
     }
 
+    // MARK: - Issue count
+
+    /// The count is the array's length and nothing else — gh's shape and
+    /// glab's shape count the same, and a stray banner line before the
+    /// JSON is skipped like `pullRequests` skips it.
+    func testListCountAcrossCLIShapes() {
+        XCTAssertEqual(ForgeParsers.listCount(#"[{"number":1},{"number":7}]"#), 2)
+        XCTAssertEqual(
+            ForgeParsers.listCount(#"Showing 1 of 1\n[{"iid":3,"title":"t","web_url":"u"}]"#),
+            1
+        )
+        XCTAssertEqual(ForgeParsers.listCount("[]"), 0)
+        // No JSON at all — a CLI that printed only chatter — is zero, not
+        // a crash: the badge simply stays off.
+        XCTAssertEqual(ForgeParsers.listCount("no issues match"), 0)
+        XCTAssertEqual(ForgeParsers.listCount(""), 0)
+    }
+
     /// The tooltip keeps the command that failed; the summary never does.
     func testDetailKeepsTheCommandContext() {
         let failure = ForgeFailure.describe(

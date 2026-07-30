@@ -1017,6 +1017,10 @@ struct SidebarRow<Content: View>: View {
     /// nil reserves the column without drawing anything, for rows that
     /// are text only ("No open pull requests") but still have to line up.
     var icon: String?
+    /// The one icon SF Symbols can't provide: GitHub's own pull-request
+    /// shape, hand-drawn as `PullRequestGlyph`. Takes the icon column in
+    /// `iconColor` when set; `icon` should then stay nil.
+    var pullRequestIcon = false
     var iconColor: Color = .secondary
     /// Row the rest of the UI is currently pointing at — the stash whose
     /// commit is showing, the branch a drag is over. Beats hover, because
@@ -1037,7 +1041,14 @@ struct SidebarRow<Content: View>: View {
         // floats it into the gap between them.
         HStack(alignment: .firstTextBaseline, spacing: 0) {
             Group {
-                if let icon {
+                if pullRequestIcon {
+                    // Bottom lands on the text baseline (the default for a
+                    // view with no baseline of its own), which is where an
+                    // 11pt symbol's round bottom sits too.
+                    PullRequestGlyph()
+                        .foregroundStyle(iconColor)
+                        .frame(width: 11 * zoom, height: 11 * zoom)
+                } else if let icon {
                     Image(systemName: icon)
                         .zoomFont(11)
                         .foregroundStyle(iconColor)
@@ -1249,7 +1260,7 @@ struct PullRequestRow: View {
 
     var body: some View {
         SidebarRow(
-            icon: "arrow.triangle.pull",
+            pullRequestIcon: true,
             iconColor: pr.isDraft ? Color.secondary : .green
         ) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {

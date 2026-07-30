@@ -164,6 +164,17 @@ enum ForgeParsers {
         }
     }
 
+    /// How many items a CLI's JSON list holds — all the issue badge needs,
+    /// so the fields inside each item don't matter and aren't decoded. Same
+    /// bracket-hunting as `pullRequests`, same reason.
+    static func listCount(_ output: String) -> Int {
+        guard let start = output.firstIndex(where: { $0 == "[" }),
+              let data = output[start...].data(using: .utf8),
+              let array = try? JSONSerialization.jsonObject(with: data) as? [Any]
+        else { return 0 }
+        return array.count
+    }
+
     /// The created PR's address out of the CLI's chatter: both `gh` and
     /// `glab` print it on its own line, surrounded by human sentences that
     /// differ per version. No URL is not a failure — the caller just has
@@ -255,6 +266,27 @@ actor ForgeClient {
             args = ["mr", "list", "--output", "json", "--per-page", String(limit)]
         }
         return try ForgeParsers.pullRequests(try await run(forge, args), forge: forge)
+    }
+
+    /// The most issues the count query asks for — and therefore the most
+    /// the badge can say. Past this it shows "100+", which is honest;
+    /// the exact number of a triage backlog isn't what a card is for.
+    static let issueCountLimit = 100
+
+    /// How many issues are open, by listing their numbers up to
+    /// `issueCountLimit`. A listing rather than a repo-metadata query
+    /// because that's the one shape both CLIs share — GitHub's own
+    /// `open_issues_count` would count PRs into it anyway.
+    func openIssueCount(_ forge: Forge) async throws -> Int {
+        let limit = String(Self.issueCountLimit)
+        let args: [String]
+        switch forge {
+        case .github:
+            args = ["issue", "list", "--json", "number", "--limit", limit]
+        case .gitlab:
+            args = ["issue", "list", "--output", "json", "--per-page", limit]
+        }
+        return ForgeParsers.listCount(try await run(forge, args))
     }
 
     /// Head branch → merged PR number. The forge is the only source that

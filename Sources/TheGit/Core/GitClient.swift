@@ -573,6 +573,15 @@ actor GitClient {
         try await run(["remote", "remove", name])
     }
 
+    /// Remote names, one per line. The snapshot knows them too, but only
+    /// after a full refresh — this is for the Dashboard asking about a repo
+    /// whose tab has never been opened.
+    func remotes() async throws -> [String] {
+        try await run(["remote"])
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+    }
+
     func remoteURL(_ remote: String = "origin") async throws -> String {
         try await run(["remote", "get-url", remote])
             .trimmingCharacters(in: .whitespacesAndNewlines)
