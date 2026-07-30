@@ -148,6 +148,8 @@ struct RootView: View {
             Divider()
             if let repo = appState.activeRepo {
                 RepoView(repo: repo)
+            } else if appState.showingRepositories {
+                RepositoriesView()
             } else {
                 DashboardView()
             }
@@ -169,6 +171,8 @@ struct RootView: View {
         .toolbar {
             if let repo = appState.activeRepo {
                 RepoToolbar(repo: repo, pullModeRaw: $pullModeRaw)
+            } else if appState.showingRepositories {
+                RepositoriesToolbar()
             } else {
                 DashboardToolbar()
             }
@@ -318,6 +322,16 @@ struct EmptyStateView: View {
                 Button("Open Repository…") { appState.openRepoPanel() }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
+                // An empty wall with a full catalog is the common case once
+                // the user has scanned a folder: the repos exist, none of them
+                // is on the Dashboard yet, and a file picker is the long way
+                // round to a list the app already has.
+                if !appState.catalog.isEmpty {
+                    Button("Browse \(appState.catalog.count) Repositories") {
+                        appState.showRepositories()
+                    }
+                    .buttonStyle(.link)
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -403,10 +417,11 @@ struct RepoTabsBar: View {
 
     var body: some View {
         HStack(spacing: Self.spacing) {
+            RepositoriesTab()
             DashboardTab()
-            // Pinned: it sits outside the reorderable ForEach below, so it
+            // Pinned: they sit outside the reorderable ForEach below, so they
             // can't be dragged out of first place and the drag arithmetic
-            // (which indexes appState.openTabIDs) never has to know about it.
+            // (which indexes appState.openTabIDs) never has to know about them.
             ForEach(appState.openRepos) { repo in
                 RepoTab(
                     repo: repo,
@@ -537,6 +552,45 @@ private struct WindowFloor: NSViewRepresentable {
                 ),
                 display: true
             )
+        }
+    }
+}
+
+/// The catalog, first in the strip — the one tab that's about the repos that
+/// AREN'T open. Icon only, like the folder button GitKraken pins in the same
+/// spot: it's a fixed landmark rather than a destination you read, and every
+/// point it doesn't take is a repo name that stays legible in a full strip.
+struct RepositoriesTab: View {
+    @EnvironmentObject var appState: AppState
+    @Environment(\.uiZoom) private var zoom
+    @State private var hovering = false
+
+    private var isActive: Bool { appState.showingRepositories }
+
+    var body: some View {
+        Button {
+            appState.showRepositories()
+        } label: {
+            Image(systemName: "folder")
+                .zoomFont(12)
+                .foregroundStyle(isActive ? Color.accentColor : .secondary)
+                .frame(width: 30 * zoom, height: 28 * zoom)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(isActive
+                            ? Color.primary.opacity(0.08)
+                            : hovering ? Color.primary.opacity(0.04) : .clear)
+                        .animation(.easeOut(duration: 0.12), value: hovering)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.rowPressEffect)
+        // ⌘0 is the Dashboard; the catalog beside it takes the shifted one.
+        .keyboardShortcut("0", modifiers: [.command, .shift])
+        .help("Repositories — every repo on this Mac (⇧⌘0)")
+        .onHover {
+            hovering = $0
+            AppState.pointerOverTopControl = $0
         }
     }
 }

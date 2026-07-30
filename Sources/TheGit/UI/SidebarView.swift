@@ -423,17 +423,6 @@ struct SidebarView: View {
     // emitted as a plain sibling row (which is how these were written)
     // scrolls away like any other row.
 
-    /// The gap that separates one group from the next. It sits at the END of
-    /// a section's content rather than above the next header, because a
-    /// pinned header sticks as one block: 16pt of dead air riding along
-    /// above every label would make the sticky strip twice as tall as the
-    /// word on it. Stated net of the stack's own `rowGap` at both ends, so
-    /// the space on screen is unchanged.
-    private var groupGap: some View {
-        Color.clear
-            .frame(height: (SidebarMetrics.sectionGap - SidebarMetrics.rowGap) * zoom)
-    }
-
     @ViewBuilder
     private var localSection: some View {
         let branches = matchedLocal
@@ -449,7 +438,6 @@ struct SidebarView: View {
                         BranchNodeRow(node: node, repo: repo, forceExpanded: filtering)
                     }
                 }
-                groupGap
             } header: {
                 SectionHeader(
                     title: "Local",
@@ -479,7 +467,6 @@ struct SidebarView: View {
                         .onTapGesture { repo.promptAddRemote() }
                     }
                 }
-                groupGap
             } header: {
                 SectionHeader(
                     title: "Remote",
@@ -529,7 +516,6 @@ struct SidebarView: View {
                             PullRequestRow(pr: pr, forge: forge, repo: repo)
                         }
                     }
-                    groupGap
                 } header: {
                     SectionHeader(
                         title: forge.sectionTitle,
@@ -554,7 +540,6 @@ struct SidebarView: View {
             // requests in this sidebar.
             Section {
                 ForgeInstallHintRow(repo: repo, missing: missing)
-                groupGap
             } header: {
                 SectionHeader(
                     title: missing.sectionTitle,
@@ -594,7 +579,6 @@ struct SidebarView: View {
                             IssueRow(issue: issue, forge: forge, repo: repo)
                         }
                     }
-                    groupGap
                 } header: {
                     SectionHeader(
                         title: "Issues",
@@ -647,7 +631,6 @@ struct SidebarView: View {
                     }
                     .onTapGesture(count: 2) { appState.open(path: wt.path) }
                 }
-                groupGap
             } header: {
                 SectionHeader(title: "Worktrees", count: worktrees.count, collapsed: $worktreesCollapsed)
             }
@@ -689,7 +672,6 @@ struct SidebarView: View {
                         Button("Delete tag…", role: .destructive) { repo.tagToDelete = tag }
                     }
                 }
-                groupGap
             } header: {
                 SectionHeader(title: "Tags", count: tags.count, collapsed: $tagsCollapsed)
             }
@@ -736,7 +718,6 @@ struct SidebarView: View {
                         if !stash.baseHash.isEmpty { repo.locate(stash.baseHash) }
                     }
                 }
-                groupGap
             } header: {
                 SectionHeader(title: "Stashes", count: stashes.count, collapsed: $stashesCollapsed)
             }
@@ -781,7 +762,6 @@ struct SidebarView: View {
                             Button("Download LFS objects") { repo.pullLFSObjects() }
                         }
                     }
-                    groupGap
                 } header: {
                     SectionHeader(
                         title: "Git LFS",
@@ -805,7 +785,6 @@ struct SidebarView: View {
                 ForEach(submodulesCollapsed && !filtering ? [] : submodules) { sub in
                     SubmoduleRow(sub: sub, repo: repo)
                 }
-                groupGap
             } header: {
                 SectionHeader(
                     title: "Submodules",
@@ -1160,21 +1139,21 @@ enum SidebarMetrics {
     /// two right edges 4pt apart. The counts and chevrons still read as
     /// inset, because they're centred in the badge column above.
     static let trailing: CGFloat = 0
-    /// Above a section header: the gap that says "a new group starts here".
-    /// Drawn as a spacer at the END of the previous section (see `groupGap`),
-    /// because the header is pinned and anything above it inside the header
-    /// sticks to the ceiling with it. The stack's own `rowGap` is subtracted
-    /// at each end, so the space on screen is still 18.
-    static let sectionGap: CGFloat = 16
-    /// Inside a pinned header, above its label. Small on purpose: it is the
-    /// only air the header keeps when it is stuck to the top of the
-    /// scroller, and its job is to stop the 11pt title from sitting flush
-    /// against the edge — the gap BETWEEN groups is `sectionGap`'s work.
+    /// Inside a pinned header, above its label — and now the only air
+    /// between one group and the next.
+    ///
+    /// There used to be 16pt of spacer at the end of every section as well.
+    /// It read as a gap belonging to nothing: folded sections left it hanging
+    /// under a closed header, and an expanded one put a hole between its last
+    /// row and the next heading that no other list on this screen has. The
+    /// headers are opaque strips with their own weight and colour — they
+    /// separate the groups by being headers, which is what a pinned header is
+    /// for.
     static let headerLead: CGFloat = 2
-    /// Below a section header, before its own first row. Deliberately much
-    /// smaller than `sectionGap` — proximity is the only thing telling the
-    /// eye which rows the header owns, so the two values have to stay far
-    /// enough apart to be read as different. It used to be 0: the header
+    /// Below a section header, before its own first row. Bigger than the air
+    /// above the label, so proximity still says which rows the header owns —
+    /// with no spacer between groups any more, that asymmetry is the only
+    /// thing that does. It used to be 0: the header
     /// and the first row were both 22pt boxes sitting flush, and the only
     /// air under the label was whatever the hidden + button's 22pt hit
     /// target happened to leave, which is a byproduct rather than a choice.
