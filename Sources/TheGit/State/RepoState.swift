@@ -304,6 +304,23 @@ final class RepoState: ObservableObject, Identifiable {
     /// exclusive with `forge`; drives the sidebar's install hint.
     @Published var missingForgeCLI: Forge?
     @Published var pullRequests: [PullRequest] = []
+    /// Open issues on the forge — the sidebar's section and, counted, the
+    /// Dashboard card's badge. nil until a fetch succeeds: a repo with
+    /// issues disabled keeps erroring and therefore keeps showing nothing,
+    /// which is right — no feature, no section, no count. At most
+    /// `ForgeClient.issueCountLimit` of them.
+    @Published private(set) var issues: [Issue]?
+    /// The issue the viewer panel is open on, if any.
+    @Published var issueToView: Issue?
+    /// The open issue's timeline — comments and events interleaved: nil
+    /// while it's loading, [] when there's nothing under the body.
+    /// Failures land in `issueThreadError` instead — an empty thread and
+    /// an unreachable one must not read the same.
+    @Published private(set) var issueThread: [IssueTimelineItem]?
+    @Published private(set) var issueThreadError: String?
+    /// True when the fetch hit its page cap — the thread shown is the
+    /// head of a longer one, and the panel should say so.
+    @Published private(set) var issueThreadTruncated = false
     @Published var forgeError: ForgeFailure?
     /// Set once forge detection has concluded, however it concluded — a
     /// GitHub remote, a missing CLI, a host that is no forge at all. Avatars
@@ -361,6 +378,18 @@ final class RepoState: ObservableObject, Identifiable {
         var commits: [Commit] = []
 
         var isClean: Bool { changed == 0 && conflicted == 0 }
+
+        /// A month without a commit — the point where "quiet" starts to
+        /// read as "forgotten" and the card is worth a marker.
+        static let staleAfter: TimeInterval = 30 * 24 * 60 * 60
+
+        /// True when HEAD's newest commit is older than `staleAfter`.
+        /// A repo with no commits at all isn't stale: brand new is the
+        /// opposite of abandoned.
+        func isStale(now: Date = Date()) -> Bool {
+            guard let newest = commits.first?.date else { return false }
+            return now.timeIntervalSince(newest) > Self.staleAfter
+        }
     }
 
     @Published private(set) var card: Card?
@@ -420,6 +449,34 @@ final class RepoState: ObservableObject, Identifiable {
         )
     }
 
+    /// How many PRs/MRs the card may claim: nil until a real answer has
+    /// come back — 0 must mean "none open", never "haven't looked yet" or
+    /// "the last look failed".
+    var knownOpenPRCount: Int? {
+        guard forge != nil, prsLoadedAt != nil, forgeError == nil else { return nil }
+        return pullRequests.count
+    }
+
+    /// The issue badge's number, on the same contract.
+    var openIssueCount: Int? { issues?.count }
+
+    /// The card's PR count, from the same list the sidebar shows. Called by
+    /// the Dashboard after the cards land, one repo at a time — it's the
+    /// only network on that screen, so it goes last and is cached harder
+    /// than a tab visit (`prsFreshFor` vs the sidebar's 60s): a wall of N
+    /// repos is N CLI calls against a rate-limited API.
+    ///
+    /// `force` is the Dashboard's own Refresh, same contract as `loadCard`.
+    func loadCardPullRequests(force: Bool = false) async {
+        await detectForge()
+        guard forge != nil else { return }
+        if !force, let at = prsLoadedAt,
+           Date().timeIntervalSince(at) < Self.prsFreshFor { return }
+        await loadPullRequests()
+    }
+
+    private static let prsFreshFor: TimeInterval = 300
+
     /// A year of this repo's commits per day, for the Dashboard's summed
     /// heatmap. Not the snapshot's histogram: that one covers half a year
     /// (see `ActivityDay.windowWeeks`), and summing a year of one repo with
@@ -456,6 +513,7 @@ final class RepoState: ObservableObject, Identifiable {
     deinit {
         autoFetchTask?.cancel()
         pendingRefresh?.cancel()
+        commentsTask?.cancel()
     }
 
     /// Watch the repo (working tree + .git) and refresh quietly, debounced.
@@ -1458,9 +1516,17 @@ final class RepoState: ObservableObject, Identifiable {
     /// installed. Nothing here is shown or logged when it comes back nil.
     private func detectForge() async {
         guard !forgeDetected, forge == nil else { return }
-        guard !snapshot.remoteNames.isEmpty else { return } // no remote yet — try again later
+        // The snapshot knows the remotes of a repo whose tab has been
+        // opened; the Dashboard asks about repos that never have, so fall
+        // back to git's own answer — one subprocess, the same price as the
+        // card that's asking.
+        var remotes = snapshot.remoteNames
+        if remotes.isEmpty { remotes = (try? await git.remotes()) ?? [] }
+        guard !remotes.isEmpty else { return } // no remote yet — try again later
         forgeDetected = true
-        let url = try? await git.remoteURL(snapshot.defaultRemote)
+        // `Snapshot.defaultRemote`'s rule, over whichever list answered.
+        let defaultRemote = remotes.contains("origin") ? "origin" : remotes[0]
+        let url = try? await git.remoteURL(defaultRemote)
         if let url { forgeHost = ForgeParsers.host(of: url) }
         switch url.flatMap({ ForgeClient.detect(remoteURL: $0) }) {
         case .ready(let found):
@@ -1516,7 +1582,55 @@ final class RepoState: ObservableObject, Identifiable {
             pullRequests = []
             forgeError = forgeFailure(error)
         }
+        // The issue list rides along on the PR list's schedule and cache.
+        // Its own `try?`, not the `do` above: a repo with issues disabled
+        // must not read as "can't reach the forge" when the PRs loaded fine.
+        issues = try? await forgeClient.issues(forge)
         prsLoadedAt = Date()
+    }
+
+    /// Open the in-app viewer on an issue and start fetching its thread.
+    /// The list already brought the body along, so the panel has content
+    /// on its first frame and only the comments arrive later.
+    func viewIssue(_ issue: Issue) {
+        // The centre pane has one overlay slot: an issue replaces
+        // whatever diff or file history was showing, exactly as opening
+        // a diff replaces the issue (see selectFile & co.). Stacked, the
+        // lower one is not "still open" — it is unreachable.
+        closeDiff()
+        closeFileHistory()
+        issueToView = issue
+        issueThread = nil
+        issueThreadError = nil
+        issueThreadTruncated = false
+        commentsTask?.cancel()
+        guard let forge else { return }
+        commentsTask = Task {
+            do {
+                let thread = try await forgeClient.issueThread(issue, forge: forge)
+                // The user may have moved to another issue while this one's
+                // thread was in flight; its timeline is not that issue's.
+                guard !Task.isCancelled, issueToView?.number == issue.number else { return }
+                issueThread = thread.items
+                issueThreadTruncated = thread.truncated
+            } catch {
+                guard !Task.isCancelled, issueToView?.number == issue.number else { return }
+                issueThreadError = forgeFailure(error).summary
+            }
+        }
+    }
+
+    private var commentsTask: Task<Void, Never>?
+
+    func openIssueInBrowser(_ issue: Issue) {
+        guard let forge else { return }
+        Task {
+            do {
+                try await forgeClient.openIssueInBrowser(issue, forge: forge)
+            } catch {
+                errorMessage = forgeFailure(error).alertText
+            }
+        }
     }
 
     func refreshPullRequests() {
@@ -2118,6 +2232,7 @@ final class RepoState: ObservableObject, Identifiable {
 
     func selectCommitFile(_ file: FileChange) {
         guard let hash = selectedCommit else { return }
+        issueToView = nil
         selectedFile = file
         diffCommit = hash
         diffLines = []
@@ -2215,6 +2330,9 @@ final class RepoState: ObservableObject, Identifiable {
     // MARK: - File history
 
     func showFileHistory(_ path: String) {
+        // Clear the slot now, not when the history arrives — the click
+        // should visibly take over the pane even while git runs.
+        issueToView = nil
         Task {
             do {
                 fileHistory = (path, try await git.fileHistory(path))
@@ -2231,6 +2349,7 @@ final class RepoState: ObservableObject, Identifiable {
     /// From the history list: show this file's diff within that commit.
     func selectHistoryEntry(_ commit: Commit, path filePath: String) {
         selectedCommit = commit.hash
+        issueToView = nil
         selectedFile = FileChange(path: filePath, status: "M", area: .unstaged)
         diffCommit = commit.hash
         diffLines = []
@@ -2251,6 +2370,7 @@ final class RepoState: ObservableObject, Identifiable {
     // MARK: - Diff view
 
     func selectFile(_ file: FileChange) {
+        issueToView = nil
         selectedFile = file
         diffCommit = nil
         diffLines = []

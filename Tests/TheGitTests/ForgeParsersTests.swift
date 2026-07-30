@@ -163,6 +163,152 @@ final class ForgeParsersTests: XCTestCase {
         XCTAssertLessThanOrEqual(summary(String(repeating: "x", count: 400)).count, 140)
     }
 
+    // MARK: - Issues
+
+    /// Verbatim shape of `gh issue list --json number,title,author,url,body,createdAt`.
+    func testParseGitHubIssueList() throws {
+        let json = """
+        [{"author":{"id":"MDQ6","is_bot":false,"login":"zjywill","name":"Junyi"},\
+        "body":"## 现状\\n只有内置的 FileDiffView","createdAt":"2026-07-27T06:11:28Z",\
+        "labels":[{"id":"LA_kwDO","name":"enhancement","description":"","color":"a2eeef"}],\
+        "number":16,"title":"外部 diff / merge tool 集成",\
+        "url":"https://github.com/zjywill/TheGit/issues/16"}]
+        """
+        let issues = try ForgeParsers.issues(json, forge: .github)
+        XCTAssertEqual(issues.count, 1)
+        XCTAssertEqual(issues[0].number, 16)
+        XCTAssertEqual(issues[0].author, "zjywill")
+        XCTAssertTrue(issues[0].body.hasPrefix("## 现状"))
+        XCTAssertNotNil(issues[0].createdAt)
+        XCTAssertEqual(issues[0].labels, [IssueLabel(name: "enhancement", colorHex: "a2eeef")])
+        // No JSON at all — a CLI that printed only chatter — is an empty
+        // list, not a crash: the section just shows nothing.
+        XCTAssertEqual(try ForgeParsers.issues("no issues match", forge: .github), [])
+    }
+
+    /// GitLab's REST shape through `glab issue list --output json` —
+    /// fractional-second timestamps included, which its API writes and
+    /// plain ISO 8601 parsing rejects.
+    func testParseGitLabIssueList() throws {
+        let json = """
+        [{"iid":7,"id":991,"title":"Crash on open","description":"steps to reproduce",\
+        "author":{"username":"tao"},"web_url":"https://gitlab.com/g/a/-/issues/7",\
+        "created_at":"2026-07-01T10:30:00.123Z"}]
+        """
+        let issues = try ForgeParsers.issues(json, forge: .gitlab)
+        XCTAssertEqual(issues.count, 1)
+        XCTAssertEqual(issues[0].number, 7)
+        XCTAssertEqual(issues[0].body, "steps to reproduce")
+        XCTAssertEqual(issues[0].url, "https://gitlab.com/g/a/-/issues/7")
+        XCTAssertNotNil(issues[0].createdAt)
+    }
+
+    /// `gh api repos/{owner}/{repo}/issues/N/timeline` — REST casing, one
+    /// object per entry, comments as `commented` events among the rest.
+    /// Types we don't render (subscribed, mentioned) are skipped, never
+    /// errors.
+    func testParseGitHubTimeline() throws {
+        let json = """
+        [{"event":"labeled","id":101,"actor":{"login":"zjywill"},\
+        "label":{"name":"enhancement","color":"a2eeef"},"created_at":"2026-07-27T06:12:00Z"},\
+        {"event":"subscribed","id":102,"actor":{"login":"zjywill"},"created_at":"2026-07-27T06:12:01Z"},\
+        {"event":"cross-referenced","actor":{"login":"zjywill"},\
+        "source":{"type":"issue","issue":{"number":10,"title":"右键菜单剩余缺口清单"}},\
+        "created_at":"2026-07-27T06:13:00Z"},\
+        {"event":"renamed","id":103,"actor":{"login":"zjywill"},\
+        "rename":{"from":"旧标题","to":"外部 diff / merge tool 集成"},"created_at":"2026-07-27T06:14:00Z"},\
+        {"event":"commented","id":104,"user":{"login":"Taozizz"},\
+        "body":"test","created_at":"2026-07-29T08:00:00Z"},\
+        {"event":"closed","id":105,"actor":{"login":"zjywill"},"created_at":"2026-07-29T09:00:00Z"}]
+        """
+        let items = try ForgeParsers.githubTimeline(json)
+        XCTAssertEqual(items.count, 5)
+
+        guard case .event(let labeled) = items[0],
+              case .event(let referenced) = items[1],
+              case .event(let renamed) = items[2],
+              case .comment(let comment) = items[3],
+              case .event(let closed) = items[4]
+        else { return XCTFail("unexpected item shapes: \(items)") }
+
+        XCTAssertEqual(labeled.kind, .labeled)
+        XCTAssertEqual(labeled.label, IssueLabel(name: "enhancement", colorHex: "a2eeef"))
+        XCTAssertEqual(referenced.kind, .referenced)
+        XCTAssertEqual(referenced.detail, "#10 右键菜单剩余缺口清单")
+        XCTAssertEqual(renamed.kind, .renamed)
+        XCTAssertEqual(renamed.detail, "外部 diff / merge tool 集成")
+        XCTAssertEqual(comment.author, "Taozizz")
+        XCTAssertEqual(comment.body, "test")
+        XCTAssertEqual(closed.kind, .closed)
+    }
+
+    /// GitLab's thread is assembled from two resources: notes (comments
+    /// plus system events, verbatim) and label events. They interleave by
+    /// timestamp; a system note renders as an event, not a comment card.
+    func testGitLabThreadMergesNotesAndLabelEvents() throws {
+        let notes = """
+        [{"id":1,"body":"assigned to @tao","system":true,\
+        "author":{"username":"zjywill"},"created_at":"2026-07-01T10:30:00.000Z"},\
+        {"id":2,"body":"I can reproduce this","system":false,\
+        "author":{"username":"alice"},"created_at":"2026-07-03T11:00:00.000Z"}]
+        """
+        let labelEvents = """
+        [{"id":9,"user":{"username":"zjywill"},"created_at":"2026-07-02T09:00:00.000Z",\
+        "resource_type":"Issue","label":{"id":3,"name":"bug","color":"#D9534F"},"action":"add"}]
+        """
+        let items = try ForgeParsers.gitlabThread(
+            notesPages: [notes], labelEventPages: [labelEvents]
+        )
+        XCTAssertEqual(items.count, 3)
+
+        guard case .event(let system) = items[0],
+              case .event(let labeled) = items[1],
+              case .comment(let comment) = items[2]
+        else { return XCTFail("unexpected item shapes: \(items)") }
+
+        XCTAssertEqual(system.kind, .system)
+        XCTAssertEqual(system.detail, "assigned to @tao")
+        XCTAssertEqual(labeled.kind, .labeled)
+        XCTAssertEqual(labeled.label, IssueLabel(name: "bug", colorHex: "#D9534F"))
+        XCTAssertEqual(comment.author, "alice")
+        // Broken label events degrade to a comments-only thread, silently.
+        let sansLabels = try ForgeParsers.gitlabThread(
+            notesPages: [notes], labelEventPages: ["oops"]
+        )
+        XCTAssertEqual(sansLabels.count, 2)
+        // A second page of notes lands in the same merged, ordered thread.
+        let page2 = """
+        [{"id":3,"body":"fixed by !12","system":false,\
+        "author":{"username":"tao"},"created_at":"2026-07-04T08:00:00.000Z"}]
+        """
+        let paged = try ForgeParsers.gitlabThread(
+            notesPages: [notes, page2], labelEventPages: [labelEvents]
+        )
+        XCTAssertEqual(paged.count, 4)
+        guard case .comment(let last) = paged[3] else {
+            return XCTFail("expected the page-2 comment last: \(paged)")
+        }
+        XCTAssertEqual(last.body, "fixed by !12")
+    }
+
+    /// The pagination loop's "was this page full" check counts raw JSON
+    /// elements, not parsed items — skipped event types must not end the
+    /// paging early.
+    func testJSONArrayCount() {
+        XCTAssertEqual(ForgeParsers.jsonArrayCount("[]"), 0)
+        XCTAssertEqual(ForgeParsers.jsonArrayCount(#"[{"a":1},{"b":2}]"#), 2)
+        XCTAssertEqual(ForgeParsers.jsonArrayCount("banner line\n[1,2,3]"), 3)
+        XCTAssertEqual(ForgeParsers.jsonArrayCount("no json at all"), 0)
+    }
+
+    /// Both timestamp spellings parse; garbage is nil, not a thrown list.
+    func testForgeDateSpellings() {
+        XCTAssertNotNil(ForgeParsers.date("2026-07-27T06:11:28Z"))
+        XCTAssertNotNil(ForgeParsers.date("2026-07-27T06:11:28.123Z"))
+        XCTAssertNil(ForgeParsers.date("yesterday"))
+        XCTAssertNil(ForgeParsers.date(nil))
+    }
+
     /// The tooltip keeps the command that failed; the summary never does.
     func testDetailKeepsTheCommandContext() {
         let failure = ForgeFailure.describe(

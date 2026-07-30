@@ -93,6 +93,10 @@ struct DashboardView: View {
             .task {
                 for repo in appState.repos { await repo.loadCard() }
                 await appState.loadActivity()
+                // Last, because it's the only network on this screen: a
+                // slow forge must never hold up cards or the grid, and by
+                // now the wall is settled — the badges just fill in.
+                for repo in appState.repos { await repo.loadCardPullRequests() }
             }
         }
     }
@@ -635,7 +639,62 @@ struct RepoCardView: View {
                 .lineLimit(1)
             branchPill
             Spacer(minLength: 0)
+            idleBadge
+            issueBadge
+            pullRequestBadge
             tracking
+        }
+    }
+
+    /// Open issues, in the closest thing SF Symbols has to GitHub's issue
+    /// octicon — a dot in a circle. Same contract as the PR badge: shown
+    /// only when known and non-zero, "100+" past the count query's cap.
+    @ViewBuilder
+    private var issueBadge: some View {
+        if let count = repo.openIssueCount, count > 0 {
+            let display = count >= ForgeClient.issueCountLimit
+                ? "\(ForgeClient.issueCountLimit)+" : String(count)
+            HStack(spacing: 3 * zoom) {
+                Image(systemName: "smallcircle.filled.circle").zoomFont(9)
+                Text(display)
+            }
+            .zoomFont(10, weight: .medium)
+            .foregroundStyle(.green)
+            .help("\(display) open issue\(count == 1 ? "" : "s")")
+        }
+    }
+
+    /// A month or more of silence, said quietly: "zzz" and how long. The
+    /// rail's own ages say this too, but only to someone already reading
+    /// that card — this is for scanning the wall.
+    @ViewBuilder
+    private var idleBadge: some View {
+        if let card = repo.card, card.isStale(), let last = card.commits.first?.date {
+            HStack(spacing: 3 * zoom) {
+                Image(systemName: "zzz").zoomFont(9)
+                Text(AgeBreaks.compact(date: last))
+            }
+            .zoomFont(10, weight: .medium)
+            .foregroundStyle(.tertiary)
+            .help("No commits in over a month")
+        }
+    }
+
+    /// Open PRs/MRs, in GitHub's own glyph and green. Only when the count
+    /// is known and non-zero: a 0 would claim we checked the forge on a
+    /// card that may never have reached it, and space here is scarce.
+    @ViewBuilder
+    private var pullRequestBadge: some View {
+        if let forge = repo.forge, let count = repo.knownOpenPRCount, count > 0 {
+            HStack(spacing: 3 * zoom) {
+                PullRequestGlyph()
+                    .frame(width: 10 * zoom, height: 10 * zoom)
+                // String(), not interpolation into Text — see Forge.label.
+                Text(String(count))
+            }
+            .zoomFont(10, weight: .medium)
+            .foregroundStyle(.green)
+            .help("\(count) open \(forge.itemNoun.lowercased())\(count == 1 ? "" : "s")")
         }
     }
 
