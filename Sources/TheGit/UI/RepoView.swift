@@ -52,6 +52,12 @@ struct RepoView: View {
             }
             .frame(minWidth: 260, idealWidth: 300, maxWidth: 420)
         }
+        // Bottom centre of the panes, which lands over the oldest loaded
+        // commits — the one part of this window nobody is reading when a
+        // command fails. The other two candidates are both worse: the
+        // bottom right is the Commit button, and the top is the row that
+        // just changed, or failed to.
+        .overlay(alignment: .bottom) { ErrorToastLayer(repo: repo) }
         // On its own layer, not in the chain below: a .sheet stacked with
         // the alerts and confirmationDialog on this same view never
         // presents — they compete for one presentation slot, and the
@@ -79,17 +85,6 @@ struct RepoView: View {
         .onReceive(NotificationCenter.default.publisher(
             for: NSMenu.didEndTrackingNotification)) { _ in
             repo.contextTarget = nil
-        }
-        .alert(
-            "Git Error",
-            isPresented: Binding(
-                get: { repo.errorMessage != nil },
-                set: { if !$0 { repo.errorMessage = nil } }
-            )
-        ) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(repo.errorMessage ?? "")
         }
         // A drop is never the decision — this menu is. Dragging stays free
         // of consequences right up until a button here is clicked.

@@ -141,7 +141,27 @@ final class RepoState: ObservableObject, Identifiable {
         discardGeneration = true
         generateTask?.cancel()
     }
-    @Published var errorMessage: String?
+    /// The last failure, shown as a toast over the graph rather than in an
+    /// alert in front of it. A dialog for a failed command stops the hands of
+    /// someone who has already read it, over news they can only say OK to —
+    /// and the refresh loop and the file watcher can raise the same failure
+    /// again a second later, which stacks dialogs on top of each other.
+    @Published var errorNotice: ErrorNotice?
+
+    /// The string way in, for the failures we word ourselves. Reads back the
+    /// verbatim text, so `errorMessage == nil` still means "nothing failed".
+    var errorMessage: String? {
+        get { errorNotice?.detail }
+        set { errorNotice = newValue.map(ErrorNotice.init(text:)) }
+    }
+
+    /// The way in for a thrown failure: `GitError` knows which command it
+    /// was, and the toast can only use that if it isn't already glued to the
+    /// front of the message.
+    func report(_ error: Error) {
+        errorNotice = ErrorNotice(error)
+    }
+
     /// Loading the commit's file list hangs off the property itself rather
     /// than off an .onChange in the view: the commit pane is shared between
     /// tabs now, so a view-level observer also fires when the *repo* under
@@ -469,7 +489,7 @@ final class RepoState: ObservableObject, Identifiable {
                 if !all.contains(where: { $0.id == file.id }) { closeDiff() }
             }
         } catch {
-            errorMessage = error.localizedDescription
+            report(error)
         }
     }
 
@@ -540,7 +560,7 @@ final class RepoState: ObservableObject, Identifiable {
                 if !all.contains(where: { $0.id == file.id }) { closeDiff() }
             }
         } catch {
-            errorMessage = error.localizedDescription
+            report(error)
         }
     }
 
@@ -643,7 +663,7 @@ final class RepoState: ObservableObject, Identifiable {
                     try? await git.updateSubmodules()
                 }
             } catch {
-                errorMessage = error.localizedDescription
+                report(error)
             }
             await refresh()
         }
@@ -663,7 +683,7 @@ final class RepoState: ObservableObject, Identifiable {
             do {
                 try await action(git)
             } catch {
-                errorMessage = error.localizedDescription
+                report(error)
             }
             await refreshStatus()
         }
@@ -692,7 +712,7 @@ final class RepoState: ObservableObject, Identifiable {
                 abandonMessageGeneration()
                 commitMessage = "" // only clear once the commit actually succeeded
             } catch {
-                errorMessage = error.localizedDescription
+                report(error)
             }
             await refresh()
         }
@@ -764,7 +784,7 @@ final class RepoState: ObservableObject, Identifiable {
             } catch {
                 guard !discardGeneration else { return }
                 commitMessage = draft
-                errorMessage = error.localizedDescription
+                report(error)
             }
         }
     }
@@ -793,7 +813,7 @@ final class RepoState: ObservableObject, Identifiable {
                 commitMessage = ""
                 panelMode = .commit
             } catch {
-                errorMessage = error.localizedDescription
+                report(error)
             }
             await refresh()
         }
@@ -1132,7 +1152,7 @@ final class RepoState: ObservableObject, Identifiable {
             do {
                 Self.copyToPasteboard(try await git.remoteURL(name))
             } catch {
-                errorMessage = error.localizedDescription
+                report(error)
             }
         }
     }
@@ -1142,7 +1162,7 @@ final class RepoState: ObservableObject, Identifiable {
             do {
                 Self.copyToPasteboard(try await git.commitMessage(commit.hash))
             } catch {
-                errorMessage = error.localizedDescription
+                report(error)
             }
         }
     }
@@ -1860,7 +1880,7 @@ final class RepoState: ObservableObject, Identifiable {
                     try updated.write(to: url, atomically: true, encoding: .utf8)
                 }
             } catch {
-                errorMessage = error.localizedDescription
+                report(error)
             }
             await refresh(quiet: true)
         }
@@ -1892,7 +1912,7 @@ final class RepoState: ObservableObject, Identifiable {
                 guard panel.runModal() == .OK, let url = panel.url else { return }
                 try patch.write(to: url, atomically: true, encoding: .utf8)
             } catch {
-                errorMessage = error.localizedDescription
+                report(error)
             }
         }
     }
@@ -1935,7 +1955,7 @@ final class RepoState: ObservableObject, Identifiable {
                 // Selection may have moved on while we loaded.
                 if selectedCommit == hash { commitFiles = files }
             } catch {
-                errorMessage = error.localizedDescription
+                report(error)
             }
         }
     }
@@ -1954,7 +1974,7 @@ final class RepoState: ObservableObject, Identifiable {
                 parsedDiff = parsed
                 diffLines = parsed.lines
             } catch {
-                errorMessage = error.localizedDescription
+                report(error)
             }
         }
     }
@@ -2043,7 +2063,7 @@ final class RepoState: ObservableObject, Identifiable {
             do {
                 fileHistory = (path, try await git.fileHistory(path))
             } catch {
-                errorMessage = error.localizedDescription
+                report(error)
             }
         }
     }
@@ -2067,7 +2087,7 @@ final class RepoState: ObservableObject, Identifiable {
                 parsedDiff = parsed
                 diffLines = parsed.lines
             } catch {
-                errorMessage = error.localizedDescription
+                report(error)
             }
         }
     }
@@ -2093,7 +2113,7 @@ final class RepoState: ObservableObject, Identifiable {
                 parsedDiff = parsed
                 diffLines = parsed.lines
             } catch {
-                errorMessage = error.localizedDescription
+                report(error)
             }
         }
     }
@@ -2108,7 +2128,7 @@ final class RepoState: ObservableObject, Identifiable {
             do {
                 try await git.applyPatch(patch, reverse: reverse)
             } catch {
-                errorMessage = error.localizedDescription
+                report(error)
             }
             await refreshStatus()
             // Reload what's left of this file's diff; close when nothing remains.
@@ -2213,7 +2233,7 @@ final class RepoState: ObservableObject, Identifiable {
                 guard panel.runModal() == .OK, let url = panel.url else { return }
                 try patch.write(to: url, atomically: true, encoding: .utf8)
             } catch {
-                errorMessage = error.localizedDescription
+                report(error)
             }
         }
     }
@@ -2232,7 +2252,7 @@ final class RepoState: ObservableObject, Identifiable {
                 if url.hasSuffix(".git") { url = String(url.dropLast(4)) }
                 Self.copyToPasteboard("\(url)/commit/\(commit.hash)")
             } catch {
-                errorMessage = error.localizedDescription
+                report(error)
             }
         }
     }

@@ -76,7 +76,7 @@ struct ForgeFailure: Equatable {
                 detail: detail
             )
         }
-        return ForgeFailure(summary: firstLine(raw), detail: detail)
+        return ForgeFailure(summary: ErrorNotice.firstLine(raw), detail: detail)
     }
 
     /// What an alert shows: the plain line, then the CLI's own text under it.
@@ -95,19 +95,6 @@ struct ForgeFailure: Equatable {
         "log in", "token", "credential",
     ]
 
-    /// First line with anything in it, minus the CLI's own "ERROR:" shout,
-    /// clipped to something a sidebar row can hold.
-    private static func firstLine(_ text: String) -> String {
-        var line = text
-            .split(whereSeparator: \.isNewline)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .first { !$0.isEmpty } ?? text
-        for shout in ["ERROR: ", "error: ", "ERROR ", "FATAL: "] where line.hasPrefix(shout) {
-            line = String(line.dropFirst(shout.count))
-            break
-        }
-        return line.count > 140 ? String(line.prefix(139)) + "…" : line
-    }
 }
 
 // MARK: - CLI JSON shapes

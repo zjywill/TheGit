@@ -1,0 +1,76 @@
+import XCTest
+@testable import TheGit
+
+/// What a toast may show and what it must keep. The strip has one line, so
+/// everything these tests are about is which line that is.
+final class ErrorNoticeTests: XCTestCase {
+    /// The command is context, not the message — it goes in its own field, so
+    /// the sentence gets the width.
+    func testGitFailureSplitsTheCommandOffTheSentence() {
+        let notice = ErrorNotice(GitError(
+            command: "log --date-order --branches --remotes --tags HEAD -n 500",
+            message: "fatal: cannot change to '/Users/x/gone': No such file or directory\n"
+        ))
+        XCTAssertEqual(
+            notice.summary,
+            "cannot change to '/Users/x/gone': No such file or directory"
+        )
+        XCTAssertEqual(notice.command, "git log --date-order --branches --remotes --tags HEAD -n 500")
+        // Copy hands over the whole thing, command included: that is what
+        // gets pasted into an issue.
+        XCTAssertEqual(
+            notice.detail,
+            "git log --date-order --branches --remotes --tags HEAD -n 500: "
+                + "fatal: cannot change to '/Users/x/gone': No such file or directory\n"
+        )
+    }
+
+    /// Only the first line survives on screen — git's hints ("use --force")
+    /// are several lines long and the strip is not where they get read.
+    func testOnlyTheFirstMeaningfulLineReachesTheSummary() {
+        let notice = ErrorNotice(GitError(
+            command: "push origin main",
+            message: "\nerror: failed to push some refs\nhint: Updates were rejected\n"
+        ))
+        XCTAssertEqual(notice.summary, "failed to push some refs")
+        XCTAssertTrue(notice.detail.contains("hint: Updates were rejected"))
+    }
+
+    /// Our own sentences arrive whole and stay whole.
+    func testPlainTextNoticeHasNoCommand() {
+        let notice = ErrorNotice(text: "Nothing is staged to describe.")
+        XCTAssertEqual(notice.summary, "Nothing is staged to describe.")
+        XCTAssertNil(notice.command)
+        XCTAssertEqual(notice.detail, "Nothing is staged to describe.")
+    }
+
+    /// Two reports of the same failure are two pieces of news: the toast has
+    /// to re-enter and its timer has to restart, and both are keyed on this.
+    func testEachReportIsItsOwnNotice() {
+        let first = ErrorNotice(text: "same words")
+        let second = ErrorNotice(text: "same words")
+        XCTAssertNotEqual(first, second)
+        XCTAssertNotEqual(first.id, second.id)
+    }
+
+    /// A wall of text can't widen the strip.
+    func testSummaryIsClipped() {
+        let notice = ErrorNotice(text: String(repeating: "x", count: 400))
+        XCTAssertLessThanOrEqual(notice.summary.count, 140)
+        XCTAssertTrue(notice.summary.hasSuffix("…"))
+        XCTAssertEqual(notice.detail.count, 400)
+    }
+
+    /// The string way in stays a drop-in for the old `errorMessage`: assigning
+    /// raises a notice, and reading back still answers "did anything fail".
+    @MainActor
+    func testErrorMessageShimRoundTrips() {
+        let repo = RepoState(path: "/tmp/does-not-matter")
+        XCTAssertNil(repo.errorMessage)
+        repo.errorMessage = "fatal: bad revision"
+        XCTAssertEqual(repo.errorMessage, "fatal: bad revision")
+        XCTAssertEqual(repo.errorNotice?.summary, "bad revision")
+        repo.errorMessage = nil
+        XCTAssertNil(repo.errorNotice)
+    }
+}
