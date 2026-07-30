@@ -185,3 +185,63 @@ struct PullRequestGlyph: View {
         }
     }
 }
+
+extension Color {
+    /// A forge label colour: GitHub sends "a2eeef", GitLab "#428BCA".
+    /// Anything that isn't six hex digits is nil — a grey chip, never a
+    /// wrong colour.
+    init?(forgeHex: String?) {
+        guard let raw = forgeHex?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        else { return nil }
+        let hex = raw.hasPrefix("#") ? String(raw.dropFirst()) : raw
+        guard hex.count == 6, let value = UInt32(hex, radix: 16) else { return nil }
+        self.init(
+            red: Double((value >> 16) & 0xff) / 255,
+            green: Double((value >> 8) & 0xff) / 255,
+            blue: Double(value & 0xff) / 255
+        )
+    }
+
+    /// Perceived brightness of a forge label colour, 0–1 — decides whether
+    /// the chip's text is black or white, same as GitHub does.
+    static func forgeHexLuminance(_ hex: String?) -> Double {
+        guard let raw = hex?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        else { return 1 }
+        let stripped = raw.hasPrefix("#") ? String(raw.dropFirst()) : raw
+        guard stripped.count == 6, let value = UInt32(stripped, radix: 16) else { return 1 }
+        let red = Double((value >> 16) & 0xff) / 255
+        let green = Double((value >> 8) & 0xff) / 255
+        let blue = Double(value & 0xff) / 255
+        return 0.299 * red + 0.587 * green + 0.114 * blue
+    }
+}
+
+/// A forge label as GitHub draws it: the label's own colour as the pill,
+/// text flipped black or white by its brightness. A label whose colour we
+/// don't know (GitLab listings) is a quiet grey outline instead.
+struct LabelChip: View {
+    let label: IssueLabel
+    @Environment(\.uiZoom) private var zoom
+
+    var body: some View {
+        if let color = Color(forgeHex: label.colorHex) {
+            Text(label.name)
+                .zoomFont(10, weight: .medium)
+                .foregroundStyle(
+                    Color.forgeHexLuminance(label.colorHex) > 0.6 ? .black : .white
+                )
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(color))
+        } else {
+            Text(label.name)
+                .zoomFont(10, weight: .medium)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2)
+                .background(Capsule().strokeBorder(Color.primary.opacity(0.25)))
+        }
+    }
+}

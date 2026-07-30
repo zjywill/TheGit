@@ -310,13 +310,17 @@ final class RepoState: ObservableObject, Identifiable {
     /// which is right — no feature, no section, no count. At most
     /// `ForgeClient.issueCountLimit` of them.
     @Published private(set) var issues: [Issue]?
-    /// The issue the viewer sheet is open on, if any.
+    /// The issue the viewer panel is open on, if any.
     @Published var issueToView: Issue?
-    /// The open issue's thread: nil while it's loading, [] when there are
-    /// no comments. Failures land in `issueCommentsError` instead — an
-    /// empty thread and an unreachable one must not read the same.
-    @Published private(set) var issueComments: [IssueComment]?
-    @Published private(set) var issueCommentsError: String?
+    /// The open issue's timeline — comments and events interleaved: nil
+    /// while it's loading, [] when there's nothing under the body.
+    /// Failures land in `issueThreadError` instead — an empty thread and
+    /// an unreachable one must not read the same.
+    @Published private(set) var issueThread: [IssueTimelineItem]?
+    @Published private(set) var issueThreadError: String?
+    /// True when the fetch hit its page cap — the thread shown is the
+    /// head of a longer one, and the panel should say so.
+    @Published private(set) var issueThreadTruncated = false
     @Published var forgeError: ForgeFailure?
     /// Set once forge detection has concluded, however it concluded — a
     /// GitHub remote, a missing CLI, a host that is no forge at all. Avatars
@@ -1586,24 +1590,32 @@ final class RepoState: ObservableObject, Identifiable {
     }
 
     /// Open the in-app viewer on an issue and start fetching its thread.
-    /// The list already brought the body along, so the sheet has content
+    /// The list already brought the body along, so the panel has content
     /// on its first frame and only the comments arrive later.
     func viewIssue(_ issue: Issue) {
+        // The centre pane has one overlay slot: an issue replaces
+        // whatever diff or file history was showing, exactly as opening
+        // a diff replaces the issue (see selectFile & co.). Stacked, the
+        // lower one is not "still open" — it is unreachable.
+        closeDiff()
+        closeFileHistory()
         issueToView = issue
-        issueComments = nil
-        issueCommentsError = nil
+        issueThread = nil
+        issueThreadError = nil
+        issueThreadTruncated = false
         commentsTask?.cancel()
         guard let forge else { return }
         commentsTask = Task {
             do {
-                let comments = try await forgeClient.issueComments(issue, forge: forge)
+                let thread = try await forgeClient.issueThread(issue, forge: forge)
                 // The user may have moved to another issue while this one's
-                // thread was in flight; its comments are not that issue's.
+                // thread was in flight; its timeline is not that issue's.
                 guard !Task.isCancelled, issueToView?.number == issue.number else { return }
-                issueComments = comments
+                issueThread = thread.items
+                issueThreadTruncated = thread.truncated
             } catch {
                 guard !Task.isCancelled, issueToView?.number == issue.number else { return }
-                issueCommentsError = forgeFailure(error).summary
+                issueThreadError = forgeFailure(error).summary
             }
         }
     }
@@ -2220,6 +2232,7 @@ final class RepoState: ObservableObject, Identifiable {
 
     func selectCommitFile(_ file: FileChange) {
         guard let hash = selectedCommit else { return }
+        issueToView = nil
         selectedFile = file
         diffCommit = hash
         diffLines = []
@@ -2317,6 +2330,9 @@ final class RepoState: ObservableObject, Identifiable {
     // MARK: - File history
 
     func showFileHistory(_ path: String) {
+        // Clear the slot now, not when the history arrives — the click
+        // should visibly take over the pane even while git runs.
+        issueToView = nil
         Task {
             do {
                 fileHistory = (path, try await git.fileHistory(path))
@@ -2333,6 +2349,7 @@ final class RepoState: ObservableObject, Identifiable {
     /// From the history list: show this file's diff within that commit.
     func selectHistoryEntry(_ commit: Commit, path filePath: String) {
         selectedCommit = commit.hash
+        issueToView = nil
         selectedFile = FileChange(path: filePath, status: "M", area: .unstaged)
         diffCommit = commit.hash
         diffLines = []
@@ -2353,6 +2370,7 @@ final class RepoState: ObservableObject, Identifiable {
     // MARK: - Diff view
 
     func selectFile(_ file: FileChange) {
+        issueToView = nil
         selectedFile = file
         diffCommit = nil
         diffLines = []

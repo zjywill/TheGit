@@ -73,6 +73,25 @@ struct RepoView: View {
                             removal: .identity
                         ))
                 }
+                if let issue = repo.issueToView {
+                    // The transition lives on a wrapper and the per-issue
+                    // .id on the view inside it: the id change (switching
+                    // issues) must swap content instantly, while the
+                    // fade-in belongs to the wrapper appearing over the
+                    // graph. With both on one view, every issue switch
+                    // replayed the fade and the graph flashed through.
+                    ZStack {
+                        IssueDetailView(repo: repo, issue: issue)
+                            // Identity per issue: switching issues in the
+                            // sidebar must reset the scroll position, not
+                            // keep the old one's offset.
+                            .id(issue.id)
+                    }
+                    .transition(.asymmetric(
+                        insertion: .opacity.animation(.easeOut(duration: 0.12)),
+                        removal: .identity
+                    ))
+                }
             }
             .frame(minWidth: 400)
             .layoutPriority(1)
@@ -109,12 +128,6 @@ struct RepoView: View {
         .background(
             Color.clear
                 .sheet(isPresented: $repo.showCreatePR) { CreatePullRequestView(repo: repo) }
-        )
-        .background(
-            Color.clear
-                .sheet(item: $repo.issueToView) { issue in
-                    IssueDetailView(repo: repo, issue: issue)
-                }
         )
         // Keyed on the repo, not on view identity: this view is no longer
         // rebuilt per tab (see the note on the panes above), so a plain

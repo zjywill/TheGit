@@ -13,7 +13,7 @@ struct PullRequest: Identifiable, Hashable {
 }
 
 /// An open issue, as the CLI reports it. The body comes with the list —
-/// one fetch, and the viewer sheet opens with everything but the thread.
+/// one fetch, and the viewer opens with everything but the thread.
 struct Issue: Identifiable, Hashable {
     let number: Int
     let title: String
@@ -21,18 +21,81 @@ struct Issue: Identifiable, Hashable {
     let body: String
     let url: String
     let createdAt: Date?
+    // `var` with a default, not `let`: the memberwise init keeps working
+    // for every existing call site that predates labels.
+    var labels: [IssueLabel] = []
 
     var id: Int { number }
 }
 
+/// A forge label. GitHub and GitLab both pick a colour per label; GitLab's
+/// issue listing sends only the names, so the colour is optional and a
+/// chip without one draws grey.
+struct IssueLabel: Hashable {
+    let name: String
+    /// "a2eeef" (GitHub) or "#428BCA" (GitLab) — normalised by Color init.
+    var colorHex: String? = nil
+}
+
 /// One comment on an issue's thread. GitLab calls these notes and mixes
-/// system events into them; the parser filters those out — "changed the
+/// system events into them; those become `IssueEvent`s — "changed the
 /// description" is history, not conversation.
 struct IssueComment: Identifiable, Hashable {
     let id: String
     let author: String
     let body: String
     let createdAt: Date?
+}
+
+/// A non-comment entry on an issue's timeline: a label change, a
+/// cross-reference, a rename — the thin grey rows between the speech
+/// bubbles on the forge's own page.
+struct IssueEvent: Identifiable, Hashable {
+    enum Kind: Hashable {
+        case labeled
+        case unlabeled
+        case referenced   // "mentioned this in #10"
+        case renamed
+        case assigned
+        case unassigned
+        case closed
+        case reopened
+        case milestoned
+        case demilestoned
+        /// GitLab system notes arrive as prose ("assigned to @tao") with no
+        /// machine kind; shown verbatim rather than guessed at.
+        case system
+    }
+
+    let id: String
+    let kind: Kind
+    let actor: String
+    /// What the kind acts on: the label or assignee name, the new title,
+    /// the referencing "#10 title", or a system note's own sentence.
+    let detail: String
+    var label: IssueLabel? = nil
+    let createdAt: Date?
+}
+
+/// The issue thread in order: comments and events interleaved, the way the
+/// forge's own timeline shows them.
+enum IssueTimelineItem: Identifiable, Hashable {
+    case comment(IssueComment)
+    case event(IssueEvent)
+
+    var id: String {
+        switch self {
+        case .comment(let comment): return "c-\(comment.id)"
+        case .event(let event): return "e-\(event.id)"
+        }
+    }
+
+    var createdAt: Date? {
+        switch self {
+        case .comment(let comment): return comment.createdAt
+        case .event(let event): return event.createdAt
+        }
+    }
 }
 
 /// Which CLI drives a repo's pull requests. We never speak to an API
@@ -202,7 +265,10 @@ enum ForgeParsers {
                         author: $0.author?.login ?? "",
                         body: $0.body ?? "",
                         url: $0.url,
-                        createdAt: date($0.createdAt)
+                        createdAt: date($0.createdAt),
+                        labels: ($0.labels ?? []).compactMap { label in
+                            label.name.map { IssueLabel(name: $0, colorHex: label.color) }
+                        }
                     )
                 }
             case .gitlab:
@@ -214,7 +280,8 @@ enum ForgeParsers {
                         author: $0.author?.username ?? "",
                         body: $0.description ?? "",
                         url: $0.webURL ?? "",
-                        createdAt: date($0.createdAt)
+                        createdAt: date($0.createdAt),
+                        labels: ($0.labels ?? []).map { IssueLabel(name: $0) }
                     )
                 }
             }
@@ -226,44 +293,161 @@ enum ForgeParsers {
         }
     }
 
-    /// The thread under an issue. gh wraps it in `{comments: [...]}`; glab
-    /// has no JSON view for notes, so the client asks its `api` passthrough
-    /// and gets GitLab's own array — system notes ("changed the milestone")
-    /// filtered out, because the sheet shows a conversation.
-    static func issueComments(_ output: String, forge: Forge) throws -> [IssueComment] {
+    /// GitHub's timeline endpoint, which is the issue page itself as data:
+    /// comments and events interleaved, already in order. Event types we
+    /// can't render (subscribed, mentioned, connected, …) are skipped, not
+    /// errors — the endpoint grows new ones without asking us.
+    static func githubTimeline(_ output: String) throws -> [IssueTimelineItem] {
         guard let start = output.firstIndex(where: { $0 == "[" || $0 == "{" }),
               let data = output[start...].data(using: .utf8)
         else { return [] }
+        let events: [GHTimelineEvent]
         do {
-            switch forge {
-            case .github:
-                return try JSONDecoder().decode(GHCommentList.self, from: data)
-                    .comments.map {
-                        IssueComment(
-                            id: $0.id ?? UUID().uuidString,
-                            author: $0.author?.login ?? "",
-                            body: $0.body,
-                            createdAt: date($0.createdAt)
-                        )
-                    }
-            case .gitlab:
-                return try JSONDecoder().decode([GLNote].self, from: data)
-                    .filter { $0.system != true }
-                    .map {
-                        IssueComment(
-                            id: $0.id.map(String.init) ?? UUID().uuidString,
-                            author: $0.author?.username ?? "",
-                            body: $0.body ?? "",
-                            createdAt: date($0.createdAt)
-                        )
-                    }
-            }
+            events = try JSONDecoder().decode([GHTimelineEvent].self, from: data)
         } catch {
             throw ShellError(
-                command: forge.binary,
-                message: "Could not read the issue's comments: \(error)"
+                command: Forge.github.binary,
+                message: "Could not read the issue's timeline: \(error)"
             )
         }
+        var items: [IssueTimelineItem] = []
+        for (index, event) in events.enumerated() {
+            let created = date(event.createdAt)
+            let actor = event.actor?.login ?? event.user?.login ?? ""
+            // cross-referenced events carry no id of their own.
+            let id = event.id.map(String.init) ?? "t\(index)"
+            switch event.event {
+            case "commented":
+                items.append(.comment(IssueComment(
+                    id: id, author: actor, body: event.body ?? "", createdAt: created
+                )))
+            case "labeled", "unlabeled":
+                guard let name = event.label?.name else { continue }
+                items.append(.event(IssueEvent(
+                    id: id,
+                    kind: event.event == "labeled" ? .labeled : .unlabeled,
+                    actor: actor,
+                    detail: name,
+                    label: IssueLabel(name: name, colorHex: event.label?.color),
+                    createdAt: created
+                )))
+            case "cross-referenced":
+                guard let number = event.source?.issue?.number else { continue }
+                let title = event.source?.issue?.title ?? ""
+                items.append(.event(IssueEvent(
+                    id: id, kind: .referenced, actor: actor,
+                    detail: "#\(number) \(title)", createdAt: created
+                )))
+            case "renamed":
+                items.append(.event(IssueEvent(
+                    id: id, kind: .renamed, actor: actor,
+                    detail: event.rename?.to ?? "", createdAt: created
+                )))
+            case "assigned", "unassigned":
+                items.append(.event(IssueEvent(
+                    id: id,
+                    kind: event.event == "assigned" ? .assigned : .unassigned,
+                    actor: actor,
+                    detail: event.assignee?.login ?? "",
+                    createdAt: created
+                )))
+            case "closed":
+                items.append(.event(IssueEvent(
+                    id: id, kind: .closed, actor: actor, detail: "", createdAt: created
+                )))
+            case "reopened":
+                items.append(.event(IssueEvent(
+                    id: id, kind: .reopened, actor: actor, detail: "", createdAt: created
+                )))
+            case "milestoned", "demilestoned":
+                guard let title = event.milestone?.title else { continue }
+                items.append(.event(IssueEvent(
+                    id: id,
+                    kind: event.event == "milestoned" ? .milestoned : .demilestoned,
+                    actor: actor,
+                    detail: title,
+                    createdAt: created
+                )))
+            default:
+                continue
+            }
+        }
+        return items
+    }
+
+    /// GitLab has no single timeline: the notes list holds comments and
+    /// system events ("assigned to @tao"), and label changes live in a
+    /// resource of their own. Both arrive as pages; merged here, sorted
+    /// by time. The label events decode with `try?` — they are seasoning,
+    /// and a thread must not fail because a side dish did.
+    static func gitlabThread(
+        notesPages: [String], labelEventPages: [String]
+    ) throws -> [IssueTimelineItem] {
+        var items: [IssueTimelineItem] = []
+        for notes in notesPages {
+            guard let start = notes.firstIndex(where: { $0 == "[" || $0 == "{" }),
+                  let data = notes[start...].data(using: .utf8)
+            else { continue }
+            let decoded: [GLNote]
+            do {
+                decoded = try JSONDecoder().decode([GLNote].self, from: data)
+            } catch {
+                throw ShellError(
+                    command: Forge.gitlab.binary,
+                    message: "Could not read the issue's notes: \(error)"
+                )
+            }
+            items += decoded.map { note -> IssueTimelineItem in
+                let id = note.id.map(String.init) ?? UUID().uuidString
+                let author = note.author?.username ?? ""
+                let created = date(note.createdAt)
+                if note.system == true {
+                    return .event(IssueEvent(
+                        id: id, kind: .system, actor: author,
+                        detail: ErrorNotice.firstLine(note.body ?? ""),
+                        createdAt: created
+                    ))
+                }
+                return .comment(IssueComment(
+                    id: id, author: author, body: note.body ?? "", createdAt: created
+                ))
+            }
+        }
+
+        for page in labelEventPages {
+            guard let start = page.firstIndex(where: { $0 == "[" || $0 == "{" }),
+                  let data = page[start...].data(using: .utf8),
+                  let events = try? JSONDecoder().decode([GLLabelEvent].self, from: data)
+            else { continue }
+            for event in events {
+                guard let name = event.label?.name else { continue }
+                items.append(.event(IssueEvent(
+                    id: event.id.map { "l\($0)" } ?? UUID().uuidString,
+                    kind: event.action == "remove" ? .unlabeled : .labeled,
+                    actor: event.user?.username ?? "",
+                    detail: name,
+                    label: IssueLabel(name: name, colorHex: event.label?.color),
+                    createdAt: date(event.createdAt)
+                )))
+            }
+        }
+
+        // Notes are already chronological; label events splice in by date.
+        // Sort is stable, so same-timestamp notes keep GitLab's order.
+        return items.sorted {
+            ($0.createdAt ?? .distantPast) < ($1.createdAt ?? .distantPast)
+        }
+    }
+
+    /// How many elements the top-level JSON array holds — the "was this
+    /// page full" check for pagination, deliberately independent of how
+    /// many of them parsed into renderable items.
+    static func jsonArrayCount(_ output: String) -> Int {
+        guard let start = output.firstIndex(where: { $0 == "[" }),
+              let data = output[start...].data(using: .utf8),
+              let array = try? JSONSerialization.jsonObject(with: data) as? [Any]
+        else { return 0 }
+        return array.count
     }
 
     /// Forge timestamps, which come in both ISO 8601 spellings: gh writes
@@ -339,32 +523,88 @@ private struct GLMergeRequest: Decodable {
     }
 }
 
-/// Verbatim shape of `gh issue list --json number,title,author,url,body,createdAt`.
+/// Verbatim shape of
+/// `gh issue list --json number,title,author,url,body,createdAt,labels`.
 private struct GHIssue: Decodable {
     struct Author: Decodable { let login: String? }
+    struct Label: Decodable {
+        let name: String?
+        let color: String?
+    }
     let number: Int
     let title: String
     let author: Author?
     let body: String?
     let url: String
     let createdAt: String?
+    let labels: [Label]?
 }
 
-/// `gh issue view N --json comments` — the one field, still enveloped.
-private struct GHCommentList: Decodable {
-    struct Comment: Decodable {
-        struct Author: Decodable { let login: String? }
-        let id: String?
-        let author: Author?
-        let body: String
-        let createdAt: String?
+/// One entry of `gh api repos/{owner}/{repo}/issues/N/timeline`. REST
+/// casing (created_at), unlike the camelCase `gh --json` views. Every
+/// field beyond `event` belongs to only some event types, so all are
+/// optional and the parser picks what its case needs.
+private struct GHTimelineEvent: Decodable {
+    struct Login: Decodable { let login: String? }
+    struct Label: Decodable {
+        let name: String?
+        let color: String?
     }
-    let comments: [Comment]
+    struct Rename: Decodable {
+        let from: String?
+        let to: String?
+    }
+    struct Milestone: Decodable { let title: String? }
+    struct Source: Decodable {
+        struct SourceIssue: Decodable {
+            let number: Int?
+            let title: String?
+        }
+        let issue: SourceIssue?
+    }
+    let event: String?
+    let id: Int?
+    let actor: Login?
+    /// `commented` entries name their author `user`, not `actor`.
+    let user: Login?
+    let body: String?
+    let label: Label?
+    let rename: Rename?
+    let milestone: Milestone?
+    let assignee: Login?
+    let source: Source?
+    let createdAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case event, id, actor, user, body, label, rename, milestone, assignee, source
+        case createdAt = "created_at"
+    }
+}
+
+/// One `resource_label_events` entry — GitLab's separate ledger of label
+/// adds and removes.
+private struct GLLabelEvent: Decodable {
+    struct User: Decodable { let username: String? }
+    struct Label: Decodable {
+        let name: String?
+        let color: String?
+    }
+    let id: Int?
+    let user: User?
+    let label: Label?
+    let action: String?
+    let createdAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, user, label, action
+        case createdAt = "created_at"
+    }
 }
 
 /// GitLab's REST issue, through `glab issue list --output json`. Optional
 /// for the same reason as `GLMergeRequest`: a missing field should degrade
-/// the row, not fail the list.
+/// the row, not fail the list. Labels here are bare names — the listing
+/// carries no colours.
 private struct GLIssue: Decodable {
     struct Author: Decodable { let username: String? }
     let iid: Int?
@@ -374,9 +614,10 @@ private struct GLIssue: Decodable {
     let author: Author?
     let webURL: String?
     let createdAt: String?
+    let labels: [String]?
 
     enum CodingKeys: String, CodingKey {
-        case iid, id, title, description, author
+        case iid, id, title, description, author, labels
         case webURL = "web_url"
         case createdAt = "created_at"
     }
@@ -450,7 +691,7 @@ actor ForgeClient {
         case .github:
             args = [
                 "issue", "list",
-                "--json", "number,title,author,url,body,createdAt",
+                "--json", "number,title,author,url,body,createdAt,labels",
                 "--limit", String(limit),
             ]
         case .gitlab:
@@ -459,24 +700,66 @@ actor ForgeClient {
         return try ForgeParsers.issues(try await run(forge, args), forge: forge)
     }
 
-    /// The conversation under one issue. gh has a JSON view for it; glab
-    /// doesn't, so there the CLI's `api` passthrough asks GitLab's notes
-    /// endpoint directly — `:id` is glab's own placeholder for the current
-    /// project, resolved by the CLI, so this stays "the CLI's problem" in
-    /// the same way every other call here is.
-    func issueComments(_ issue: Issue, forge: Forge) async throws -> [IssueComment] {
-        let output: String
+    /// Both forges page their listings at 100; this many pages per
+    /// resource is the ceiling — 500 entries, beyond which the panel says
+    /// it's showing the head rather than silently ending.
+    private static let threadPageSize = 100
+    private static let threadPageCap = 5
+
+    /// The timeline under one issue: comments and events, in order,
+    /// paged until a page comes back short. Both forges answer through
+    /// their CLI's `api` passthrough — `{owner}` / `{repo}` are gh's own
+    /// placeholders and `:id` is glab's, each resolved by its CLI from
+    /// the working directory, so hosts and tokens stay the CLI's problem
+    /// like everywhere else here.
+    func issueThread(
+        _ issue: Issue, forge: Forge
+    ) async throws -> (items: [IssueTimelineItem], truncated: Bool) {
         switch forge {
         case .github:
-            output = try await run(forge, [
-                "issue", "view", String(issue.number), "--json", "comments",
-            ])
+            var items: [IssueTimelineItem] = []
+            for page in 1...Self.threadPageCap {
+                let output = try await run(forge, [
+                    "api",
+                    "repos/{owner}/{repo}/issues/\(issue.number)/timeline"
+                        + "?per_page=\(Self.threadPageSize)&page=\(page)",
+                ])
+                items += try ForgeParsers.githubTimeline(output)
+                // Full-page check on the RAW element count: a page of 100
+                // events can parse to fewer items (types we skip), and
+                // stopping on that would drop the pages behind it.
+                if ForgeParsers.jsonArrayCount(output) < Self.threadPageSize {
+                    return (items, false)
+                }
+            }
+            return (items, true)
         case .gitlab:
-            output = try await run(forge, [
-                "api", "projects/:id/issues/\(issue.number)/notes?sort=asc&per_page=100",
-            ])
+            var notePages: [String] = []
+            var truncated = false
+            for page in 1...Self.threadPageCap {
+                let output = try await run(forge, [
+                    "api",
+                    "projects/:id/issues/\(issue.number)/notes"
+                        + "?sort=asc&per_page=\(Self.threadPageSize)&page=\(page)",
+                ])
+                notePages.append(output)
+                if ForgeParsers.jsonArrayCount(output) < Self.threadPageSize { break }
+                truncated = page == Self.threadPageCap
+            }
+            // Label changes are a separate GitLab resource. try? — a
+            // thread with comments but no label rows beats no thread.
+            // One page only: an issue relabelled 100+ times has no head
+            // worth completing.
+            let labelEvents = (try? await run(forge, [
+                "api",
+                "projects/:id/issues/\(issue.number)/resource_label_events"
+                    + "?per_page=\(Self.threadPageSize)",
+            ])) ?? "[]"
+            let items = try ForgeParsers.gitlabThread(
+                notesPages: notePages, labelEventPages: [labelEvents]
+            )
+            return (items, truncated)
         }
-        return try ForgeParsers.issueComments(output, forge: forge)
     }
 
     func openIssueInBrowser(_ issue: Issue, forge: Forge) async throws {
