@@ -440,9 +440,13 @@ final class RepoState: ObservableObject, Identifiable {
             async let submodules = git.submodules()
             async let lfs = git.lfsStatus()
             async let tags = git.tags()
+            async let activity = git.activity()
 
             var snap = RepoSnapshot()
             snap.commits = try await commits
+            // A repo with no commits yet has no histogram and isn't an
+            // error — the heatmap simply has nothing to draw.
+            snap.activity = (try? await activity) ?? [:]
             let s0 = try await status
             snap.reachableFromHead = Self.reachableSet(
                 from: snap.headHash,

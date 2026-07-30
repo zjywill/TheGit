@@ -73,6 +73,38 @@ actor GitClient {
         return GitParsers.parseLog(out)
     }
 
+    /// Commits per day over the last `weeks` weeks, across every ref — the
+    /// activity heatmap's histogram.
+    ///
+    /// `--since` is what keeps this cheap on a big repo: the walker stops
+    /// descending a chain once it runs older than the cutoff, so the cost is
+    /// the window rather than the history, and the output is one ten-byte
+    /// line per commit in it. That's why the heatmap doesn't just count the
+    /// log the graph already loaded — that log is the newest 500 commits,
+    /// which in a busy repo can be less than a fortnight, and the days
+    /// before it would draw as genuinely empty.
+    ///
+    /// Author date, not committer date: the cells are meant to say when the
+    /// work was done, and a rebase rewrites the other one. `-local` renders
+    /// it in this Mac's timezone, which is the timezone the grid is built in.
+    func activity(weeks: Int = ActivityDay.windowWeeks) async throws -> [Int: Int] {
+        let out = try await run([
+            "log", "--all", "--since=\(weeks) weeks ago",
+            "--date=short-local", "--pretty=%ad",
+        ])
+        var counts: [Int: Int] = [:]
+        for line in out.split(separator: "\n") {
+            let parts = line.split(separator: "-")
+            guard parts.count == 3,
+                  let year = Int(parts[0]),
+                  let month = Int(parts[1]),
+                  let day = Int(parts[2])
+            else { continue }
+            counts[ActivityDay.key(year: year, month: month, day: day), default: 0] += 1
+        }
+        return counts
+    }
+
     /// Commits that touched one file, following renames.
     func fileHistory(_ path: String, limit: Int = 200) async throws -> [Commit] {
         let out = try await run([

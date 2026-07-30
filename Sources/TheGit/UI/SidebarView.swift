@@ -48,6 +48,17 @@ struct SidebarView: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 10)
             }
+            // Pinned under the scroller, not inside it: it describes the
+            // repo rather than sitting in the list of its refs, and it's
+            // the one thing here that's worth a glance without scrolling.
+            // A repo with no commits at all gets no grid — a whole empty
+            // quarter is a wrong answer to "nothing has happened yet".
+            if !repo.snapshot.commits.isEmpty {
+                Divider()
+                ActivityGraph(counts: repo.snapshot.activity)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+            }
         }
         // Right-click on empty sidebar space: the actions that belong to
         // the repo rather than to any one row.
