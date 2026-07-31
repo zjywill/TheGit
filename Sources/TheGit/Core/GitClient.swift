@@ -15,8 +15,11 @@ actor GitClient {
         self.repoPath = repoPath
     }
 
+    /// `timeout` is for the commands that go out to a remote — see
+    /// `Shell.run`. Local ones leave it nil: a slow `git log` is still
+    /// making progress, and killing it would only lose the work.
     @discardableResult
-    func run(_ args: [String]) async throws -> String {
+    func run(_ args: [String], timeout: TimeInterval? = nil) async throws -> String {
         do {
             return try await Shell.run(
                 "/usr/bin/env",
@@ -34,7 +37,8 @@ actor GitClient {
                     // locks are mandatory (commit, merge) are unaffected.
                     "GIT_OPTIONAL_LOCKS": "0",
                 ],
-                label: args.joined(separator: " ")
+                label: args.joined(separator: " "),
+                timeout: timeout
             )
         } catch let error as ShellError {
             throw GitError(command: error.command, message: error.message)
@@ -253,6 +257,12 @@ actor GitClient {
 
     // MARK: - Review diff
 
+    /// Long enough for a big request over a slow link, short enough that a
+    /// remote which accepts the connection and then goes quiet doesn't hold
+    /// this repo's git — every other command queues behind it — until the
+    /// app quits.
+    private static let reviewFetchTimeout: TimeInterval = 120
+
     /// Where a fetched pull/merge request head is parked locally. Under
     /// `refs/thegit/` on purpose: the graph walks `--branches --remotes
     /// --tags`, so a review ref adds no rows and draws no badges, and it
@@ -284,12 +294,17 @@ actor GitClient {
         try await run([
             "fetch", "--force", remote,
             "+\(Self.remoteReviewRef(number: number, forge: forge)):\(head)",
-        ])
+        ], timeout: Self.reviewFetchTimeout)
+        // Cancelled between the two fetches — the panel is gone, or on
+        // another request. `try?` below would swallow that and carry on
+        // running git for a review nobody is reading.
+        try Task.checkCancellation()
         if !base.isEmpty {
             _ = try? await run([
                 "fetch", "--force", remote,
                 "+refs/heads/\(base):refs/remotes/\(remote)/\(base)",
-            ])
+            ], timeout: Self.reviewFetchTimeout)
+            try Task.checkCancellation()
         }
         return (await resolvedBase(base, remote: remote), head)
     }
