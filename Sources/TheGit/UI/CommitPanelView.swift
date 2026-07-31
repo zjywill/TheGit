@@ -459,6 +459,8 @@ struct ConflictRow: View {
             Spacer()
 
             Menu {
+                Button("Open Merge Editor") { repo.openMergeEditor(file) }
+                Divider()
                 Button("Accept Ours (current branch)") { repo.acceptOurs(file) }
                 Button("Accept Theirs (incoming)") { repo.acceptTheirs(file) }
                 Divider()
@@ -475,9 +477,11 @@ struct ConflictRow: View {
         .padding(.horizontal, FileListMetrics.bleed * zoom)
         .frame(height: FileListMetrics.row * zoom)
         .contentShape(Rectangle())
-        .onTapGesture { repo.selectFile(file) }
+        .onTapGesture { repo.openMergeEditor(file) }
         .contextTarget("conflict:" + file.id, repo)
         .contextMenu {
+            Button("Open Merge Editor") { repo.openMergeEditor(file) }
+            Divider()
             Button("Accept Ours (current branch)") { repo.acceptOurs(file) }
             Button("Accept Theirs (incoming)") { repo.acceptTheirs(file) }
             Divider()

@@ -196,6 +196,15 @@ struct RepoView: View {
                             repo: repo, path: history.path, commits: history.commits
                         )
                     }
+                    if let session = repo.mergeSession {
+                        MergeEditorView(repo: repo, session: session)
+                            // Same fade-in as the diff below, same instant
+                            // removal — close is usually Esc.
+                            .transition(.asymmetric(
+                                insertion: .opacity.animation(.easeOut(duration: 0.12)),
+                                removal: .identity
+                            ))
+                    }
                     if repo.selectedFile != nil {
                         FileDiffView(repo: repo)
                             // Fast fade-in masks the abrupt full-panel

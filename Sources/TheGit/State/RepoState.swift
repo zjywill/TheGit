@@ -253,6 +253,9 @@ final class RepoState: ObservableObject, Identifiable {
     @Published var showRawPointer = false
     /// Raw structure of the current diff, for hunk-level staging.
     private var parsedDiff = ParsedDiff()
+    /// The open merge editor, shown over the graph like a diff. One at a
+    /// time — opening another conflict replaces it.
+    @Published var mergeSession: MergeEditorSession?
     /// Graph visibility filters (GitKraken Solo / Hide). Session-only.
     @Published var soloRev: String?
     @Published var hiddenRefs: Set<String> = []
@@ -963,9 +966,20 @@ final class RepoState: ObservableObject, Identifiable {
                 let all = snap.staged + snap.unstaged + snap.conflicted
                 if !all.contains(where: { $0.id == file.id }) { closeDiff() }
             }
+            closeMergeEditorIfStale(snap)
         } catch {
             report(error)
         }
+    }
+
+    /// A merge editor outlives its conflict only as a trap: saving would
+    /// overwrite a file git no longer marks conflicted (operation aborted,
+    /// or resolved from a terminal). Both refresh paths call this.
+    private func closeMergeEditorIfStale(_ snap: RepoSnapshot) {
+        guard let session = mergeSession,
+              !snap.conflicted.contains(where: { $0.id == session.file.id })
+        else { return }
+        mergeSession = nil
     }
 
     /// GitKraken lands you on git's own prepared message mid-merge instead
@@ -1034,6 +1048,7 @@ final class RepoState: ObservableObject, Identifiable {
                 let all = snap.staged + snap.unstaged + snap.conflicted
                 if !all.contains(where: { $0.id == file.id }) { closeDiff() }
             }
+            closeMergeEditorIfStale(snap)
         } catch {
             report(error)
         }
@@ -2900,6 +2915,7 @@ final class RepoState: ObservableObject, Identifiable {
     func selectFile(_ file: FileChange) {
         issueToView = nil
         prToView = nil
+        mergeSession = nil
         selectedFile = file
         diffCommit = nil
         diffLines = []
@@ -2952,6 +2968,49 @@ final class RepoState: ObservableObject, Identifiable {
         diffLines = []
         lfsPointer = nil
         showRawPointer = false
+        // Same overlay slot (see viewIssue): whatever clears the diff
+        // clears the merge editor with it.
+        mergeSession = nil
+    }
+
+    // MARK: - Merge editor
+
+    /// Open the GitKraken-style merge editor for a conflicted file. Files
+    /// whose conflict left no markers in the working tree (binary, or
+    /// deleted on one side) have nothing to pick from — those fall back
+    /// to the plain diff view.
+    func openMergeEditor(_ file: FileChange) {
+        issueToView = nil
+        prToView = nil
+        var encoding = String.Encoding.utf8
+        guard
+            let text = try? String(contentsOfFile: path + "/" + file.path, usedEncoding: &encoding),
+            let document = ConflictDocument.parse(text)
+        else {
+            selectFile(file)
+            return
+        }
+        closeDiff()
+        mergeSession = MergeEditorSession(file: file, document: document, encoding: encoding)
+    }
+
+    func closeMergeEditor() {
+        mergeSession = nil
+    }
+
+    /// Write the picked result over the conflicted file and stage it —
+    /// the same "resolved" git sees from `git add` after a hand edit.
+    func saveMergeResolution() {
+        guard let session = mergeSession else { return }
+        let content = session.resolvedContent()
+        let fullPath = path + "/" + session.file.path
+        let repoRelative = session.file.path
+        let encoding = session.encoding
+        mergeSession = nil
+        performIndexOnly { git in
+            try content.write(toFile: fullPath, atomically: true, encoding: encoding)
+            try await git.stage(repoRelative)
+        }
     }
 
     // MARK: - Conflict resolution
