@@ -20,7 +20,10 @@ final class AppState: ObservableObject {
     /// place for the same repo to be — or to fail to be.
     @Published var openTabIDs: [String] = []
     @Published var activeRepoID: String? {
-        didSet { persistActiveRepo() }
+        didSet {
+            persistActiveRepo()
+            persistHome()
+        }
     }
     /// A folder the user tried to open that isn't a git repository.
     @Published var nonGitPath: String?
@@ -41,6 +44,14 @@ final class AppState: ObservableObject {
     /// sounds: without it every launch lands on the leftmost tab, which for
     /// anyone with a few repos open is never the one they were working in.
     static let activeKey = "TheGit.activeRepo"
+    /// Which home screen was showing at quit, absent while a repo tab was —
+    /// see `persistHome`.
+    static let homeKey = "TheGit.homeScreen"
+    /// The catalog: every repository on this Mac the user has told the app
+    /// about, whether or not it has ever been opened. A superset of the wall
+    /// above — see the catalog section below.
+    static let catalogKey = "TheGit.repoCatalog"
+    static let sectionsKey = "TheGit.repoSections"
 
     /// True while the pointer is over a repo tab or the + button, so the
     /// title-bar double-click monitor leaves those clicks alone.
@@ -91,20 +102,93 @@ final class AppState: ObservableObject {
         return repos.first { $0.id == activeRepoID }
     }
 
-    /// No repo selected means the Dashboard, which is also where a window
-    /// with nothing open lands. One selection, not two pieces of state that
-    /// can disagree about what the window is showing — derived from
-    /// `activeRepo` so a stale id can't leave the strip highlighting a tab
-    /// that isn't there.
-    var showingDashboard: Bool { activeRepo == nil }
+    /// The two screens that aren't a repository, both pinned at the head of
+    /// the tab strip. Which of them is showing only matters while no repo is
+    /// selected — `activeRepo` still decides that, so there is still one
+    /// selection and it can't disagree with itself.
+    enum Home: String {
+        /// Every repository this Mac knows about — see `RepositoriesView`.
+        case repositories
+        /// The wall of cards for the repos the user has added.
+        case dashboard
+    }
 
-    func showDashboard() { activeRepoID = nil }
+    /// Where a window with no repo selected lands. Dashboard by default: it's
+    /// about the work in progress, and the catalog is where you go when what
+    /// you want isn't on the wall yet.
+    @Published private(set) var home: Home = .dashboard
+
+    /// No repo selected means one of the two home screens, which is also where
+    /// a window with nothing open lands. Derived from `activeRepo` so a stale
+    /// id can't leave the strip highlighting a tab that isn't there.
+    var showingDashboard: Bool { activeRepo == nil && home == .dashboard }
+    var showingRepositories: Bool { activeRepo == nil && home == .repositories }
+
+    func showDashboard() {
+        activeRepoID = nil
+        home = .dashboard
+        persistHome()
+    }
+
+    func showRepositories() {
+        activeRepoID = nil
+        home = .repositories
+        persistHome()
+        // Branches move while a folder sits in the catalog, and this is the
+        // moment that list is about to be read.
+        refreshCatalog()
+    }
+
+    /// What a launch opens on. Pure, and separate from `init`, because it is
+    /// the one decision at startup with four cases and the only way to check
+    /// them is to state them.
+    ///
+    /// `homeKey` present means a home screen was showing at quit, and it wins:
+    /// the remembered tab is still remembered — it just isn't what was on
+    /// screen. Otherwise the remembered tab, if it still has one, and the
+    /// leftmost tab when it doesn't (which is also what an upgrade from the
+    /// build that saved neither gets).
+    static func restoredScreen(home: String?, active: String?, tabs: [String]) -> Screen {
+        if let home, let saved = Home(rawValue: home) { return .home(saved) }
+        if let active, tabs.contains(active) { return .tab(active) }
+        if let first = tabs.first { return .tab(first) }
+        return .home(.dashboard)
+    }
+
+    enum Screen: Equatable {
+        case home(Home)
+        case tab(String)
+    }
+
+    /// Which screen a window comes back to, in one key: it holds a home
+    /// screen's name while one is showing and is absent while a repo is, so
+    /// "was I on a home screen at quit" and "which one" are one fact and
+    /// can't contradict each other. The tab itself is `activeKey`'s job.
+    private func persistHome() {
+        if activeRepoID == nil {
+            UserDefaults.standard.set(home.rawValue, forKey: Self.homeKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.homeKey)
+        }
+    }
+
+    /// A Dashboard refresh in flight, so the button that started it can say
+    /// so. This is the slowest thing on the screen — N repos of git, then a
+    /// year of history, then N CLI calls over the network — and without this
+    /// the whole pass was silent while the cards changed under the pointer
+    /// one at a time.
+    @Published private(set) var refreshingDashboard = false
 
     /// The Dashboard's Refresh: every card straight from git, in the order
     /// they're read in. Sequential for the same reason the first load is —
     /// one wall of cards must not fire twenty subprocesses at once.
     func refreshDashboard() {
+        // ⌘R held down must not stack a second pass on top of the first: the
+        // whole point of the sequencing above is one subprocess at a time.
+        guard !refreshingDashboard else { return }
+        refreshingDashboard = true
         Task {
+            defer { refreshingDashboard = false }
             for repo in repos { await repo.loadCard(force: true) }
             // After the cards, not with them: the cards are what the user is
             // looking at, and the grid is a year of history that hasn't
@@ -113,9 +197,40 @@ final class AppState: ObservableObject {
             // Last, because it's the only network in the pass — and forced,
             // because "did that PR land yet" is a reason this button gets
             // pressed.
-            for repo in repos { await repo.loadCardPullRequests(force: true) }
+            //
+            // Also the only phase worth overlapping. The two git phases above
+            // measure 0.05s and 0.02s per repo and stay sequential, because
+            // the reason they are is a subprocess storm. This one is 2.5s of
+            // waiting on a network per repo, spends almost no CPU doing it,
+            // and each repo owns its own `ForgeClient` actor — so N repos in
+            // series was N round trips of dead time. Bounded rather than
+            // unbounded for the original reason: a wall of forty repos must
+            // still not launch forty `gh` processes at once. Same number of
+            // requests either way, and GitHub's limit is per hour, so
+            // overlapping them costs no quota.
+            await withTaskGroup(of: Void.self) { group in
+                var pending = repos[...]
+                var running = 0
+                while running < Self.forgeFanOut, let repo = pending.popFirst() {
+                    group.addTask { await repo.loadCardPullRequests(force: true) }
+                    running += 1
+                }
+                while running > 0 {
+                    _ = await group.next()
+                    running -= 1
+                    if let repo = pending.popFirst() {
+                        group.addTask { await repo.loadCardPullRequests(force: true) }
+                        running += 1
+                    }
+                }
+            }
         }
     }
+
+    /// How many repos may be waiting on their forge at once. Each one runs two
+    /// `gh` processes now that the PR and issue fetches leave together, so this
+    /// is half the real process ceiling.
+    private static let forgeFanOut = 4
 
     /// Commits per day across every open repository — the Dashboard's
     /// heatmap, which is the one thing on that screen no single card can
@@ -269,16 +384,25 @@ final class AppState: ObservableObject {
         openTabIDs = savedTabs
             .map { Self.canonical(path: $0) }
             .filter { known.contains($0) && seenTabs.insert($0).inserted }
-        // The tab that was showing at quit, when it still has one; the
-        // leftmost otherwise, which is also what an upgrade from the build
-        // that never saved this gets.
-        let savedActive = UserDefaults.standard.string(forKey: Self.activeKey)
-            .map { Self.canonical(path: $0) }
-        activeRepoID = savedActive.flatMap { openTabIDs.contains($0) ? $0 : nil }
-            ?? openTabIDs.first
+        switch Self.restoredScreen(
+            home: UserDefaults.standard.string(forKey: Self.homeKey),
+            active: UserDefaults.standard.string(forKey: Self.activeKey)
+                .map { Self.canonical(path: $0) },
+            tabs: openTabIDs
+        ) {
+        case .home(let saved):
+            home = saved
+            activeRepoID = nil
+        case .tab(let id):
+            activeRepoID = id
+        }
         // The folding above can leave what's on disk out of date, and the next
         // write is whenever the user next opens or closes something.
         persist()
+        // Everything on the wall is in the catalog by definition, which is
+        // also what fills it on the first launch that has one.
+        loadCatalog(seededWith: repos.map(\.path))
+        refreshCatalog()
         Task { await hydrate() }
         Task { await watchForGit() }
         NotificationCenter.default.addObserver(
@@ -314,6 +438,261 @@ final class AppState: ObservableObject {
     /// it is also the moment the cache exists for.
     private func flushCaches() {
         for repo in repos { repo.flushCache() }
+    }
+
+    // MARK: - Catalog
+
+    /// Every repository this Mac knows about, grouped by project — see
+    /// `RepoCatalog`. Three widening circles: a tab is what you're editing,
+    /// the wall (`repos`) is what you're working on, and this is every
+    /// repository you've told the app exists. A scan of `~/Git` puts forty
+    /// folders in here and not one card on the wall — which is the point, since
+    /// a card costs two subprocesses and a row costs two file reads.
+    @Published private(set) var catalog: [RepoCatalog.Project] = []
+
+    /// The user's own bands over that list. Empty until they make one, and the
+    /// list draws no section chrome at all while it is.
+    @Published private(set) var catalogSections: [RepoCatalog.Section] = []
+
+    /// A scan in flight, so the screen can say so rather than look empty for
+    /// two seconds while a home directory is walked.
+    @Published private(set) var scanning = false
+    /// What the last scan added, for one line of feedback. Cleared by the next.
+    @Published var scanResult: String?
+
+    private var catalogEntries: [RepoCatalog.Entry] = []
+
+    /// True for a folder with a tab open right now — the one thing a catalog
+    /// row can't read off the disk.
+    func isOpen(path: String) -> Bool {
+        openTabIDs.contains(Self.canonical(path: path))
+    }
+
+    /// Note that a folder was actually opened, adding it if it's new. The
+    /// timestamp is what orders the clones inside a project.
+    private func recordOpened(path: String) {
+        let path = Self.canonical(path: path)
+        if let index = catalogEntries.firstIndex(where: { $0.path == path }) {
+            catalogEntries[index].lastOpened = Date()
+        } else {
+            catalogEntries.append(RepoCatalog.Entry(path: path, addedAt: Date(), lastOpened: Date()))
+        }
+        persistCatalog()
+        refreshCatalog()
+    }
+
+    /// Add folders without opening any of them — what a scan does, and what
+    /// dropping folders from Finder does. Returns how many were new, since
+    /// "scanned 38, added 0" and "added 38" are different answers.
+    @discardableResult
+    func addToCatalog(paths: [String]) -> Int {
+        let known = Set(catalogEntries.map(\.path))
+        let now = Date()
+        var seen = Set<String>()
+        let fresh = paths
+            .map { Self.canonical(path: $0) }
+            .filter { !known.contains($0) && seen.insert($0).inserted }
+        for path in fresh {
+            catalogEntries.append(RepoCatalog.Entry(path: path, addedAt: now))
+        }
+        guard !fresh.isEmpty else { return 0 }
+        persistCatalog()
+        refreshCatalog()
+        return fresh.count
+    }
+
+    /// Forget a folder entirely: out of the catalog, off the wall, and its tab
+    /// closed. Nothing on disk is touched — this is the app's own list, not the
+    /// working copy.
+    func removeFromCatalog(path: String) {
+        let path = Self.canonical(path: path)
+        catalogEntries.removeAll { $0.path == path }
+        if let repo = repos.first(where: { $0.path == path }) { remove(repo: repo) }
+        persistCatalog()
+        refreshCatalog()
+    }
+
+    /// Folders in the catalog that are no longer repositories — deleted,
+    /// renamed, or on a disk that isn't plugged in. Read off the last refresh
+    /// rather than the filesystem, so asking is free.
+    var missingClones: [RepoCatalog.Clone] {
+        catalog.flatMap(\.clones).filter { !$0.exists }
+    }
+
+    /// Forget every folder that isn't there any more. Offered as one action
+    /// because that's how they arrive — a `rm -rf` of a work directory takes
+    /// out six at once, and removing them one context menu at a time is the
+    /// kind of chore an app should do for you.
+    func removeMissingFromCatalog() {
+        let gone = Set(missingClones.map(\.path))
+        guard !gone.isEmpty else { return }
+        catalogEntries.removeAll { gone.contains($0.path) }
+        for repo in repos where gone.contains(repo.path) { remove(repo: repo) }
+        persistCatalog()
+        refreshCatalog()
+    }
+
+    /// Point a catalogued folder at where it went. A repository that was moved
+    /// rather than deleted keeps its origin, so it lands back in the same
+    /// project and the same section — the row is the only thing that changes.
+    func relocatePanel(for path: String) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.prompt = "Locate"
+        panel.message = "Where is “\((path as NSString).lastPathComponent)” now?"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let target = Self.canonical(path: url.path)
+        guard RepoCatalog.facts(ofRepoAt: target).exists else {
+            nonGitPath = url.path
+            return
+        }
+        removeFromCatalog(path: path)
+        addToCatalog(paths: [target])
+    }
+
+    /// Point at `~/Git` and take everything under it. This is the only way a
+    /// list of forty repositories gets built without forty trips through a file
+    /// picker — see `RepoCatalog.scan`.
+    func scanFolderPanel() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Add"
+        panel.message = "Choose a folder — every Git repository inside it is added"
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+        scan(roots: panel.urls.map(\.path))
+    }
+
+    /// The walk itself, off the main actor: pointing this at a home directory
+    /// is thousands of `stat`s, and the window has to stay live while it runs.
+    func scan(roots: [String]) {
+        guard !scanning else { return }
+        scanning = true
+        scanResult = nil
+        Task.detached(priority: .utility) {
+            let found = roots.flatMap { RepoCatalog.scan(root: $0) }
+            await MainActor.run {
+                let added = self.addToCatalog(paths: found)
+                self.scanning = false
+                self.scanResult = Self.scanSummary(found: found.count, added: added)
+            }
+        }
+    }
+
+    /// Always says what happened, including when nothing did: a scan that found
+    /// forty repositories already in the list must not read the same as one
+    /// that found none.
+    static func scanSummary(found: Int, added: Int) -> String {
+        if found == 0 { return "No Git repositories found in that folder." }
+        if added == 0 { return "All \(found) repositories there were already in the list." }
+        let rest = found - added
+        let head = "Added \(added) repositor\(added == 1 ? "y" : "ies")"
+        return rest > 0 ? head + " · \(rest) already listed" : head + "."
+    }
+
+    /// A catalogue re-read the user asked for, as opposed to the several that
+    /// happen on their own. Only the asked-for ones spin the button: this runs
+    /// on every visit to the screen and on every app activation, and a control
+    /// nobody touched turning itself is noise, not feedback.
+    @Published private(set) var refreshingCatalog = false
+
+    /// Re-read the `.git` of every catalogued folder and regroup. Off the main
+    /// actor because it's two file reads per entry and the list can be long; no
+    /// subprocesses either way — see `RepoCatalog`.
+    func refreshCatalog(userInitiated: Bool = false) {
+        let entries = catalogEntries
+        if userInitiated { refreshingCatalog = true }
+        Task.detached(priority: .utility) {
+            let grouped = RepoCatalog.group(entries)
+            await MainActor.run {
+                self.catalog = grouped
+                // Unconditional: an automatic pass that overlapped a manual
+                // one must still clear it, or the button spins forever.
+                self.refreshingCatalog = false
+            }
+        }
+    }
+
+    // MARK: - Catalog sections
+
+    /// The catalog as it's drawn: the user's sections in their order, then
+    /// everything not in one.
+    var catalogShelves: [RepoCatalog.Shelf] {
+        RepoCatalog.arrange(catalog, sections: catalogSections)
+    }
+
+    @discardableResult
+    func addCatalogSection(name: String = "New Section") -> String {
+        let section = RepoCatalog.Section(name: name)
+        catalogSections.append(section)
+        persistSections()
+        return section.id
+    }
+
+    func renameCatalogSection(id: String, to name: String) {
+        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty, let index = catalogSections.firstIndex(where: { $0.id == id })
+        else { return }
+        catalogSections[index].name = clean
+        persistSections()
+    }
+
+    /// Delete the band, not its contents: the projects fall back into the
+    /// unsectioned bucket, which is the only behaviour that makes this safe
+    /// enough not to need a confirmation.
+    func deleteCatalogSection(id: String) {
+        catalogSections.removeAll { $0.id == id }
+        persistSections()
+    }
+
+    func moveCatalogSection(id: String, by offset: Int) {
+        guard let from = catalogSections.firstIndex(where: { $0.id == id }) else { return }
+        let to = from + offset
+        guard catalogSections.indices.contains(to) else { return }
+        catalogSections.insert(catalogSections.remove(at: from), at: to)
+        persistSections()
+    }
+
+    /// Move a project into a section, or out of every section when `sectionID`
+    /// is nil. Removed from all of them first: the arrangement is a partition,
+    /// and a project listed twice would appear twice.
+    func assignProject(_ projectID: String, toSection sectionID: String?) {
+        for index in catalogSections.indices {
+            catalogSections[index].projectIDs.removeAll { $0 == projectID }
+        }
+        if let sectionID, let index = catalogSections.firstIndex(where: { $0.id == sectionID }) {
+            catalogSections[index].projectIDs.append(projectID)
+        }
+        persistSections()
+    }
+
+    private func persistSections() {
+        guard let data = try? JSONEncoder().encode(catalogSections) else { return }
+        UserDefaults.standard.set(data, forKey: Self.sectionsKey)
+    }
+
+    private func persistCatalog() {
+        guard let data = try? JSONEncoder().encode(catalogEntries) else { return }
+        UserDefaults.standard.set(data, forKey: Self.catalogKey)
+    }
+
+    private func loadCatalog(seededWith wallPaths: [String]) {
+        if let data = UserDefaults.standard.data(forKey: Self.catalogKey),
+           let saved = try? JSONDecoder().decode([RepoCatalog.Entry].self, from: data) {
+            catalogEntries = saved
+        }
+        if let data = UserDefaults.standard.data(forKey: Self.sectionsKey),
+           let saved = try? JSONDecoder().decode([RepoCatalog.Section].self, from: data) {
+            catalogSections = saved
+        }
+        let known = Set(catalogEntries.map(\.path))
+        let now = Date()
+        for path in wallPaths where !known.contains(path) {
+            catalogEntries.append(RepoCatalog.Entry(path: path, addedAt: now, lastOpened: now))
+        }
+        persistCatalog()
     }
 
     /// One probe at launch; while git is missing, keep watching. The CLT
@@ -370,6 +749,7 @@ final class AppState: ObservableObject {
             nonGitPath = path
             return
         }
+        recordOpened(path: canonical)
         // Already on the wall — with or without a tab. Opening it again is
         // the same gesture as clicking its card.
         if let existing = repos.first(where: { $0.path == canonical }) {
@@ -450,6 +830,12 @@ final class AppState: ObservableObject {
     /// Its own function because `activeRepoID` changes on every tab click,
     /// which is far more often than the two lists do.
     private func persistActiveRepo() {
+        // Only ever a repo. Both home screens select nothing, so writing the
+        // nil through would mean that ending a session on the Dashboard — or
+        // on the Repositories list, which is now one click from every window —
+        // erased the very thing this key exists to remember. A stale id costs
+        // nothing: `init` only restores one that still has a tab.
+        guard let activeRepoID else { return }
         UserDefaults.standard.set(activeRepoID, forKey: Self.activeKey)
     }
 }
