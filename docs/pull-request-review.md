@@ -46,8 +46,9 @@ app 里其他 diff 用的同一套 `DiffParser` / `DiffLineRow` —— 行号、
 
 **refs 的命名空间是刻意的。** `refs/thegit/pr|mr/<n>` 对 graph 不可见 —— graph 走的是
 `--branches --remotes --tags HEAD`，所以 fetch 下来的请求既不加行也不画 ref 徽章。
-已用真实 fetch 验证过。（热力图 `GitClient.activity` 用的是 `--all`，会把这些提交算进
-活跃度，见下面的已知问题。）
+已用真实 fetch 验证过。热力图是唯一一处要单独排除的：`GitClient.activity` 走 `--all`，
+所以它显式加了 `--exclude=refs/thegit/*` —— 别人的请求不该算进这个仓库的活跃度，而且
+因为 ref 不会被清理，算进去就是永久的。任何以后新增的 `--all` 遍历都要做同样的事。
 
 ### 数据存在哪、活多久
 
@@ -108,8 +109,11 @@ app 里其他 diff 用的同一套 `DiffParser` / `DiffLineRow` —— 行号、
    `markFileAsViewed`、GitLab 的 per-file review 状态）。
 3. **review ref 只增不减。** 没有任何东西清理 `refs/thegit/**`，review 过很多请求的仓库
    会把它们全留着。
-4. **热力图会把它们算进去。** `GitClient.activity` 走 `--all`，fetch 下来的请求提交会
-   落进活跃度格子。
+4. **一次 review fetch 期间，这个仓库的其它 git 命令都在排队。** `GitClient` 是 actor，
+   所有命令串行。fetch 现在可取消（关掉面板、切到别的请求都会真的杀掉子进程）并且有
+   120s 上限，所以卡死是有限的 —— 但在这段时间里刷新、暂存、提交仍然要等，而且工具栏
+   的 busy 指示不会亮。真正的解法是给 review 一个自己的 `GitClient`：它只读 fetch 下来
+   的 ref，本来就不需要和工作区命令共用那把锁。
 5. **GitLab 没有 review decision。** 审批是独立资源（`/merge_requests/:iid/approvals`），
    目前没取 —— 所以 GitLab 上 header 根本不显示 decision chip。
 6. **thread 有上限**：5 页 × 100 条，到顶会明说。
