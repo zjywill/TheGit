@@ -1473,7 +1473,10 @@ struct PullRequestRow: View {
         .help("\(forge.label(pr.number)) \(pr.title)\n\(pr.branch)\n\nClick to review it here, double-click for the browser.")
         .contextTarget("pr:\(pr.number)", repo, corner: SidebarMetrics.corner)
         .contextMenu {
-            Button("Review \(forge.label(pr.number))") { repo.viewPullRequest(pr) }
+            // Same transaction-owned fade as the row's click, below.
+            Button("Review \(forge.label(pr.number))") {
+                withAnimation(.easeOut(duration: 0.12)) { repo.viewPullRequest(pr) }
+            }
             Button("Open in Browser") { repo.openPullRequestInBrowser(pr) }
             Button("Checkout \(forge.label(pr.number))") { repo.checkoutPullRequest(pr) }
                 // Already standing on it: see RepoState.isCheckedOut.
@@ -1493,7 +1496,12 @@ struct PullRequestRow: View {
         // rather than wherever you were before.
         .onTapGesture {
             if let tip = remoteTip { repo.locate(tip) }
-            repo.viewPullRequest(pr)
+            // The panel's fade-in lives here, not on its transition in
+            // RepoView: opening one is the only moment it should play.
+            // Attached to the transition it also played on a repo switch,
+            // where the panel is merely revealed, and the graph flashed
+            // through it on the way up.
+            withAnimation(.easeOut(duration: 0.12)) { repo.viewPullRequest(pr) }
         }
     }
 
@@ -1546,9 +1554,13 @@ struct IssueRow: View {
         // issue has no branch tip to locate, so reading it IS the primary
         // action — nothing about the graph changes underneath.
         .onTapGesture(count: 2) { repo.openIssueInBrowser(issue) }
-        .onTapGesture { repo.viewIssue(issue) }
+        // The fade belongs to this transaction, not to the panel's
+        // transition — see the PR row above.
+        .onTapGesture { withAnimation(.easeOut(duration: 0.12)) { repo.viewIssue(issue) } }
         .contextMenu {
-            Button("View Issue") { repo.viewIssue(issue) }
+            Button("View Issue") {
+                withAnimation(.easeOut(duration: 0.12)) { repo.viewIssue(issue) }
+            }
             Button("Open in Browser") { repo.openIssueInBrowser(issue) }
             Divider()
             Button("Copy URL") { RepoState.copyToPasteboard(issue.url) }

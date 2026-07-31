@@ -34,6 +34,20 @@ final class IssueOverlayTests: XCTestCase {
     }
 
     @MainActor
+    func testOpeningIssueClosesPullRequestReview() {
+        let repo = RepoState(path: "/nonexistent/for-state-test")
+        repo.viewPullRequest(PullRequest(
+            number: 3, title: "t", branch: "b", author: "a", isDraft: false, url: ""))
+        XCTAssertNotNil(repo.prToView)
+
+        repo.viewIssue(makeIssue(7))
+        XCTAssertEqual(repo.issueToView?.number, 7)
+        // Both set means both drawn, one on top of the other — the panel
+        // the user asked for is the one behind.
+        XCTAssertNil(repo.prToView)
+    }
+
+    @MainActor
     func testSwitchingIssuesKeepsSlotOnIssues() {
         let repo = RepoState(path: "/nonexistent/for-state-test")
         repo.viewIssue(makeIssue(1))

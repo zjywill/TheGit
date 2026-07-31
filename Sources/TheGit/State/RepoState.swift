@@ -1854,6 +1854,10 @@ final class RepoState: ObservableObject, Identifiable {
         // lower one is not "still open" — it is unreachable.
         closeDiff()
         closeFileHistory()
+        // A request under review goes too, and its fetches with it: the
+        // slot holds one thing, and leaving `prToView` set left the review
+        // drawn on top of the issue the user just asked for.
+        closePullRequestReview()
         issueToView = issue
         issueThread = nil
         issueThreadError = nil

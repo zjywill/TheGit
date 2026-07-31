@@ -226,37 +226,43 @@ struct RepoView: View {
                     Self.store($0, key: Self.commitWidthKey)
                 }
             }
-            if let issue = repo.issueToView {
-                // The transition lives on a wrapper and the per-issue
-                // .id on the view inside it: the id change (switching
-                // issues) must swap content instantly, while the
-                // fade-in belongs to the wrapper appearing over the
-                // graph. With both on one view, every issue switch
-                // replayed the fade and the graph flashed through.
+            // An issue and a pull request share ONE wrapper, and the
+            // transition lives on it while the per-item .id lives on the
+            // view inside: the id change (another issue, or a request
+            // where an issue was) swaps content instantly, and only the
+            // panel's arrival over the graph fades. Two wrappers meant an
+            // issue-to-request swap was a removal plus an insertion — the
+            // new panel faded up from nothing and the graph showed
+            // through, which is exactly what a repo switch looks like
+            // when the two tabs have different kinds open.
+            if repo.issueToView != nil || repo.prToView != nil {
                 ZStack {
-                    IssueDetailView(repo: repo, issue: issue)
-                        // Identity per issue: switching issues in the
-                        // sidebar must reset the scroll position, not
-                        // keep the old one's offset.
-                        .id(issue.id)
+                    if let issue = repo.issueToView {
+                        IssueDetailView(repo: repo, issue: issue)
+                            // Identity per issue: switching issues in the
+                            // sidebar must reset the scroll position, not
+                            // keep the old one's offset. The repo is part
+                            // of it because the id here is only a number —
+                            // two tabs both reading #3 are two different
+                            // #3s, and without the prefix the second one
+                            // inherits the first one's scroll position.
+                            .id("\(repo.id)#issue\(issue.id)")
+                    }
+                    if let pr = repo.prToView {
+                        PullRequestDetailView(repo: repo, pr: pr)
+                            .id("\(repo.id)#pr\(pr.id)")
+                    }
                 }
-                .transition(.asymmetric(
-                    insertion: .opacity.animation(.easeOut(duration: 0.12)),
-                    removal: .identity
-                ))
-            }
-            if let pr = repo.prToView {
-                // Same wrapper/id split as the issue viewer above, for
-                // the same reason: switching requests swaps content
-                // instantly, only the panel's arrival fades.
-                ZStack {
-                    PullRequestDetailView(repo: repo, pr: pr)
-                        .id(pr.id)
-                }
-                .transition(.asymmetric(
-                    insertion: .opacity.animation(.easeOut(duration: 0.12)),
-                    removal: .identity
-                ))
+                // No animation on the transition itself — one attached
+                // there plays whenever the panel is inserted, including
+                // when a repo switch simply reveals the panel that tab
+                // already had open, and nobody asked for a fade there.
+                // The animation comes from the transaction at the call
+                // site instead (see viewIssue/viewPullRequest in
+                // SidebarView), so it runs when the user opens a panel
+                // and only then. Removal stays instant — close is usually
+                // Esc, and keyboard actions never animate.
+                .transition(.asymmetric(insertion: .opacity, removal: .identity))
             }
         }
     }
