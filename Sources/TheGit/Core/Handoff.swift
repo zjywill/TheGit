@@ -7,7 +7,7 @@ import Foundation
 /// write a commit message. These are the interactive CLIs the user already
 /// keeps a terminal open for, and a handoff is literally that — a terminal,
 /// in this repo, with the agent already running on a prompt about the pull
-/// request or issue you right-clicked. The app writes the brief; the agent
+/// request or issue you have open. The app writes the brief; the agent
 /// does the work where the user can watch it and answer it.
 enum AgentTool: String, CaseIterable, Identifiable {
     case claude
@@ -156,8 +156,8 @@ enum HandoffTask: String, CaseIterable, Identifiable {
     static let forIssues: [HandoffTask] = [.cause, .fix, .reproduce]
 
     /// The menu line. Verb first, and where the agent will touch the
-    /// working tree the label says so — a context menu shows no tooltips,
-    /// so the label is the only warning there is.
+    /// working tree the label says so — a menu shows no tooltips, so the
+    /// label is the only warning there is.
     var title: String {
         switch self {
         case .review: return "Review the Changes"

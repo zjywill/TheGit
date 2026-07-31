@@ -38,7 +38,7 @@ struct HandoffSettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16 * zoom) {
-                Text("Right-click a pull request or an issue and Hand Off opens Claude or Codex in that repository, already working on it. This is the window it opens in.")
+                Text("Open a pull request or an issue and Hand Off opens Claude or Codex in that repository, already working on it. This is the window it opens in.")
                     .zoomFont(11)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -68,8 +68,8 @@ struct HandoffSettingsView: View {
 
     /// Who the handoff actually goes to. Read-only, and always shown rather
     /// than only in the failure case: the pane is where someone lands
-    /// wondering why right-clicking shows no Hand Off menu, and "neither is
-    /// installed" is the answer.
+    /// wondering why no Hand Off button is anywhere to be seen, and "neither
+    /// is installed" is the answer.
     private var agentSection: some View {
         SettingsSection(
             title: "Agents",

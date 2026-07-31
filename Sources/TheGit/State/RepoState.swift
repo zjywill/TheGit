@@ -160,7 +160,16 @@ final class RepoState: ObservableObject, Identifiable {
     /// The way in for a thrown failure: `GitError` knows which command it
     /// was, and the toast can only use that if it isn't already glued to the
     /// front of the message.
+    ///
+    /// A cancellation is not a failure — it is us calling something off, and
+    /// the user never asked for it and can do nothing about it. The quiet
+    /// refresh cancels the one before it on every burst of `.git` writes
+    /// (fetching a review's refs is such a burst), and the cancelled one's
+    /// git commands come back with `CancellationError` — which used to land
+    /// as "The operation couldn't be completed. (Swift.CancellationError
+    /// error 1.)" across the panel the user was reading.
     func report(_ error: Error) {
+        guard !(error is CancellationError) else { return }
         errorNotice = ErrorNotice(error)
     }
 
@@ -323,6 +332,55 @@ final class RepoState: ObservableObject, Identifiable {
     /// True when the fetch hit its page cap — the thread shown is the
     /// head of a longer one, and the panel should say so.
     @Published private(set) var issueThreadTruncated = false
+    /// The pull/merge request the review panel is open on, if any. The row's
+    /// own listing entry — enough to draw the panel's first frame while the
+    /// page itself is fetched.
+    @Published var prToView: PullRequest?
+    /// The open request's page: nil while it loads, and on failure it stays
+    /// nil with `prReviewError` set — the diff is still worth showing when
+    /// the forge won't answer.
+    @Published private(set) var prDetail: PullRequestDetail?
+    @Published private(set) var prReviewError: String?
+    @Published private(set) var prThread: [IssueTimelineItem]?
+    @Published private(set) var prThreadError: String?
+    @Published private(set) var prThreadTruncated = false
+    @Published var prTab: ReviewTab = .overview
+    /// Every file the request touches, from the local diff.
+    @Published private(set) var prFiles: [ReviewFile] = []
+    @Published private(set) var prDiffState: ReviewDiffState = .loading
+    @Published private(set) var prSelectedFile: ReviewFile?
+    @Published private(set) var prDiffLines: [DiffLine] = []
+    /// Files the reviewer has ticked off, kept per request so switching
+    /// between two of them doesn't lose either one's progress. Session-only:
+    /// a tick is a reading aid, not a verdict worth restoring next launch.
+    @Published private(set) var prViewedFiles: Set<String> = []
+    private var viewedByRequest: [Int: Set<String>] = [:]
+    /// `base...head` for the open request — every file diff is asked for
+    /// within it.
+    private var prRange: String?
+    private var prReviewTask: Task<Void, Never>?
+    private var prThreadTask: Task<Void, Never>?
+    private var prFileDiffTask: Task<Void, Never>?
+
+    /// The review panel's two halves: what the request is and what people
+    /// said about it, and what it changes. Named after GitLab's own tab
+    /// rather than GitHub's "Conversation" — the page carries the state,
+    /// the branches, the CI and the description too, which is more than a
+    /// conversation.
+    enum ReviewTab: Hashable {
+        case overview
+        case files
+    }
+
+    /// Where the local diff of a review stands. Its own state rather than an
+    /// empty file list: "nothing fetched yet", "this request changes
+    /// nothing", and "the fetch failed" are three different sentences.
+    enum ReviewDiffState: Equatable {
+        case loading
+        case ready
+        case failed(String)
+    }
+
     @Published var forgeError: ForgeFailure?
     /// Set once forge detection has concluded, however it concluded — a
     /// GitHub remote, a missing CLI, a host that is no forge at all. Avatars
@@ -340,6 +398,21 @@ final class RepoState: ObservableObject, Identifiable {
         return .unknown
     }
     @Published var loadingPullRequests = false
+
+    /// One of the sidebar's two forge sections.
+    enum ForgeSection { case pullRequests, issues }
+
+    /// Which section's refresh button started the fetch in flight, or nil if
+    /// nobody's did.
+    ///
+    /// The two sections share one fetch — the issue list rides along on the PR
+    /// call, see `loadPullRequests()` — so binding both buttons to
+    /// `loadingPullRequests` turned both of them whenever either was pressed,
+    /// which reads as the app refreshing something you didn't ask about. The
+    /// fetch stays shared; the feedback belongs to the button that was
+    /// pressed. Automatic loads set nothing, and the "Loading…" row is what
+    /// speaks for those.
+    @Published private(set) var refreshingForgeSection: ForgeSection?
     /// The "New Pull Request" sheet. Its fields live here, CleanupView-style,
     /// so the sheet survives a sidebar rebuild without losing a draft.
     @Published var showCreatePR = false
@@ -772,6 +845,39 @@ final class RepoState: ObservableObject, Identifiable {
         pendingRefresh?.cancel()
         pendingRefresh = nil
         watcher = nil
+    }
+
+    /// What ⌘R and the toolbar's Refresh do: everything the tab shows, git
+    /// and forge alike. `refresh()` on its own is the git half, and it is
+    /// what the watcher and the auto-fetch call several times a minute — a
+    /// PR list on that schedule would be a rate-limited API call every time
+    /// a file is saved. An explicit Refresh is a different contract: the
+    /// user asked once, and leaving them to hunt for the sidebar's own
+    /// button to catch up a request merged on the web reads as the button
+    /// not having worked.
+    ///
+    /// Concurrent, not sequential: the git reads are subprocesses and the
+    /// forge load is a `gh`/`glab` round trip, so the ~2.5s CLI call
+    /// overlaps the refresh rather than landing after it. Forced past
+    /// `prsFreshFor` for the same reason the Dashboard's Refresh is —
+    /// pressing Refresh and being handed the cache is not a refresh.
+    func refreshAll() async {
+        async let git: Void = refresh()
+        async let forge: Void = refreshForgeIfAvailable()
+        _ = await (git, forge)
+    }
+
+    /// The forge half of `refreshAll()`, and a no-op on a repo with no
+    /// forge — detection has to run first on a tab that hasn't had one yet.
+    private func refreshForgeIfAvailable() async {
+        // Detection loads the list itself the first time it finds a forge,
+        // so a tab pressing Refresh before it has one would otherwise shell
+        // out to `gh` twice in a row. A moved timestamp means that already
+        // happened, and this Refresh has nothing left to ask for.
+        let before = prsLoadedAt
+        await detectForge()
+        guard forge != nil, prsLoadedAt == before else { return }
+        await loadPullRequests()
     }
 
     func refresh(quiet: Bool = false) async {
@@ -1780,8 +1886,16 @@ final class RepoState: ObservableObject, Identifiable {
         guard let forge else { return }
         loadingPullRequests = true
         defer { loadingPullRequests = false }
+        // Both fetches leave together. They were sequential, and measured on
+        // this repo that cost 2.5s for `gh pr list` and then another 1.5s for
+        // `gh issue list` — four seconds of a Dashboard refresh, per repo,
+        // spent waiting on two requests that have nothing to say to each
+        // other. Two `gh` processes rather than one, and the CLI's own actor
+        // suspends at its subprocess await, so they genuinely overlap.
+        async let fetchedPRs = forgeClient.pullRequests(forge)
+        async let fetchedIssues = forgeClient.issues(forge)
         do {
-            pullRequests = try await forgeClient.pullRequests(forge)
+            pullRequests = try await fetchedPRs
             forgeError = nil
         } catch {
             pullRequests = []
@@ -1790,9 +1904,23 @@ final class RepoState: ObservableObject, Identifiable {
         // The issue list rides along on the PR list's schedule and cache.
         // Its own `try?`, not the `do` above: a repo with issues disabled
         // must not read as "can't reach the forge" when the PRs loaded fine.
-        issues = try? await forgeClient.issues(forge)
+        issues = try? await fetchedIssues
         prsLoadedAt = Date()
         scheduleSummarySave()
+    }
+
+    /// Run a `viewIssue`/`viewPullRequest` the way the panel should appear:
+    /// the fade belongs to its *arrival* over the graph and to nothing else.
+    /// With a panel already open, switching to another request only changes
+    /// the panel's identity — animating that crossfades the outgoing panel
+    /// with the incoming one, and for those 120ms both are half transparent
+    /// and the graph flashes through the gap.
+    func openingPanel(_ open: () -> Void) {
+        if issueToView == nil, prToView == nil {
+            withAnimation(.easeOut(duration: 0.12), open)
+        } else {
+            open()
+        }
     }
 
     /// Open the in-app viewer on an issue and start fetching its thread.
@@ -1805,6 +1933,10 @@ final class RepoState: ObservableObject, Identifiable {
         // lower one is not "still open" — it is unreachable.
         closeDiff()
         closeFileHistory()
+        // A request under review goes too, and its fetches with it: the
+        // slot holds one thing, and leaving `prToView` set left the review
+        // drawn on top of the issue the user just asked for.
+        closePullRequestReview()
         issueToView = issue
         issueThread = nil
         issueThreadError = nil
@@ -1813,7 +1945,9 @@ final class RepoState: ObservableObject, Identifiable {
         guard let forge else { return }
         commentsTask = Task {
             do {
-                let thread = try await forgeClient.issueThread(issue, forge: forge)
+                let thread = try await forgeClient.thread(
+                    number: issue.number, kind: .issue, forge: forge
+                )
                 // The user may have moved to another issue while this one's
                 // thread was in flight; its timeline is not that issue's.
                 guard !Task.isCancelled, issueToView?.number == issue.number else { return }
@@ -1828,6 +1962,160 @@ final class RepoState: ObservableObject, Identifiable {
 
     private var commentsTask: Task<Void, Never>?
 
+    // MARK: - Review a pull/merge request
+
+    /// Open the review panel on a request: its page and thread from the
+    /// forge, its diff from git. The listing entry we already have carries
+    /// the number, title and branch, so the panel draws immediately and
+    /// fills in.
+    func viewPullRequest(_ pr: PullRequest) {
+        // One overlay slot in the centre pane — see viewIssue.
+        closeDiff()
+        closeFileHistory()
+        issueToView = nil
+        prToView = pr
+        prTab = .overview
+        prDetail = nil
+        prReviewError = nil
+        prThread = nil
+        prThreadError = nil
+        prThreadTruncated = false
+        prFiles = []
+        prSelectedFile = nil
+        prDiffLines = []
+        prDiffState = .loading
+        prRange = nil
+        prViewedFiles = viewedByRequest[pr.number] ?? []
+        loadPullRequestReview(pr)
+    }
+
+    func closePullRequestReview() {
+        prReviewTask?.cancel()
+        prThreadTask?.cancel()
+        prFileDiffTask?.cancel()
+        prToView = nil
+        prDetail = nil
+        prThread = nil
+        prFiles = []
+        prSelectedFile = nil
+        prDiffLines = []
+        prRange = nil
+    }
+
+    /// Everything the panel shows, fetched again — the header's refresh.
+    func refreshPullRequestReview() {
+        guard let pr = prToView else { return }
+        prReviewError = nil
+        prDiffState = .loading
+        loadPullRequestReview(pr)
+    }
+
+    private func loadPullRequestReview(_ pr: PullRequest) {
+        guard let forge else { return }
+        let number = pr.number
+
+        prThreadTask?.cancel()
+        prThreadTask = Task {
+            do {
+                let thread = try await forgeClient.thread(
+                    number: number, kind: .pullRequest, forge: forge
+                )
+                guard !Task.isCancelled, prToView?.number == number else { return }
+                prThread = thread.items
+                prThreadTruncated = thread.truncated
+            } catch {
+                guard !Task.isCancelled, prToView?.number == number else { return }
+                prThreadError = forgeFailure(error).summary
+            }
+        }
+
+        prReviewTask?.cancel()
+        prReviewTask = Task {
+            // The page first, for the branch the request targets. A failure
+            // here is not the end of the review: the diff falls back to the
+            // repo's default branch, which is what the target almost always
+            // is anyway.
+            do {
+                let detail = try await forgeClient.pullRequestDetail(number, forge: forge)
+                guard !Task.isCancelled, prToView?.number == number else { return }
+                prDetail = detail
+            } catch {
+                guard !Task.isCancelled, prToView?.number == number else { return }
+                prReviewError = forgeFailure(error).summary
+            }
+            guard !Task.isCancelled, prToView?.number == number else { return }
+            await loadReviewDiff(number: number, base: prDetail?.baseBranch ?? "", forge: forge)
+        }
+    }
+
+    /// The request's diff, computed locally: fetch its head ref, then diff
+    /// from the merge base. Local on purpose — the forge's own file list is
+    /// paged, rate-limited and truncated on big requests, and this way the
+    /// diff renders with the same parser, hunks and line numbers as every
+    /// other diff in the app.
+    private func loadReviewDiff(number: Int, base: String, forge: Forge) async {
+        do {
+            let refs = try await git.fetchReviewRefs(
+                number: number, base: base, remote: snapshot.defaultRemote, forge: forge
+            )
+            let range = "\(refs.base)...\(refs.head)"
+            let files = try await git.reviewFiles(range: range)
+            guard !Task.isCancelled, prToView?.number == number else { return }
+            prRange = range
+            prFiles = files
+            prDiffState = .ready
+        } catch {
+            guard !Task.isCancelled, prToView?.number == number else { return }
+            prDiffState = .failed(ErrorNotice.firstLine(error.localizedDescription))
+        }
+    }
+
+    /// Show one file's diff inside the review. Nothing here touches the
+    /// working tree — the diff is read out of the fetched refs, so reviewing
+    /// a request never moves HEAD or needs a clean tree.
+    func selectReviewFile(_ file: ReviewFile) {
+        guard let range = prRange else { return }
+        prSelectedFile = file
+        prDiffLines = []
+        prFileDiffTask?.cancel()
+        let number = prToView?.number
+        prFileDiffTask = Task {
+            do {
+                let text = try await git.reviewFileDiff(range: range, file: file)
+                guard !Task.isCancelled, prToView?.number == number,
+                      prSelectedFile?.path == file.path
+                else { return }
+                prDiffLines = DiffParser.parse(text).lines
+            } catch {
+                guard !Task.isCancelled, prSelectedFile?.path == file.path else { return }
+                report(error)
+            }
+        }
+    }
+
+    /// Tick a file off, GitHub-style. Ticking the one you're reading moves
+    /// you to the next unread file — the whole point of the checkbox is
+    /// working down a long list without hunting for where you were.
+    func toggleReviewFileViewed(_ file: ReviewFile) {
+        if prViewedFiles.contains(file.path) {
+            prViewedFiles.remove(file.path)
+        } else {
+            prViewedFiles.insert(file.path)
+            if prSelectedFile?.path == file.path, let next = nextUnreviewedFile(after: file) {
+                selectReviewFile(next)
+            }
+        }
+        if let number = prToView?.number { viewedByRequest[number] = prViewedFiles }
+    }
+
+    private func nextUnreviewedFile(after file: ReviewFile) -> ReviewFile? {
+        guard let index = prFiles.firstIndex(where: { $0.path == file.path }) else { return nil }
+        // Wrap around: a reviewer who started in the middle of the list
+        // still has the files above them to read.
+        let ordered = prFiles[(index + 1)...] + prFiles[..<index]
+        return ordered.first { !prViewedFiles.contains($0.path) }
+    }
+
     func openIssueInBrowser(_ issue: Issue) {
         guard let forge else { return }
         Task {
@@ -1839,13 +2127,44 @@ final class RepoState: ObservableObject, Identifiable {
         }
     }
 
-    func refreshPullRequests() {
-        Task { await loadPullRequests() }
+    /// `from` is only about which button turns while this runs — the fetch it
+    /// starts is the same either way.
+    func refreshPullRequests(from section: ForgeSection? = nil) {
+        Task {
+            refreshingForgeSection = section
+            await loadPullRequests()
+            refreshingForgeSection = nil
+        }
+    }
+
+    /// True when HEAD already is the request's source branch — where
+    /// checking out has nothing to offer and one thing to cost. Both CLIs
+    /// fetch first and then try to fast-forward the local branch onto the
+    /// request's head, so the button you'd press for nothing can quietly
+    /// move the branch you are standing on, or fail on a dirty tree.
+    ///
+    /// The fetched page's branch name wins over the listing's, which can be
+    /// a fork's spelling of it — but only for the request it belongs to.
+    func isCheckedOut(_ pr: PullRequest) -> Bool {
+        Self.isCheckedOut(pr, detail: prDetail, currentBranch: snapshot.currentBranch)
+    }
+
+    /// The rule itself, over its three inputs — nothing here reads the repo,
+    /// which is what makes it testable without one.
+    nonisolated static func isCheckedOut(
+        _ pr: PullRequest, detail: PullRequestDetail?, currentBranch: String?
+    ) -> Bool {
+        var branch = pr.branch
+        if let detail, detail.number == pr.number, !detail.headBranch.isEmpty {
+            branch = detail.headBranch
+        }
+        guard !branch.isEmpty, let currentBranch else { return false }
+        return currentBranch == branch
     }
 
     /// `gh pr checkout` moves HEAD, so it refreshes like any git mutation.
     func checkoutPullRequest(_ pr: PullRequest) {
-        guard let forge else { return }
+        guard let forge, !isCheckedOut(pr) else { return }
         Task {
             isBusy = true
             do {
@@ -2474,6 +2793,7 @@ final class RepoState: ObservableObject, Identifiable {
     func selectCommitFile(_ file: FileChange) {
         guard let hash = selectedCommit else { return }
         issueToView = nil
+        prToView = nil
         selectedFile = file
         diffCommit = hash
         diffLines = []
@@ -2574,6 +2894,7 @@ final class RepoState: ObservableObject, Identifiable {
         // Clear the slot now, not when the history arrives — the click
         // should visibly take over the pane even while git runs.
         issueToView = nil
+        prToView = nil
         Task {
             do {
                 fileHistory = (path, try await git.fileHistory(path))
@@ -2591,6 +2912,7 @@ final class RepoState: ObservableObject, Identifiable {
     func selectHistoryEntry(_ commit: Commit, path filePath: String) {
         selectedCommit = commit.hash
         issueToView = nil
+        prToView = nil
         selectedFile = FileChange(path: filePath, status: "M", area: .unstaged)
         diffCommit = commit.hash
         diffLines = []
@@ -2612,6 +2934,7 @@ final class RepoState: ObservableObject, Identifiable {
 
     func selectFile(_ file: FileChange) {
         issueToView = nil
+        prToView = nil
         selectedFile = file
         diffCommit = nil
         diffLines = []

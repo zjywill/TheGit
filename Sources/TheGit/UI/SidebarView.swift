@@ -100,7 +100,7 @@ struct SidebarView: View {
             }
             Divider()
             Button("Open Repository…") { appState.openRepoPanel() }
-            Button("Refresh") { Task { await repo.refresh() } }
+            Button("Refresh") { Task { await repo.refreshAll() } }
         }
         .alert(
             repo.branchPrompt?.title ?? "",
@@ -503,7 +503,7 @@ struct SidebarView: View {
                                 // The CLI's own words stay one hover away — the row
                                 // itself is for the sentence you can act on.
                                 .help(error.detail + "\n\nClick to try again.")
-                                .onTapGesture { repo.refreshPullRequests() }
+                                .onTapGesture { repo.refreshPullRequests(from: .pullRequests) }
                             } else if repo.pullRequests.isEmpty {
                                 SidebarRow(icon: nil, hoverable: false) {
                                     Text(repo.loadingPullRequests ? "Loading…" : "No open \(forge.itemNoun.lowercased())s")
@@ -527,7 +527,8 @@ struct SidebarView: View {
                         secondary: .init(
                             icon: "arrow.clockwise",
                             help: "Refresh \(forge.sectionTitle.lowercased())",
-                            run: { repo.refreshPullRequests() }
+                            spinning: repo.refreshingForgeSection == .pullRequests,
+                            run: { repo.refreshPullRequests(from: .pullRequests) }
                         ),
                         collapsed: $prsCollapsed
                     ) { repo.createPullRequest() }
@@ -587,7 +588,8 @@ struct SidebarView: View {
                         secondary: .init(
                             icon: "arrow.clockwise",
                             help: "Refresh issues",
-                            run: { repo.refreshPullRequests() }
+                            spinning: repo.refreshingForgeSection == .issues,
+                            run: { repo.refreshPullRequests(from: .issues) }
                         ),
                         collapsed: $issuesCollapsed
                     )
@@ -929,6 +931,11 @@ struct SectionHeader: View {
     struct Secondary {
         let icon: String
         let help: String
+        /// Work this button started still in flight. Turns the glyph, and
+        /// holds the button on screen while it turns — otherwise the only
+        /// trace of a three-second fetch disappears the moment the pointer
+        /// leaves the header.
+        var spinning = false
         let run: () -> Void
     }
     var secondary: Secondary?
@@ -980,14 +987,19 @@ struct SectionHeader: View {
                 Button(action: secondary.run) {
                     Image(systemName: secondary.icon)
                         .zoomFont(11, weight: .semibold)
+                        .refreshSpin(secondary.spinning)
                         .frame(width: 22, height: 22)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.pressEffect)
                 .foregroundStyle(Color.accentColor)
                 .help(secondary.help)
-                .opacity(hovering ? 1 : 0)
-                .allowsHitTesting(hovering)
+                // Work in flight keeps it up with the pointer gone: a turning
+                // glyph is the only thing on this strip that says the list is
+                // being fetched. Visible means clickable — a button you can
+                // see and can't press is worse than one that isn't there.
+                .opacity(hovering || secondary.spinning ? 1 : 0)
+                .allowsHitTesting(hovering || secondary.spinning)
             }
             // Count and + button share one centered slot, so the swap on
             // hover never shifts anything.
@@ -1414,7 +1426,6 @@ struct PullRequestRow: View {
     let pr: PullRequest
     let forge: Forge
     @ObservedObject var repo: RepoState
-    @ObservedObject private var agents = AgentTools.shared
 
     var body: some View {
         SidebarRow(
@@ -1450,35 +1461,39 @@ struct PullRequestRow: View {
             }
         }
         .opacity(pr.isDraft ? 0.75 : 1)
-        .help("\(forge.label(pr.number)) \(pr.title)\n\(pr.branch)\n\nDouble-click to open in the browser.")
+        .help("\(forge.label(pr.number)) \(pr.title)\n\(pr.branch)\n\nClick to review it here, double-click for the browser.")
         .contextTarget("pr:\(pr.number)", repo, corner: SidebarMetrics.corner)
         .contextMenu {
+            // Same transaction-owned fade as the row's click, below.
+            Button("Review \(forge.label(pr.number))") {
+                repo.openingPanel { repo.viewPullRequest(pr) }
+            }
             Button("Open in Browser") { repo.openPullRequestInBrowser(pr) }
             Button("Checkout \(forge.label(pr.number))") { repo.checkoutPullRequest(pr) }
-            if !agents.available.isEmpty {
-                Divider()
-                // Under the two things you'd do yourself, above the copies:
-                // handing the whole thing to an agent is a bigger move than
-                // reading it, and it belongs next to the reading.
-                Menu("Hand Off") {
-                    HandoffMenu(tasks: HandoffTask.forPullRequests) { task, agent in
-                        repo.handOff(task, to: agent, pullRequest: pr)
-                    }
-                }
-            }
+                // Already standing on it: see RepoState.isCheckedOut.
+                .disabled(repo.isCheckedOut(pr))
             Divider()
             Button("Copy URL") { RepoState.copyToPasteboard(pr.url) }
             Button("Copy branch name") { RepoState.copyToPasteboard(pr.branch) }
             Divider()
-            Button("Refresh") { repo.refreshPullRequests() }
+            Button("Refresh") { repo.refreshPullRequests(from: .pullRequests) }
         }
-        // Opening the page is what you almost always want from this row,
-        // and it changes nothing locally. Checkout moves HEAD, so it stays
-        // an explicit choice in the menu.
+        // The browser stays a double-click away; checkout moves HEAD, so it
+        // stays an explicit choice in the menu.
         .onTapGesture(count: 2) { repo.openPullRequestInBrowser(pr) }
-        // Single click locates the PR's branch tip, like clicking a branch.
+        // A single click reviews it in-app — reading the change is what this
+        // row is for now. The graph underneath still jumps to the branch tip
+        // when we've fetched it, so closing the panel leaves you at the work
+        // rather than wherever you were before.
         .onTapGesture {
             if let tip = remoteTip { repo.locate(tip) }
+            // The panel's fade-in lives here, not on its transition in
+            // RepoView: opening one is the only moment it should play.
+            // Attached to the transition it also played on a repo switch,
+            // where the panel is merely revealed, and the graph flashed
+            // through it on the way up. `openingPanel` is what decides
+            // whether this click is that moment — see RepoState.
+            repo.openingPanel { repo.viewPullRequest(pr) }
         }
     }
 
@@ -1494,7 +1509,6 @@ struct IssueRow: View {
     let issue: Issue
     let forge: Forge
     @ObservedObject var repo: RepoState
-    @ObservedObject private var agents = AgentTools.shared
 
     var body: some View {
         SidebarRow(
@@ -1532,22 +1546,18 @@ struct IssueRow: View {
         // issue has no branch tip to locate, so reading it IS the primary
         // action — nothing about the graph changes underneath.
         .onTapGesture(count: 2) { repo.openIssueInBrowser(issue) }
-        .onTapGesture { repo.viewIssue(issue) }
+        // The fade belongs to this transaction, not to the panel's
+        // transition — see the PR row above.
+        .onTapGesture { repo.openingPanel { repo.viewIssue(issue) } }
         .contextMenu {
-            Button("View Issue") { repo.viewIssue(issue) }
-            Button("Open in Browser") { repo.openIssueInBrowser(issue) }
-            if !agents.available.isEmpty {
-                Divider()
-                Menu("Hand Off") {
-                    HandoffMenu(tasks: HandoffTask.forIssues) { task, agent in
-                        repo.handOff(task, to: agent, issue: issue)
-                    }
-                }
+            Button("View Issue") {
+                repo.openingPanel { repo.viewIssue(issue) }
             }
+            Button("Open in Browser") { repo.openIssueInBrowser(issue) }
             Divider()
             Button("Copy URL") { RepoState.copyToPasteboard(issue.url) }
             Divider()
-            Button("Refresh") { repo.refreshPullRequests() }
+            Button("Refresh") { repo.refreshPullRequests(from: .issues) }
         }
     }
 }

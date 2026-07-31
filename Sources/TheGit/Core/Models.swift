@@ -127,6 +127,37 @@ struct FileChange: Identifiable, Hashable, Codable {
     }
 }
 
+/// One file in a review's diff: a whole branch's worth of change to it,
+/// not one commit's. Separate from `FileChange` because a review needs what
+/// a working-tree row doesn't — the line counts, and the path the file used
+/// to have, without which a renamed file's diff can't be asked for.
+struct ReviewFile: Identifiable, Hashable {
+    let path: String
+    /// The pre-rename path, when git detected a rename or copy.
+    var oldPath: String? = nil
+    /// git's own letter: A M D R C T.
+    let status: Character
+    var additions = 0
+    var deletions = 0
+    /// git reports "-" for both counts of a binary file — no line counts to
+    /// show, and nothing a diff view can render either.
+    var isBinary = false
+
+    var id: String { path }
+    var fileName: String { (path as NSString).lastPathComponent }
+    var directory: String {
+        let dir = (path as NSString).deletingLastPathComponent
+        return dir.isEmpty ? "" : dir + "/"
+    }
+
+    /// What `git diff -- …` has to be given: a rename's diff lives under
+    /// both names, and asking for only the new one shows an empty file.
+    var diffPaths: [String] {
+        if let oldPath, oldPath != path { return [oldPath, path] }
+        return [path]
+    }
+}
+
 /// A multi-step git operation that is paused mid-flight (usually on conflicts).
 enum OngoingOperation: String, Codable {
     case merge = "Merge"

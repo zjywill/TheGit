@@ -321,4 +321,149 @@ final class ForgeParsersTests: XCTestCase {
         XCTAssertTrue(failure.alertText.contains(failure.summary))
         XCTAssertTrue(failure.alertText.contains(failure.detail))
     }
+
+    // MARK: - One request's own page
+
+    /// Verbatim shape of `gh pr view N --json …` as the review panel asks
+    /// for it, mixed check kinds included.
+    func testParseGitHubPullRequestDetail() throws {
+        let json = """
+        {"additions":42,"author":{"login":"offbyone"},"baseRefName":"main",\
+        "body":"Adds a flag.\\n\\n- one\\n- two","createdAt":"2026-07-27T06:11:28Z",\
+        "headRefName":"o1/add-flags","isDraft":false,\
+        "latestReviews":[{"author":{"login":"tao"},"state":"APPROVED",\
+        "submittedAt":"2026-07-28T01:02:03Z"},\
+        {"author":{"login":"bot"},"state":"PENDING","submittedAt":null},\
+        {"author":{"login":"kim"},"state":"CHANGES_REQUESTED","submittedAt":null}],\
+        "mergeable":"CONFLICTING","number":13969,"reviewDecision":"CHANGES_REQUESTED",\
+        "state":"OPEN","statusCheckRollup":[\
+        {"__typename":"CheckRun","conclusion":"SUCCESS","name":"build","status":"COMPLETED"},\
+        {"__typename":"CheckRun","conclusion":"SKIPPED","name":"docs","status":"COMPLETED"},\
+        {"__typename":"CheckRun","conclusion":"FAILURE","name":"test","status":"COMPLETED"},\
+        {"__typename":"CheckRun","conclusion":"","name":"deploy","status":"IN_PROGRESS"},\
+        {"__typename":"StatusContext","context":"ci/legacy","state":"SUCCESS"}],\
+        "title":"Add --latest-pre-release","url":"https://github.com/cli/cli/pull/13969"}
+        """
+        let detail = try ForgeParsers.pullRequestDetail(json, forge: .github)
+        XCTAssertEqual(detail.number, 13969)
+        XCTAssertEqual(detail.title, "Add --latest-pre-release")
+        XCTAssertEqual(detail.author, "offbyone")
+        XCTAssertEqual(detail.baseBranch, "main")
+        XCTAssertEqual(detail.headBranch, "o1/add-flags")
+        XCTAssertEqual(detail.state, .open)
+        XCTAssertFalse(detail.isDraft)
+        XCTAssertEqual(detail.reviewDecision, .changesRequested)
+        XCTAssertEqual(detail.hasConflicts, true)
+        XCTAssertNotNil(detail.createdAt)
+        XCTAssertTrue(detail.body.contains("Adds a flag."))
+        // PENDING is a review still being written — not a verdict.
+        XCTAssertEqual(detail.reviews.count, 2)
+        XCTAssertEqual(detail.reviews.first?.author, "tao")
+        XCTAssertEqual(detail.reviews.first?.verdict, .approved)
+        XCTAssertEqual(detail.reviews.last?.verdict, .changesRequested)
+        // SUCCESS + SKIPPED + a legacy status context pass; one fails; the
+        // one still running is pending, not green.
+        XCTAssertEqual(detail.checks?.passed, 3)
+        XCTAssertEqual(detail.checks?.failed, 1)
+        XCTAssertEqual(detail.checks?.pending, 1)
+    }
+
+    /// A merged request with a clean rollup, and MERGEABLE meaning no
+    /// conflicts — the other half of the state mapping.
+    func testParseGitHubMergedPullRequest() throws {
+        let json = """
+        {"number":30,"title":"Cache the wall","body":"","author":{"login":"tao"},\
+        "baseRefName":"main","headRefName":"feature/cache","state":"MERGED",\
+        "isDraft":false,"reviewDecision":"APPROVED","mergeable":"MERGEABLE",\
+        "latestReviews":[],"statusCheckRollup":[],"createdAt":"2026-07-20T00:00:00Z",\
+        "url":"https://github.com/zjywill/TheGit/pull/30"}
+        """
+        let detail = try ForgeParsers.pullRequestDetail(json, forge: .github)
+        XCTAssertEqual(detail.state, .merged)
+        XCTAssertEqual(detail.reviewDecision, .approved)
+        XCTAssertEqual(detail.hasConflicts, false)
+        // An empty rollup is no CI at all, not a passing one.
+        XCTAssertNil(detail.checks)
+        XCTAssertTrue(detail.reviews.isEmpty)
+    }
+
+    /// UNKNOWN mergeability and an absent decision must both stay nil — the
+    /// panel shows no chip rather than a reassuring one.
+    func testGitHubUnknownSignalsStayNil() throws {
+        let json = """
+        {"number":7,"title":"WIP","body":null,"author":null,"baseRefName":"main",\
+        "headRefName":"wip","state":"OPEN","isDraft":true,"reviewDecision":"",\
+        "mergeable":"UNKNOWN","latestReviews":null,"statusCheckRollup":null,\
+        "createdAt":null,"url":""}
+        """
+        let detail = try ForgeParsers.pullRequestDetail(json, forge: .github)
+        XCTAssertTrue(detail.isDraft)
+        XCTAssertNil(detail.reviewDecision)
+        XCTAssertNil(detail.hasConflicts)
+        XCTAssertNil(detail.checks)
+        XCTAssertEqual(detail.author, "")
+        XCTAssertEqual(detail.body, "")
+    }
+
+    /// `glab mr view N --output json` — REST casing, and the pipeline under
+    /// either of the two names glab has used for it.
+    func testParseGitLabMergeRequestDetail() throws {
+        let json = """
+        {"iid":42,"id":9001,"title":"Draft: Fix crash","description":"Because.",\
+        "author":{"username":"tao"},"source_branch":"feature/x","target_branch":"main",\
+        "state":"opened","draft":true,"has_conflicts":false,\
+        "head_pipeline":{"status":"failed"},"created_at":"2026-07-27T06:11:28.123Z",\
+        "web_url":"https://gitlab.com/g/a/-/merge_requests/42"}
+        """
+        let detail = try ForgeParsers.pullRequestDetail(json, forge: .gitlab)
+        XCTAssertEqual(detail.number, 42)
+        XCTAssertEqual(detail.baseBranch, "main")
+        XCTAssertEqual(detail.headBranch, "feature/x")
+        XCTAssertEqual(detail.state, .open)
+        XCTAssertTrue(detail.isDraft)
+        XCTAssertEqual(detail.hasConflicts, false)
+        XCTAssertEqual(detail.checks?.failed, 1)
+        XCTAssertNotNil(detail.createdAt)
+        // GitLab keeps approvals in a resource of their own — no decision
+        // may be invented from the MR object.
+        XCTAssertNil(detail.reviewDecision)
+        XCTAssertTrue(detail.reviews.isEmpty)
+    }
+
+    /// The older glab spellings: `pipeline` instead of `head_pipeline`,
+    /// `work_in_progress` instead of `draft`, and no iid.
+    func testParseGitLabMergeRequestOlderSpellings() throws {
+        let json = """
+        {"id":77,"title":"WIP: thing","state":"merged","work_in_progress":true,\
+        "pipeline":{"status":"success"},"target_branch":"trunk","source_branch":"thing"}
+        """
+        let detail = try ForgeParsers.pullRequestDetail(json, forge: .gitlab)
+        XCTAssertEqual(detail.number, 77)
+        XCTAssertEqual(detail.state, .merged)
+        XCTAssertTrue(detail.isDraft)
+        XCTAssertEqual(detail.checks?.passed, 1)
+        XCTAssertNil(detail.hasConflicts)
+    }
+
+    /// A cancelled or skipped pipeline is no signal: counting it as passed
+    /// would draw a green tick for CI that never ran.
+    func testGitLabSkippedPipelineIsNoSignal() throws {
+        for status in ["canceled", "skipped"] {
+            let json = """
+            {"iid":1,"title":"t","state":"opened","pipeline":{"status":"\(status)"}}
+            """
+            XCTAssertNil(try ForgeParsers.pullRequestDetail(json, forge: .gitlab).checks)
+        }
+    }
+
+    /// No JSON at all is a failure, not an empty page — the panel must say
+    /// so rather than render a blank request.
+    func testPullRequestDetailRejectsNonJSON() {
+        XCTAssertThrowsError(try ForgeParsers.pullRequestDetail("not found", forge: .github))
+        XCTAssertThrowsError(try ForgeParsers.pullRequestDetail("", forge: .gitlab))
+        // Valid JSON without a number is equally unusable.
+        XCTAssertThrowsError(
+            try ForgeParsers.pullRequestDetail(#"{"title":"t"}"#, forge: .gitlab)
+        )
+    }
 }

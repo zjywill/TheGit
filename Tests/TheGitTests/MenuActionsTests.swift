@@ -178,4 +178,62 @@ final class MenuActionsTests: XCTestCase {
         XCTAssertEqual(infos.map(\.label), ["origin/codex/builtin-browser", "upstream/codex/builtin-browser"])
         XCTAssertEqual(infos.map(\.hasLocal), [false, false])
     }
+
+    // MARK: - Checking out a pull request you're already on
+
+    private func pullRequest(_ number: Int, branch: String) -> PullRequest {
+        PullRequest(
+            number: number, title: "t", branch: branch,
+            author: "a", isDraft: false, url: ""
+        )
+    }
+
+    /// The one case worth blocking: HEAD already is the request's source
+    /// branch, so a checkout has nothing to offer and can still fast-forward
+    /// the branch under you.
+    func testCheckoutIsOffWhenAlreadyOnTheRequestsBranch() {
+        XCTAssertTrue(RepoState.isCheckedOut(
+            pullRequest(372, branch: "dev"), detail: nil, currentBranch: "dev"
+        ))
+        XCTAssertFalse(RepoState.isCheckedOut(
+            pullRequest(372, branch: "release"), detail: nil, currentBranch: "dev"
+        ))
+    }
+
+    /// A detached HEAD is on no branch, and a request whose branch the CLI
+    /// didn't report is unknowable — neither may read as "already there".
+    func testCheckoutStaysOnWithoutABranchToCompare() {
+        XCTAssertFalse(RepoState.isCheckedOut(
+            pullRequest(1, branch: "dev"), detail: nil, currentBranch: nil
+        ))
+        XCTAssertFalse(RepoState.isCheckedOut(
+            pullRequest(1, branch: ""), detail: nil, currentBranch: "dev"
+        ))
+    }
+
+    /// The fetched page's branch name wins over the listing's — but only for
+    /// the request it belongs to. Another request's page must not decide
+    /// this row's answer.
+    func testCheckoutPrefersTheFetchedPagesBranchForItsOwnRequest() {
+        let page = PullRequestDetail(
+            number: 372, title: "t", body: "", author: "a",
+            baseBranch: "release", headBranch: "fork-side",
+            state: .open, isDraft: false
+        )
+        // The listing said "dev", the page says "fork-side" — and HEAD is
+        // the latter.
+        XCTAssertTrue(RepoState.isCheckedOut(
+            pullRequest(372, branch: "dev"), detail: page, currentBranch: "fork-side"
+        ))
+        // Same branch names, different request: the page doesn't apply.
+        XCTAssertFalse(RepoState.isCheckedOut(
+            pullRequest(999, branch: "dev"), detail: page, currentBranch: "fork-side"
+        ))
+        // An empty branch on the page falls back to the listing's.
+        var blank = page
+        blank.headBranch = ""
+        XCTAssertTrue(RepoState.isCheckedOut(
+            pullRequest(372, branch: "dev"), detail: blank, currentBranch: "dev"
+        ))
+    }
 }

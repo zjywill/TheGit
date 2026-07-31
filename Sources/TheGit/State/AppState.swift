@@ -172,11 +172,23 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// A Dashboard refresh in flight, so the button that started it can say
+    /// so. This is the slowest thing on the screen — N repos of git, then a
+    /// year of history, then N CLI calls over the network — and without this
+    /// the whole pass was silent while the cards changed under the pointer
+    /// one at a time.
+    @Published private(set) var refreshingDashboard = false
+
     /// The Dashboard's Refresh: every card straight from git, in the order
     /// they're read in. Sequential for the same reason the first load is —
     /// one wall of cards must not fire twenty subprocesses at once.
     func refreshDashboard() {
+        // ⌘R held down must not stack a second pass on top of the first: the
+        // whole point of the sequencing above is one subprocess at a time.
+        guard !refreshingDashboard else { return }
+        refreshingDashboard = true
         Task {
+            defer { refreshingDashboard = false }
             for repo in repos { await repo.loadCard(force: true) }
             // After the cards, not with them: the cards are what the user is
             // looking at, and the grid is a year of history that hasn't
@@ -185,9 +197,40 @@ final class AppState: ObservableObject {
             // Last, because it's the only network in the pass — and forced,
             // because "did that PR land yet" is a reason this button gets
             // pressed.
-            for repo in repos { await repo.loadCardPullRequests(force: true) }
+            //
+            // Also the only phase worth overlapping. The two git phases above
+            // measure 0.05s and 0.02s per repo and stay sequential, because
+            // the reason they are is a subprocess storm. This one is 2.5s of
+            // waiting on a network per repo, spends almost no CPU doing it,
+            // and each repo owns its own `ForgeClient` actor — so N repos in
+            // series was N round trips of dead time. Bounded rather than
+            // unbounded for the original reason: a wall of forty repos must
+            // still not launch forty `gh` processes at once. Same number of
+            // requests either way, and GitHub's limit is per hour, so
+            // overlapping them costs no quota.
+            await withTaskGroup(of: Void.self) { group in
+                var pending = repos[...]
+                var running = 0
+                while running < Self.forgeFanOut, let repo = pending.popFirst() {
+                    group.addTask { await repo.loadCardPullRequests(force: true) }
+                    running += 1
+                }
+                while running > 0 {
+                    _ = await group.next()
+                    running -= 1
+                    if let repo = pending.popFirst() {
+                        group.addTask { await repo.loadCardPullRequests(force: true) }
+                        running += 1
+                    }
+                }
+            }
         }
     }
+
+    /// How many repos may be waiting on their forge at once. Each one runs two
+    /// `gh` processes now that the PR and issue fetches leave together, so this
+    /// is half the real process ceiling.
+    private static let forgeFanOut = 4
 
     /// Commits per day across every open repository — the Dashboard's
     /// heatmap, which is the one thing on that screen no single card can
@@ -549,14 +592,26 @@ final class AppState: ObservableObject {
         return rest > 0 ? head + " · \(rest) already listed" : head + "."
     }
 
+    /// A catalogue re-read the user asked for, as opposed to the several that
+    /// happen on their own. Only the asked-for ones spin the button: this runs
+    /// on every visit to the screen and on every app activation, and a control
+    /// nobody touched turning itself is noise, not feedback.
+    @Published private(set) var refreshingCatalog = false
+
     /// Re-read the `.git` of every catalogued folder and regroup. Off the main
     /// actor because it's two file reads per entry and the list can be long; no
     /// subprocesses either way — see `RepoCatalog`.
-    func refreshCatalog() {
+    func refreshCatalog(userInitiated: Bool = false) {
         let entries = catalogEntries
+        if userInitiated { refreshingCatalog = true }
         Task.detached(priority: .utility) {
             let grouped = RepoCatalog.group(entries)
-            await MainActor.run { self.catalog = grouped }
+            await MainActor.run {
+                self.catalog = grouped
+                // Unconditional: an automatic pass that overlapped a manual
+                // one must still clear it, or the button spins forever.
+                self.refreshingCatalog = false
+            }
         }
     }
 
