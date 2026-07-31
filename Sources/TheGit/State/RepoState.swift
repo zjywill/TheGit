@@ -160,7 +160,16 @@ final class RepoState: ObservableObject, Identifiable {
     /// The way in for a thrown failure: `GitError` knows which command it
     /// was, and the toast can only use that if it isn't already glued to the
     /// front of the message.
+    ///
+    /// A cancellation is not a failure — it is us calling something off, and
+    /// the user never asked for it and can do nothing about it. The quiet
+    /// refresh cancels the one before it on every burst of `.git` writes
+    /// (fetching a review's refs is such a burst), and the cancelled one's
+    /// git commands come back with `CancellationError` — which used to land
+    /// as "The operation couldn't be completed. (Swift.CancellationError
+    /// error 1.)" across the panel the user was reading.
     func report(_ error: Error) {
+        guard !(error is CancellationError) else { return }
         errorNotice = ErrorNotice(error)
     }
 
@@ -1898,6 +1907,20 @@ final class RepoState: ObservableObject, Identifiable {
         issues = try? await fetchedIssues
         prsLoadedAt = Date()
         scheduleSummarySave()
+    }
+
+    /// Run a `viewIssue`/`viewPullRequest` the way the panel should appear:
+    /// the fade belongs to its *arrival* over the graph and to nothing else.
+    /// With a panel already open, switching to another request only changes
+    /// the panel's identity — animating that crossfades the outgoing panel
+    /// with the incoming one, and for those 120ms both are half transparent
+    /// and the graph flashes through the gap.
+    func openingPanel(_ open: () -> Void) {
+        if issueToView == nil, prToView == nil {
+            withAnimation(.easeOut(duration: 0.12), open)
+        } else {
+            open()
+        }
     }
 
     /// Open the in-app viewer on an issue and start fetching its thread.

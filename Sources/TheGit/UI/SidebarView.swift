@@ -1466,7 +1466,7 @@ struct PullRequestRow: View {
         .contextMenu {
             // Same transaction-owned fade as the row's click, below.
             Button("Review \(forge.label(pr.number))") {
-                withAnimation(.easeOut(duration: 0.12)) { repo.viewPullRequest(pr) }
+                repo.openingPanel { repo.viewPullRequest(pr) }
             }
             Button("Open in Browser") { repo.openPullRequestInBrowser(pr) }
             Button("Checkout \(forge.label(pr.number))") { repo.checkoutPullRequest(pr) }
@@ -1491,8 +1491,9 @@ struct PullRequestRow: View {
             // RepoView: opening one is the only moment it should play.
             // Attached to the transition it also played on a repo switch,
             // where the panel is merely revealed, and the graph flashed
-            // through it on the way up.
-            withAnimation(.easeOut(duration: 0.12)) { repo.viewPullRequest(pr) }
+            // through it on the way up. `openingPanel` is what decides
+            // whether this click is that moment — see RepoState.
+            repo.openingPanel { repo.viewPullRequest(pr) }
         }
     }
 
@@ -1547,10 +1548,10 @@ struct IssueRow: View {
         .onTapGesture(count: 2) { repo.openIssueInBrowser(issue) }
         // The fade belongs to this transaction, not to the panel's
         // transition — see the PR row above.
-        .onTapGesture { withAnimation(.easeOut(duration: 0.12)) { repo.viewIssue(issue) } }
+        .onTapGesture { repo.openingPanel { repo.viewIssue(issue) } }
         .contextMenu {
             Button("View Issue") {
-                withAnimation(.easeOut(duration: 0.12)) { repo.viewIssue(issue) }
+                repo.openingPanel { repo.viewIssue(issue) }
             }
             Button("Open in Browser") { repo.openIssueInBrowser(issue) }
             Divider()
