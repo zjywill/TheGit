@@ -1249,6 +1249,44 @@ final class RepoIntegrationTests: XCTestCase {
         )
     }
 
+    // MARK: - Activity
+
+    /// Reviewing a pull request parks somebody else's commits under
+    /// `refs/thegit/**` and leaves them there. `git log --all` walks those
+    /// refs, so the heatmap counted every request ever opened as this
+    /// repo's own work — permanently, since nothing prunes the refs.
+    func testActivityIgnoresFetchedReviewRefs() async throws {
+        let path = try await makeRepo("activity-review-refs")
+        let git = GitClient(repoPath: path)
+        let before = try await git.activity()
+
+        // What a review fetch leaves behind, without the network: a commit
+        // on no branch, reachable only through the review namespace.
+        try await self.git(path, ["checkout", "-q", "-b", "throwaway"])
+        try write("theirs\n", to: path + "/theirs.txt")
+        try await self.git(path, ["add", "-A"])
+        try await self.git(path, ["commit", "-qm", "someone else's work"])
+        let head = try await self.git(path, ["rev-parse", "HEAD"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        try await self.git(path, ["checkout", "-q", "main"])
+        try await self.git(path, ["update-ref", "refs/thegit/pr/7", head])
+        try await self.git(path, ["branch", "-qD", "throwaway"])
+
+        let after = try await git.activity()
+        XCTAssertEqual(after, before, "a fetched review must not move the heatmap")
+
+        // And the guard is specific: an ordinary branch still counts.
+        try await self.git(path, ["checkout", "-q", "-b", "mine"])
+        try write("mine\n", to: path + "/mine.txt")
+        try await self.git(path, ["add", "-A"])
+        try await self.git(path, ["commit", "-qm", "my work"])
+        let withOwnWork = try await git.activity()
+        XCTAssertEqual(
+            withOwnWork.values.reduce(0, +), before.values.reduce(0, +) + 1,
+            "the repo's own commits are still counted"
+        )
+    }
+
     /// A rescan hands back fresh structs, so the ticks are kept by id — and
     /// dropped for rows the rescan no longer finds.
     func testSelectionSurvivesARescanAndDropsVanishedRows() async throws {

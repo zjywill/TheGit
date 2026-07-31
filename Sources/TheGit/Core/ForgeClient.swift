@@ -12,6 +12,93 @@ struct PullRequest: Identifiable, Hashable, Codable {
     var id: Int { number }
 }
 
+/// The pull/merge request as its own page, for the review panel: what the
+/// listing doesn't carry. Deliberately without line counts or a file list —
+/// those come from the local diff, which both forges' CLIs report
+/// differently (or not at all) and which we can compute exactly.
+struct PullRequestDetail: Hashable {
+    let number: Int
+    var title: String
+    var body: String
+    var author: String
+    /// The branch it merges into, and the branch it merges from.
+    var baseBranch: String
+    var headBranch: String
+    var state: PullRequestState
+    var isDraft: Bool
+    /// One entry per reviewer, latest verdict only — the header's chips.
+    var reviews: [PullRequestReview] = []
+    /// Nil when the forge doesn't tell us (GitLab's MR view has no
+    /// equivalent field), which reads as "no decision", not "approved".
+    var reviewDecision: ReviewDecision? = nil
+    var checks: CheckRollup? = nil
+    /// Nil when the forge didn't say; false does not mean conflicted.
+    var hasConflicts: Bool? = nil
+    var createdAt: Date? = nil
+    var url: String = ""
+}
+
+enum PullRequestState: Hashable {
+    case open
+    case merged
+    case closed
+
+    /// GitHub says OPEN/MERGED/CLOSED, GitLab opened/merged/closed/locked.
+    init(cli: String?) {
+        switch cli?.lowercased() {
+        case "merged": self = .merged
+        case "closed": self = .closed
+        default: self = .open
+        }
+    }
+}
+
+/// Where the forge's own gate stands. `reviewRequired` is GitHub's way of
+/// saying "nobody has approved yet" on a repo that asks for approvals.
+enum ReviewDecision: Hashable {
+    case approved
+    case changesRequested
+    case reviewRequired
+}
+
+/// One reviewer's latest verdict.
+struct PullRequestReview: Identifiable, Hashable {
+    enum Verdict: Hashable {
+        case approved
+        case changesRequested
+        case commented
+    }
+
+    let id: String
+    let author: String
+    let verdict: Verdict
+    var submittedAt: Date? = nil
+}
+
+/// CI as a count, not a list: the panel says "3 passed · 1 failing" and
+/// leaves the log to the browser. GitLab reports one pipeline status, which
+/// lands here as a single count.
+struct CheckRollup: Hashable {
+    var passed = 0
+    var failed = 0
+    var pending = 0
+
+    var total: Int { passed + failed + pending }
+    var isEmpty: Bool { total == 0 }
+}
+
+/// Which forge resource a thread hangs off. GitHub's timeline endpoint
+/// serves pull requests under `issues/` — same numbering space, same shape.
+/// GitLab keeps merge requests in a resource of their own.
+enum ForgeItemKind {
+    case issue
+    case pullRequest
+
+    /// The GitLab path segment; GitHub always uses `issues`.
+    var gitlabSegment: String { self == .issue ? "issues" : "merge_requests" }
+    var noun: String { self == .issue ? "issue" : "pull request" }
+}
+
 /// An open issue, as the CLI reports it. The body comes with the list —
 /// one fetch, and the viewer opens with everything but the thread.
 struct Issue: Identifiable, Hashable, Codable {
@@ -250,6 +337,165 @@ enum ForgeParsers {
         }
     }
 
+    /// One pull/merge request's own page. Unlike the listing this is a
+    /// single object, and every field but the number degrades to a default:
+    /// the panel is worth showing with a missing CI rollup, and both CLIs
+    /// have renamed fields across versions.
+    static func pullRequestDetail(_ output: String, forge: Forge) throws -> PullRequestDetail {
+        guard let start = output.firstIndex(where: { $0 == "{" }),
+              let data = output[start...].data(using: .utf8)
+        else {
+            throw ShellError(
+                command: forge.binary,
+                message: "The \(forge.itemNoun.lowercased()) came back empty."
+            )
+        }
+        do {
+            switch forge {
+            case .github:
+                let raw = try JSONDecoder().decode(GHPullRequestDetail.self, from: data)
+                return PullRequestDetail(
+                    number: raw.number,
+                    title: raw.title ?? "",
+                    body: raw.body ?? "",
+                    author: raw.author?.login ?? "",
+                    baseBranch: raw.baseRefName ?? "",
+                    headBranch: raw.headRefName ?? "",
+                    state: PullRequestState(cli: raw.state),
+                    isDraft: raw.isDraft ?? false,
+                    reviews: (raw.latestReviews ?? []).compactMap { review in
+                        guard let verdict = githubVerdict(review.state) else { return nil }
+                        let author = review.author?.login ?? ""
+                        return PullRequestReview(
+                            // Reviews carry no id in this view; one verdict
+                            // per reviewer makes the login unique enough.
+                            id: author.isEmpty ? UUID().uuidString : author,
+                            author: author,
+                            verdict: verdict,
+                            submittedAt: date(review.submittedAt)
+                        )
+                    },
+                    reviewDecision: githubDecision(raw.reviewDecision),
+                    checks: githubChecks(raw.statusCheckRollup),
+                    // UNKNOWN is genuinely unknown — the forge is still
+                    // computing it — and must not read as "clean".
+                    hasConflicts: raw.mergeable.flatMap {
+                        switch $0.uppercased() {
+                        case "CONFLICTING": return true
+                        case "MERGEABLE": return false
+                        default: return nil
+                        }
+                    },
+                    createdAt: date(raw.createdAt),
+                    url: raw.url ?? ""
+                )
+            case .gitlab:
+                let raw = try JSONDecoder().decode(GLMergeRequestDetail.self, from: data)
+                guard let number = raw.iid ?? raw.id else {
+                    throw ShellError(
+                        command: forge.binary,
+                        message: "The merge request came back without a number."
+                    )
+                }
+                return PullRequestDetail(
+                    number: number,
+                    title: raw.title ?? "",
+                    body: raw.description ?? "",
+                    author: raw.author?.username ?? "",
+                    baseBranch: raw.targetBranch ?? "",
+                    headBranch: raw.sourceBranch ?? "",
+                    state: PullRequestState(cli: raw.state),
+                    isDraft: raw.draft ?? raw.workInProgress ?? false,
+                    // Approvals are a resource of their own on GitLab; the
+                    // panel shows no decision rather than a guessed one.
+                    reviews: [],
+                    reviewDecision: nil,
+                    checks: gitlabChecks(raw.headPipeline?.status ?? raw.pipeline?.status),
+                    hasConflicts: raw.hasConflicts,
+                    createdAt: date(raw.createdAt),
+                    url: raw.webURL ?? ""
+                )
+            }
+        } catch let error as ShellError {
+            throw error
+        } catch {
+            throw ShellError(
+                command: forge.binary,
+                message: "Could not read the \(forge.itemNoun.lowercased()): \(error)"
+            )
+        }
+    }
+
+    private static func githubDecision(_ raw: String?) -> ReviewDecision? {
+        switch raw?.uppercased() {
+        case "APPROVED": return .approved
+        case "CHANGES_REQUESTED": return .changesRequested
+        case "REVIEW_REQUIRED": return .reviewRequired
+        default: return nil
+        }
+    }
+
+    /// Only the three verdicts a reviewer can leave. PENDING is a review
+    /// still being written and DISMISSED one that no longer counts —
+    /// neither belongs on a row of faces saying where the review stands.
+    private static func githubVerdict(_ raw: String?) -> PullRequestReview.Verdict? {
+        switch raw?.uppercased() {
+        case "APPROVED": return .approved
+        case "CHANGES_REQUESTED": return .changesRequested
+        case "COMMENTED": return .commented
+        default: return nil
+        }
+    }
+
+    /// `statusCheckRollup` mixes two shapes: check runs (status + conclusion)
+    /// and old-style status contexts (state). Unknown spellings count as
+    /// pending — a check we can't classify is one we shouldn't call green.
+    private static func githubChecks(_ entries: [GHCheckEntry]?) -> CheckRollup? {
+        guard let entries, !entries.isEmpty else { return nil }
+        var rollup = CheckRollup()
+        for entry in entries {
+            if let conclusion = entry.conclusion?.uppercased(), !conclusion.isEmpty {
+                switch conclusion {
+                case "SUCCESS", "NEUTRAL", "SKIPPED":
+                    rollup.passed += 1
+                case "FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE":
+                    rollup.failed += 1
+                default:
+                    rollup.pending += 1
+                }
+                continue
+            }
+            switch entry.state?.uppercased() {
+            case "SUCCESS":
+                rollup.passed += 1
+            case "FAILURE", "ERROR":
+                rollup.failed += 1
+            default:
+                rollup.pending += 1
+            }
+        }
+        return rollup
+    }
+
+    /// GitLab's one pipeline status, as a rollup of one. A skipped or
+    /// cancelled pipeline counts as nothing at all: the panel would
+    /// otherwise report a green tick for a pipeline that never ran.
+    private static func gitlabChecks(_ status: String?) -> CheckRollup? {
+        guard let status = status?.lowercased() else { return nil }
+        var rollup = CheckRollup()
+        switch status {
+        case "success", "passed":
+            rollup.passed = 1
+        case "failed":
+            rollup.failed = 1
+        case "running", "pending", "created", "waiting_for_resource", "preparing", "manual", "scheduled":
+            rollup.pending = 1
+        default:
+            return nil
+        }
+        return rollup
+    }
+
     static func issues(_ output: String, forge: Forge) throws -> [Issue] {
         // Same bracket-hunting as `pullRequests`, same reason.
         guard let start = output.firstIndex(where: { $0 == "[" || $0 == "{" }),
@@ -307,7 +553,7 @@ enum ForgeParsers {
         } catch {
             throw ShellError(
                 command: Forge.github.binary,
-                message: "Could not read the issue's timeline: \(error)"
+                message: "Could not read the discussion timeline: \(error)"
             )
         }
         var items: [IssueTimelineItem] = []
@@ -394,7 +640,7 @@ enum ForgeParsers {
             } catch {
                 throw ShellError(
                     command: Forge.gitlab.binary,
-                    message: "Could not read the issue's notes: \(error)"
+                    message: "Could not read the discussion notes: \(error)"
                 )
             }
             items += decoded.map { note -> IssueTimelineItem in
@@ -519,6 +765,77 @@ private struct GLMergeRequest: Decodable {
         case iid, id, title, author, draft
         case sourceBranch = "source_branch"
         case workInProgress = "work_in_progress"
+        case webURL = "web_url"
+    }
+}
+
+/// Verbatim shape of `gh pr view N --json …` (see
+/// `ForgeClient.pullRequestDetail` for the field list). Everything but the
+/// number is optional: `--json` omits nothing, but a gh old enough to not
+/// know a field errors on the request, not on the response — and a future
+/// one may rename what it sends.
+private struct GHPullRequestDetail: Decodable {
+    struct Author: Decodable { let login: String? }
+    struct Review: Decodable {
+        let author: Author?
+        let state: String?
+        let submittedAt: String?
+    }
+    let number: Int
+    let title: String?
+    let body: String?
+    let author: Author?
+    let baseRefName: String?
+    let headRefName: String?
+    let state: String?
+    let isDraft: Bool?
+    let reviewDecision: String?
+    let mergeable: String?
+    let latestReviews: [Review]?
+    let statusCheckRollup: [GHCheckEntry]?
+    let createdAt: String?
+    let url: String?
+}
+
+/// One entry of `statusCheckRollup`: a check run carries status +
+/// conclusion, a commit status carries state. Both shapes decode here and
+/// the classifier picks whichever is present.
+private struct GHCheckEntry: Decodable {
+    let status: String?
+    let conclusion: String?
+    let state: String?
+}
+
+/// `glab mr view N --output json` — GitLab's REST merge request. Same
+/// optionality rule as `GLMergeRequest`, plus the pipeline, which lives
+/// under either name depending on the glab version.
+private struct GLMergeRequestDetail: Decodable {
+    struct Author: Decodable { let username: String? }
+    struct Pipeline: Decodable { let status: String? }
+    let iid: Int?
+    let id: Int?
+    let title: String?
+    let description: String?
+    let author: Author?
+    let sourceBranch: String?
+    let targetBranch: String?
+    let state: String?
+    let draft: Bool?
+    let workInProgress: Bool?
+    let hasConflicts: Bool?
+    let pipeline: Pipeline?
+    let headPipeline: Pipeline?
+    let createdAt: String?
+    let webURL: String?
+
+    enum CodingKeys: String, CodingKey {
+        case iid, id, title, description, author, state, draft, pipeline
+        case sourceBranch = "source_branch"
+        case targetBranch = "target_branch"
+        case workInProgress = "work_in_progress"
+        case hasConflicts = "has_conflicts"
+        case headPipeline = "head_pipeline"
+        case createdAt = "created_at"
         case webURL = "web_url"
     }
 }
@@ -706,14 +1023,35 @@ actor ForgeClient {
     private static let threadPageSize = 100
     private static let threadPageCap = 5
 
-    /// The timeline under one issue: comments and events, in order,
-    /// paged until a page comes back short. Both forges answer through
+    /// One pull/merge request's own page, for the review panel.
+    func pullRequestDetail(_ number: Int, forge: Forge) async throws -> PullRequestDetail {
+        let args: [String]
+        switch forge {
+        case .github:
+            args = [
+                "pr", "view", String(number),
+                "--json", "number,title,body,author,baseRefName,headRefName,state,"
+                    + "isDraft,reviewDecision,mergeable,latestReviews,statusCheckRollup,"
+                    + "createdAt,url",
+            ]
+        case .gitlab:
+            args = ["mr", "view", String(number), "--output", "json"]
+        }
+        return try ForgeParsers.pullRequestDetail(try await run(forge, args), forge: forge)
+    }
+
+    /// The timeline under one issue or pull request: comments and events, in
+    /// order, paged until a page comes back short. Both forges answer through
     /// their CLI's `api` passthrough — `{owner}` / `{repo}` are gh's own
     /// placeholders and `:id` is glab's, each resolved by its CLI from
     /// the working directory, so hosts and tokens stay the CLI's problem
     /// like everywhere else here.
-    func issueThread(
-        _ issue: Issue, forge: Forge
+    ///
+    /// GitHub serves both kinds from `issues/N/timeline` — pull requests are
+    /// issues there, with the same numbering space — so only GitLab needs to
+    /// be told which resource to ask for.
+    func thread(
+        number: Int, kind: ForgeItemKind, forge: Forge
     ) async throws -> (items: [IssueTimelineItem], truncated: Bool) {
         switch forge {
         case .github:
@@ -721,7 +1059,7 @@ actor ForgeClient {
             for page in 1...Self.threadPageCap {
                 let output = try await run(forge, [
                     "api",
-                    "repos/{owner}/{repo}/issues/\(issue.number)/timeline"
+                    "repos/{owner}/{repo}/issues/\(number)/timeline"
                         + "?per_page=\(Self.threadPageSize)&page=\(page)",
                 ])
                 items += try ForgeParsers.githubTimeline(output)
@@ -739,7 +1077,7 @@ actor ForgeClient {
             for page in 1...Self.threadPageCap {
                 let output = try await run(forge, [
                     "api",
-                    "projects/:id/issues/\(issue.number)/notes"
+                    "projects/:id/\(kind.gitlabSegment)/\(number)/notes"
                         + "?sort=asc&per_page=\(Self.threadPageSize)&page=\(page)",
                 ])
                 notePages.append(output)
@@ -752,7 +1090,7 @@ actor ForgeClient {
             // worth completing.
             let labelEvents = (try? await run(forge, [
                 "api",
-                "projects/:id/issues/\(issue.number)/resource_label_events"
+                "projects/:id/\(kind.gitlabSegment)/\(number)/resource_label_events"
                     + "?per_page=\(Self.threadPageSize)",
             ])) ?? "[]"
             let items = try ForgeParsers.gitlabThread(
