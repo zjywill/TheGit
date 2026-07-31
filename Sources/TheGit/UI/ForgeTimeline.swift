@@ -217,7 +217,9 @@ struct AuthorBubble: View {
     private var color: Color {
         var hash = 5381
         for byte in author.utf8 { hash = (hash &* 33) &+ Int(byte) }
-        return Self.palette[abs(hash) % Self.palette.count]
+        // magnitude, not abs: the hash wraps on purpose, and abs(Int.min)
+        // traps rather than returning anything.
+        return Self.palette[Int(hash.magnitude % UInt(Self.palette.count))]
     }
 
     var body: some View {

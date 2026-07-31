@@ -158,7 +158,13 @@ enum GitParsers {
             guard parts.count >= 3 else { index += 1; continue }
             let adds = String(parts[0])
             let dels = String(parts[1])
-            var path = String(parts[2])
+            // Everything after the second tab, rejoined: only the two
+            // counts are fields here — the rest of the record is one path,
+            // and `-z` guarantees it holds no NUL, not that it holds no
+            // tab. Taking parts[2] alone truncated `ta<tab>b.txt` to `ta`,
+            // whose diff can't be asked for and whose real path then came
+            // back a second time out of the name-status pass below.
+            var path = parts[2...].joined(separator: "\t")
             var oldPath: String?
             if path.isEmpty {
                 // Rename or copy: the two paths follow as their own records.

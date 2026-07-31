@@ -114,6 +114,23 @@ final class ReviewDiffTests: XCTestCase {
         XCTAssertEqual(files[0].additions, 1)
     }
 
+    /// A tab in a path. `-z` promises no NULs, not no tabs, so only the two
+    /// counts may be split off — the rest of the record is the path,
+    /// verbatim. (Fixture from a real `git diff` over a file named
+    /// "ta<tab>b.txt".) Splitting on every tab used to truncate it to "ta",
+    /// whose diff can't be fetched, and the real path then arrived a second
+    /// time out of the name-status pass.
+    func testPathContainingTab() {
+        let files = GitParsers.reviewFiles(
+            numstat: "1\t0\tta\tb.txt\u{0}",
+            nameStatus: "A\u{0}ta\tb.txt\u{0}"
+        )
+        XCTAssertEqual(files.count, 1)
+        XCTAssertEqual(files[0].path, "ta\tb.txt")
+        XCTAssertEqual(files[0].status, "A")
+        XCTAssertEqual(files[0].additions, 1)
+    }
+
     /// Where the local ref for a review lives — under refs/thegit, which the
     /// graph doesn't walk, so a fetched request draws no badges and adds no
     /// rows.
