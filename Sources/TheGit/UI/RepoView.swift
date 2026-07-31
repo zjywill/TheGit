@@ -354,12 +354,12 @@ struct RepoToolbar: ToolbarContent {
             .help("Review merged and abandoned branches and worktrees")
 
             Button {
-                Task { await repo.refresh() }
+                Task { await repo.refreshAll() }
             } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }
             .keyboardShortcut("r")
-            .help("Refresh (⌘R)")
+            .help("Refresh everything, including pull requests and issues (⌘R)")
         }
 
         ToolbarItem {

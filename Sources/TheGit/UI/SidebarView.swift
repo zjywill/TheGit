@@ -100,7 +100,7 @@ struct SidebarView: View {
             }
             Divider()
             Button("Open Repository…") { appState.openRepoPanel() }
-            Button("Refresh") { Task { await repo.refresh() } }
+            Button("Refresh") { Task { await repo.refreshAll() } }
         }
         .alert(
             repo.branchPrompt?.title ?? "",

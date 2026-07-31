@@ -838,6 +838,39 @@ final class RepoState: ObservableObject, Identifiable {
         watcher = nil
     }
 
+    /// What ⌘R and the toolbar's Refresh do: everything the tab shows, git
+    /// and forge alike. `refresh()` on its own is the git half, and it is
+    /// what the watcher and the auto-fetch call several times a minute — a
+    /// PR list on that schedule would be a rate-limited API call every time
+    /// a file is saved. An explicit Refresh is a different contract: the
+    /// user asked once, and leaving them to hunt for the sidebar's own
+    /// button to catch up a request merged on the web reads as the button
+    /// not having worked.
+    ///
+    /// Concurrent, not sequential: the git reads are subprocesses and the
+    /// forge load is a `gh`/`glab` round trip, so the ~2.5s CLI call
+    /// overlaps the refresh rather than landing after it. Forced past
+    /// `prsFreshFor` for the same reason the Dashboard's Refresh is —
+    /// pressing Refresh and being handed the cache is not a refresh.
+    func refreshAll() async {
+        async let git: Void = refresh()
+        async let forge: Void = refreshForgeIfAvailable()
+        _ = await (git, forge)
+    }
+
+    /// The forge half of `refreshAll()`, and a no-op on a repo with no
+    /// forge — detection has to run first on a tab that hasn't had one yet.
+    private func refreshForgeIfAvailable() async {
+        // Detection loads the list itself the first time it finds a forge,
+        // so a tab pressing Refresh before it has one would otherwise shell
+        // out to `gh` twice in a row. A moved timestamp means that already
+        // happened, and this Refresh has nothing left to ask for.
+        let before = prsLoadedAt
+        await detectForge()
+        guard forge != nil, prsLoadedAt == before else { return }
+        await loadPullRequests()
+    }
+
     func refresh(quiet: Bool = false) async {
         if !quiet { isBusy = true }
         defer { if !quiet { isBusy = false } }
