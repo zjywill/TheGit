@@ -93,7 +93,11 @@ actor GitClient {
     /// it in this Mac's timezone, which is the timezone the grid is built in.
     func activity(weeks: Int = ActivityDay.windowWeeks) async throws -> [Int: Int] {
         let out = try await run([
-            "log", "--all", "--since=\(weeks) weeks ago",
+            // Everything but the review refs: `--all` includes them, and a
+            // fetched pull request is somebody else's work parked in this
+            // repo — counting it would leave a permanent bump in the
+            // heatmap for every request ever opened.
+            "log", "--exclude=refs/thegit/*", "--all", "--since=\(weeks) weeks ago",
             "--date=short-local", "--pretty=%ad",
         ])
         var counts: [Int: Int] = [:]
