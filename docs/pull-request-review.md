@@ -1,35 +1,30 @@
-# Reviewing pull and merge requests
+# Review Pull Request / Merge Request
 
-The plan is four phases. **P1 — the read-only review panel — is done**; this
-file records what it ships, where its data actually lives, and what P2–P4
-still have to do.
+整个方案分四期。**P1 —— 只读的 review 面板 —— 已完成**；这份文件记录它交付了什么、
+数据实际存在哪里、以及 P2–P4 还欠着什么。
 
-Written in English to match the rest of the repo, and kept next to the code
-rather than in an issue because the decisions below are the kind that get
-silently re-litigated six months later.
+放在代码旁边而不是开一个 issue，是因为下面这些决定属于「半年后会被人不声不响地推翻重来」
+的那一类。
 
 ---
 
-## P1 — what ships
+## P1 —— 已交付的部分
 
-Clicking a row in the sidebar's Pull Requests / Merge Requests section opens
-a review panel over the graph, in the centre pane's single overlay slot
-(same slot as a file diff, the file history and the issue viewer). It has
-two tabs:
+点击侧边栏 Pull Requests / Merge Requests 里的一行，会在工作区打开 review 面板，
+盖住 graph 和右边的 commit 面板（详见下面「代码依赖的不变量」）。面板有两个页签：
 
-- **Overview** — title, state pill, `base ← head`, review decision, CI
-  rollup, conflict flag, total ±, the description, and the forge's timeline.
-- **Files (N)** — every file the request touches, with per-file ± counts and
-  a viewed tick, beside that file's diff.
+- **Overview** —— 标题、状态 pill、`base ← head`、review decision、CI 汇总、
+  冲突标记、总 ±、描述正文，以及 forge 的 timeline。
+- **Files (N)** —— 请求改动的每个文件，带各自的 ± 行数和「已读」勾选，右边是该文件的
+  diff。
 
-Nothing in it writes to the forge. `Checkout` is the only button that
-touches the local repo, and it is disabled when HEAD already is the
-request's source branch.
+面板不向 forge 写任何东西。`Checkout` 是唯一会动本地仓库的按钮，并且在 HEAD 已经
+是该请求的源分支时禁用。
 
-### The one decision worth not re-opening: the diff is local
+### 唯一一个不该被重开的决定：diff 走本地 git
 
-The file list and every file diff come from `git`, not from the forge's API:
-fetch the request's head ref, then diff from the merge base.
+文件列表和每个文件的 diff 都来自 `git`，不来自 forge 的 API：先 fetch 请求自己的
+head ref，再从 merge base 做 diff。
 
 ```
 git fetch --force <remote> +refs/pull/<n>/head:refs/thegit/pr/<n>          # GitHub
@@ -39,188 +34,160 @@ git diff --name-status --find-renames -z <base>...<head>
 git diff -U3 --find-renames <base>...<head> -- <path> [<newpath>]
 ```
 
-Why: no rate limit, no paging, no truncation on a big request, works
-offline once fetched, and the diff renders through the same `DiffParser` /
-`DiffLineRow` as every other diff in the app — line numbers, hunks and
-binary detection all come for free.
+理由：没有限流、不分页、大请求不会被截断、fetch 过一次之后离线可看，而且渲染走的是
+app 里其他 diff 用的同一套 `DiffParser` / `DiffLineRow` —— 行号、hunk、二进制识别
+全部白拿。
 
-`refs/pull/N/head` and `refs/merge-requests/N/head` exist on the remote
-whatever repo the branch lives in, so a fork's request works the same as an
-in-repo one.
+`refs/pull/N/head` 和 `refs/merge-requests/N/head` 无论分支在哪个仓库都存在于远端，
+所以 fork 发来的请求和仓库内的请求走同一条路。
 
-Three dots, not two: `base...head` diffs from the merge base, so commits
-that landed on the base meanwhile don't show up as this request's work —
-the same asymmetry the AI PR description already uses.
+**三个点，不是两个**：`base...head` 从 merge base 开始 diff，因此期间落到 base 上的
+提交不会被算成这个请求的改动 —— 和 AI 生成 PR 描述时用的是同一个不对称写法。
 
-**The refs namespace is deliberate.** `refs/thegit/pr|mr/<n>` is invisible
-to the graph, which walks `--branches --remotes --tags HEAD` — a fetched
-request adds no rows and draws no ref badges. Verified against a real
-fetch. (`GitClient.activity`, the heatmap, does use `--all` and will count
-a fetched request's commits. Known, listed under gaps.)
+**refs 的命名空间是刻意的。** `refs/thegit/pr|mr/<n>` 对 graph 不可见 —— graph 走的是
+`--branches --remotes --tags HEAD`，所以 fetch 下来的请求既不加行也不画 ref 徽章。
+已用真实 fetch 验证过。（热力图 `GitClient.activity` 用的是 `--all`，会把这些提交算进
+活跃度，见下面的已知问题。）
 
-### Where the data lives, and how long
+### 数据存在哪、活多久
 
-| What | Where | Lifetime |
+| 数据 | 位置 | 寿命 |
 |---|---|---|
-| The request listing (number, title, branch, author, draft) | `RepoState.pullRequests`, persisted by `RepoCache` | Across relaunches, refetched past `prsFreshFor` |
-| The request's page (state, decision, CI, conflicts, body) | `RepoState.prDetail`, memory | While the panel is open on it |
-| The timeline | `RepoState.prThread`, memory | Same |
-| The fetched head ref | `refs/thegit/pr|mr/<n>`, on disk | Forever, until pruned by hand |
-| The file list + per-file ± | `RepoState.prFiles`, memory | While the panel is open |
-| The open file's diff lines | `RepoState.prDiffLines`, memory | Until another file is picked |
-| Viewed ticks | `RepoState.viewedByRequest`, memory | **Session only** — lost on quit, and never sent to the forge |
-| The `base...head` range | `RepoState.prRange`, memory | While the panel is open |
+| 请求列表（号、标题、分支、作者、draft） | `RepoState.pullRequests`，由 `RepoCache` 持久化 | 跨重启，超过 `prsFreshFor` 重取 |
+| 请求页面（状态、decision、CI、冲突、正文） | `RepoState.prDetail`，内存 | 面板开在它上面期间 |
+| timeline | `RepoState.prThread`，内存 | 同上 |
+| fetch 下来的 head ref | `refs/thegit/pr|mr/<n>`，磁盘 | 永久，除非手动清理 |
+| 文件列表 + 各文件 ± | `RepoState.prFiles`，内存 | 面板开着期间 |
+| 当前文件的 diff 行 | `RepoState.prDiffLines`，内存 | 直到切换到别的文件 |
+| 「已读」勾选 | `RepoState.viewedByRequest`，内存 | **仅本次会话** —— 退出即失，也从不发给 forge |
+| `base...head` 区间 | `RepoState.prRange`，内存 | 面板开着期间 |
 
-So: reopening a request after a relaunch is fast (the ref is already local)
-but starts with an empty page, an empty timeline and no ticks.
+也就是说：重启之后再打开同一个请求很快（ref 已经在本地），但页面、timeline 和勾选都是
+空的，要重新取。
 
-### Invariants the code relies on
+### 代码依赖的不变量
 
-- **One reading pane at a time.** Opening a review clears the diff, the file
-  history and the issue viewer; every one of those clears `prToView` in
-  turn. Two stacked doesn't mean both are open — the lower one is
-  unreachable.
-- **The reading pane is drawn over the panes, not swapped in for them.** A
-  review covers the graph *and* the commit panel (nothing in a review has
-  anything to do with staging), but the panes stay in the view tree
-  underneath. Taking them out would reset the graph's scroll position, cost
-  a subtree rebuild on every close, and bring the commit panel back at the
-  width the app launched with. The reasoning is spelled out on
-  `RepoView.workArea` — the file to read before "simplifying" this into an
-  `if/else`.
-- **A missing signal is not a good one.** `mergeable: "UNKNOWN"`,
-  `reviewDecision: ""`, an empty `statusCheckRollup`, a `canceled` GitLab
-  pipeline — all become `nil`, and a `nil` draws no chip. Nothing in the
-  header may imply "green" from an absence.
-- **Every task guards on `prToView?.number`.** The panel can be switched
-  while a fetch is in flight; another request's page is not this one's.
-- **Reviewing never moves HEAD or needs a clean tree.** The diff is read out
-  of fetched refs.
+- **同一时刻只有一个阅读面板。** 打开 review 会清掉 diff、file history 和 issue 面板；
+  它们每一个也都会反过来清掉 `prToView`。两个叠在一起不等于两个都开着 —— 下面那个是
+  够不到的。
+- **阅读面板是画在两栏之上，不是把两栏换掉。** review 会盖住 graph **和** commit
+  面板（review 跟暂存没有任何关系），但两栏仍留在视图树里。把它们摘掉的代价是：graph
+  的滚动位置归零、每次关闭都要重建子树、commit 面板的宽度退回到 app 启动时的值。完整
+  推理写在 `RepoView.workArea` 上 —— 想把这里「简化」成 `if/else` 之前先读那段。
+- **信号缺失不等于信号良好。** `mergeable: "UNKNOWN"`、空的 `reviewDecision`、空的
+  `statusCheckRollup`、GitLab 里 `canceled` 的流水线 —— 全部变成 `nil`，而 `nil` 不画
+  任何 chip。header 里任何东西都不得从「没有」推出「绿灯」。
+- **每个 task 都按 `prToView?.number` 把门。** 请求可能在 fetch 途中被切换，别人的页面
+  不是这一个的。
+- **review 永不移动 HEAD，也不要求工作区干净。** diff 是从 fetch 下来的 ref 里读的。
 
-### Where the code is
+### 代码在哪
 
-| Concern | Location |
+| 关注点 | 位置 |
 |---|---|
-| `PullRequestDetail`, `CheckRollup`, `ReviewDecision`, `ForgeItemKind` | `Core/ForgeClient.swift` |
-| `gh pr view` / `glab mr view` parsing | `ForgeParsers.pullRequestDetail` |
-| Timeline shared by issues and requests | `ForgeClient.thread(number:kind:forge:)` |
+| `PullRequestDetail`、`CheckRollup`、`ReviewDecision`、`ForgeItemKind` | `Core/ForgeClient.swift` |
+| `gh pr view` / `glab mr view` 的解析 | `ForgeParsers.pullRequestDetail` |
+| issue 与请求共用的 timeline | `ForgeClient.thread(number:kind:forge:)` |
 | `ReviewFile` | `Core/Models.swift` |
-| `-z` numstat + name-status parsing | `GitParsers.reviewFiles` |
-| Fetch, range, per-file diff | `GitClient.fetchReviewRefs` / `reviewFiles` / `reviewFileDiff` |
-| Panel state and actions | `RepoState`, "Review a pull/merge request" section |
-| The panel | `UI/PullRequestDetailView.swift` |
-| Timeline rendering (shared with the issue viewer) | `UI/ForgeTimeline.swift` |
-| Tests | `ForgeParsersTests`, `ReviewDiffTests`, `MenuActionsTests` |
+| `-z` numstat + name-status 解析 | `GitParsers.reviewFiles` |
+| fetch、区间、单文件 diff | `GitClient.fetchReviewRefs` / `reviewFiles` / `reviewFileDiff` |
+| 面板状态与动作 | `RepoState` 的 "Review a pull/merge request" 一节 |
+| 面板本身 | `UI/PullRequestDetailView.swift` |
+| timeline 渲染（与 issue 面板共用） | `UI/ForgeTimeline.swift` |
+| 测试 | `ForgeParsersTests`、`ReviewDiffTests`、`MenuActionsTests` |
 
-### Known gaps left by P1
+### P1 留下的已知问题
 
-Small, deliberate, and each one is a real hole rather than a rough edge:
+都不大，也都是有意为之，但每一条都是真的洞，不是毛刺：
 
-1. **The timeline skips PR-specific events.** `ForgeParsers.githubTimeline`
-   renders the kinds it knows; `reviewed`, `line-commented`, `committed`,
-   `head_ref_force_pushed`, `ready_for_review` and `review_requested` are
-   all skipped. So a reviewer's verdict text and every inline comment are
-   currently invisible in the Overview tab. This is the biggest hole in
-   P1 and the first thing P2 should close.
-2. **Viewed ticks don't survive a relaunch** and don't sync either way with
-   the forge's own viewed state (GitHub `markFileAsViewed`, GitLab's
-   per-file review state).
-3. **Review refs accumulate.** Nothing prunes `refs/thegit/**`. A repo where
-   many requests have been reviewed keeps them all.
-4. **The heatmap counts them.** `GitClient.activity` walks `--all`, so a
-   fetched request's commits land in the activity grid.
-5. **GitLab has no review decision.** Approvals are a separate resource
-   (`/merge_requests/:iid/approvals`), unfetched — so the header shows no
-   decision chip on GitLab at all.
-6. **The thread is capped** at 5 pages × 100 entries, and says so.
-7. **No refresh on window focus.** The panel refetches only when its
-   refresh button is pressed, unlike the rest of the app.
-8. **No keyboard navigation** between files in the Files tab.
+1. **timeline 跳过了 PR 专属事件。** `ForgeParsers.githubTimeline` 只渲染它认识的类型；
+   `reviewed`、`line-commented`、`committed`、`head_ref_force_pushed`、
+   `ready_for_review`、`review_requested` 全部被跳过。也就是说**评审人的结论正文和所有
+   行内评论，目前在 Overview 页里是看不见的**。这是 P1 最大的洞，也是 P2 应该最先补的。
+2. **「已读」勾选不跨重启**，也不与 forge 自己的已读状态双向同步（GitHub 的
+   `markFileAsViewed`、GitLab 的 per-file review 状态）。
+3. **review ref 只增不减。** 没有任何东西清理 `refs/thegit/**`，review 过很多请求的仓库
+   会把它们全留着。
+4. **热力图会把它们算进去。** `GitClient.activity` 走 `--all`，fetch 下来的请求提交会
+   落进活跃度格子。
+5. **GitLab 没有 review decision。** 审批是独立资源（`/merge_requests/:iid/approvals`），
+   目前没取 —— 所以 GitLab 上 header 根本不显示 decision chip。
+6. **thread 有上限**：5 页 × 100 条，到顶会明说。
+7. **窗口重新获得焦点时不刷新。** 面板只在按下自己的刷新按钮时重取，与 app 其他部分的
+   行为不一致。
+8. **Files 页不支持键盘切换文件。**
 
 ---
 
-## P2 — being able to act
+## P2 —— 能够表态
 
-The line P2 crosses is that it writes to the forge. Everything below is a
-side effect somebody else sees, which is why none of it is in P1.
+P2 跨过的那条线是：它会向 forge 写。下面每一件事都是别人看得见的副作用，这正是它们不在
+P1 里的原因。
 
-### Verdicts
+### 表态
 
 ```
 gh pr review <n> --approve | --request-changes | --comment --body <text>
-glab mr approve <n>                    # approval
-glab mr note <n> --message <text>      # a plain comment
+glab mr approve <n>                    # 审批
+glab mr note <n> --message <text>      # 普通评论
 ```
 
-- GitLab splits what GitHub joins: approval and comment are separate
-  commands, and approval can fail on permissions (`403`) in a way a comment
-  won't. Route both through `ForgeFailure.describe` so the message says
-  which.
-- Approving is not reversible in a way a user would recognise: `gh pr review`
-  has no undo, while GitLab does (`glab mr revoke`, aliased `unapprove`).
-  Confirm before sending either way.
+- GitLab 把 GitHub 合在一起的两件事拆开了：审批和评论是两条命令，而且审批会因为权限
+  失败（`403`），评论不会。两者都走 `ForgeFailure.describe`，让错误话说清是哪一种。
+- 审批在用户认知里是不可逆的：`gh pr review` 没有撤销，GitLab 则有
+  （`glab mr revoke`，别名 `unapprove`）。两边都要先确认再发。
 
-### Inline comments
+### 行内评论
 
 ```
 gh api repos/{owner}/{repo}/pulls/<n>/comments -f path=… -F line=… -f commit_id=… -f body=…
 glab api projects/:id/merge_requests/<n>/discussions -f position[new_path]=… …
 ```
 
-The hazard is line identity: a comment is anchored to a `commit_id` + path +
-line, and a force-push after the panel fetched invalidates it. Bind every
-draft to the head sha the diff was computed from, and refuse to post (with
-a "the branch moved, refetch" message) when the request's head has changed
-since.
+风险在于「行的身份」：评论锚定在 `commit_id` + path + 行号上，面板 fetch 之后的一次
+force-push 就会让它失效。每条草稿都必须绑定计算 diff 时的那个 head sha，当请求的 head
+变化后拒绝提交，并提示「分支已变动，请重新拉取」。
 
-GitLab's `position` object needs `base_sha`, `head_sha` and `start_sha` —
-all three, and all from the MR's own diff refs, not from our local range.
+GitLab 的 `position` 对象需要 `base_sha`、`head_sha`、`start_sha` 三个都给全，而且必须
+来自 MR 自己的 diff refs，不能用我们本地算出来的区间。
 
-### Merging
+### 合并
 
 ```
 gh pr merge <n> --squash | --merge | --rebase [--delete-branch]
 glab mr merge <n> [--squash] [--remove-source-branch]
 ```
 
-Irreversible and visible to everyone. Needs a confirmation naming the
-strategy and whether the branch is deleted, and should refuse outright when
-`hasConflicts == true` or checks are failing (with an override, not a
-silent one).
+不可逆，且所有人可见。需要一个明确写出合并策略、以及是否删除分支的确认；当
+`hasConflicts == true` 或检查未通过时应当直接拒绝（可以提供覆盖选项，但不能默默放行）。
 
-### Also in P2
+### P2 还包括
 
-- **Close the timeline gap** — parse `reviewed` and `line-commented` events
-  so a review's body and its inline comments read as part of the
-  conversation, and show inline comments on the diff lines they belong to.
-- **Fetch GitLab approvals** so the decision chip works there too.
-- **Persist viewed ticks** in `RepoCache` (local only — syncing them to the
-  forge is a write, and belongs with the rest of P2's writes).
-- **Prune `refs/thegit/**`** — either on cleanup, or when a request leaves
-  the open list.
-- **Refresh a request's head** and warn when it moved under an open review.
+- **补上 timeline 的洞** —— 解析 `reviewed` 和 `line-commented` 事件，让评审结论正文和
+  行内评论成为对话的一部分，并把行内评论显示在它们所属的 diff 行上。
+- **取 GitLab 的审批**，让 decision chip 在那边也能工作。
+- **「已读」勾选存进 `RepoCache`**（仅本地 —— 同步到 forge 属于写操作，跟 P2 其余的写
+  一起做）。
+- **清理 `refs/thegit/**`** —— 或者在 cleanup 时做，或者在请求离开列表时做。
+- **刷新请求的 head**，并在它于打开的 review 之下发生变化时给出提示。
 
 ---
 
-## P3 — AI-assisted review
+## P3 —— AI 辅助 review
 
-Reuses what the commit-message and PR-description generators already use:
-`AIClient.stream`, `AISettings`, and a prompt module beside
-`PullRequestGenerator`.
+复用 commit message 和 PR 描述生成器已经在用的那一套：`AIClient.stream`、`AISettings`，
+外加一个与 `PullRequestGenerator` 并列的 prompt 模块。
 
-- Input: the request's diff (through `CommitMessageGenerator.summarize`'s
-  budget logic, which already handles big diffs) plus the description.
-- Output: structured findings — `file`, `line`, severity, comment.
-- Findings land as **draft comments the user accepts, edits or discards one
-  by one**. Nothing is ever posted automatically. This is the line that
-  decides whether the feature can be trusted at all.
-- Drafts persist in `RepoCache`, bound to the head sha (see the line
-  identity hazard above).
+- 输入：请求的 diff（经过 `CommitMessageGenerator.summarize` 的预算逻辑，它已经能处理
+  大 diff）加上描述正文。
+- 输出：结构化的 findings —— `file`、`line`、严重度、意见。
+- findings 落成**草稿评论，由用户逐条接受、编辑或丢弃**。永远不自动发布。这条线决定了
+  这个功能到底能不能被信任。
+- 草稿存进 `RepoCache`，并绑定 head sha（见上面行的身份那段）。
 
-## P4 — review without a forge
+## P4 —— 没有 forge 也能 review
 
-The same panel and the same AI pass over any two refs (`feature` vs `main`),
-with the verdict buttons absent. Works with no `gh`/`glab` installed and on
-a self-hosted git with no forge at all. Most of the machinery already
-allows it: `GitClient.reviewFiles` / `reviewFileDiff` take a range, not a
-request number — only the fetch step and the panel's header assume a forge.
+同一个面板、同一套 AI 流程，作用在任意两个 ref 上（`feature` vs `main`），只是没有表态
+按钮。不装 `gh`/`glab` 也能用，自建的、根本没有 forge 的 git 也能用。地基其实大半已经
+在了：`GitClient.reviewFiles` / `reviewFileDiff` 接受的是一个区间而不是请求号 —— 只有
+fetch 那一步和面板的 header 假设了 forge 的存在。
