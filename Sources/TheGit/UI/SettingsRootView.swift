@@ -1,10 +1,19 @@
 import SwiftUI
 
-/// The Settings window's shell: a hand-rolled sidebar on the left, one
-/// pane on the right. Hand-rolled because the obvious `List` selection
-/// sidebar is table-backed and banned app-wide (macOS 26 reentrant-layout
-/// crash — see the zoom notes in TheGitApp); same ScrollView-and-stacks
-/// recipe as the repo sidebar.
+/// The Settings window's shell: a sidebar on the left, one pane on the
+/// right.
+///
+/// The sidebar is a system `List(selection:)`, which is a deliberate
+/// exception to the app-wide ban on table-backed views (macOS 26
+/// reentrant-layout crash — see the zoom notes in TheGitApp). The ban still
+/// holds everywhere it was written for: the repo sidebar and the graph put
+/// thousands of rows through a zoom change. This list is four static rows,
+/// and it was re-verified on macOS 26.5 — 1,500 zoom flips with selection
+/// and window-resize churn on top, driven inline rather than deferred, with
+/// no assert. What the system list buys back is exactly what this window
+/// kept getting wrong by hand: the macOS 26 selection material (which
+/// blends with the glass capsule instead of painting over it), arrow-key
+/// navigation, a focus ring, and real list semantics for VoiceOver.
 enum SettingsPane: String, CaseIterable, Identifiable {
     case appearance
     case ai
@@ -82,28 +91,37 @@ struct SettingsRootView: View {
         .background(SettingsWindowChrome())
     }
 
+    /// Never nil, though the list's binding is: clicking the empty space
+    /// under the rows asks for "nothing selected", and a Settings window with
+    /// no pane showing is a blank right half. Refusing the deselect keeps a
+    /// pane on screen without giving up the system list.
+    private var selection: Binding<SettingsPane?> {
+        Binding(get: { pane }, set: { if let new = $0 { pane = new } })
+    }
+
     private var sidebar: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 2) {
-                ForEach(groups, id: \.name) { group in
-                    Text(group.name.uppercased())
+        List(selection: selection) {
+            ForEach(groups, id: \.name) { group in
+                Section {
+                    ForEach(group.panes) { item in
+                        PaneRow(pane: item)
+                            .tag(item)
+                    }
+                } header: {
+                    Text(group.name)
                         .zoomFont(10, weight: .semibold)
                         .tracking(0.5)
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 10 * zoom)
-                        .padding(.top, group.name == groups.first?.name ? 0 : 14 * zoom)
-                        .padding(.bottom, 2 * zoom)
-                        .accessibilityAddTraits(.isHeader)
-                    ForEach(group.panes) { item in
-                        PaneButton(pane: item, selected: item == pane) {
-                            pane = item
-                        }
-                    }
                 }
             }
-            .padding(10 * zoom)
-            // Below the traffic lights, which now sit on this capsule.
-            .padding(.top, Self.titleBarHeight - Self.capsuleInset)
+        }
+        .listStyle(.sidebar)
+        // The capsule's glass is behind the list; the list's own backdrop
+        // would sit between the two and flatten it.
+        .scrollContentBackground(.hidden)
+        // Room for the traffic lights, which now sit on this capsule. An
+        // inset rather than padding, so rows scroll under it.
+        .safeAreaInset(edge: .top, spacing: 0) {
+            Color.clear.frame(height: Self.titleBarHeight - Self.capsuleInset)
         }
         .frame(width: 168 * zoom)
         // Glass, clipped to the capsule and outlined the way the stock one
@@ -255,40 +273,33 @@ private struct SidebarMaterial: NSViewRepresentable {
     func updateNSView(_ view: NSVisualEffectView, context: Context) {}
 }
 
-private struct PaneButton: View {
+/// One sidebar row: icon and title, and nothing else. No background, no
+/// selected/hovered colouring, no weight change — every one of those is the
+/// system's to draw on a sidebar list, and drawing them here is what used to
+/// paint an opaque slab over the glass capsule and force white text onto a
+/// pale accent colour.
+private struct PaneRow: View {
     @Environment(\.uiZoom) private var zoom
     let pane: SettingsPane
-    let selected: Bool
-    let action: () -> Void
-    @State private var hovering = false
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 7 * zoom) {
-                Image(systemName: pane.icon)
-                    .zoomFont(12)
-                    .frame(width: 18 * zoom)
-                Text(pane.title)
-                    .zoomFont(13, weight: selected ? .semibold : .regular)
-                Spacer(minLength: 0)
-            }
-            .foregroundStyle(selected ? Color.white : Color.primary)
-            .padding(.horizontal, 8 * zoom)
-            .frame(height: 26 * zoom)
-            .background(
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(
-                        selected
-                            ? Color.accentColor
-                            : hovering ? Color.primary.opacity(0.06) : .clear
-                    )
-            )
-            .contentShape(Rectangle())
+        HStack(spacing: 7 * zoom) {
+            Image(systemName: pane.icon)
+                .zoomFont(12)
+                .frame(width: 18 * zoom)
+            Text(pane.title)
+                .zoomFont(13)
+            Spacer(minLength: 0)
         }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: hovering)
-        .accessibilityAddTraits(selected ? [.isSelected] : [])
+        // The one row metric that has to be asked for. A sidebar row has a
+        // ~32pt floor the system won't go under (and shouldn't — that's the
+        // standard row), but it won't grow with zoom on its own either, so
+        // above 100% the text swells inside a selection block that doesn't.
+        // 24 because the system pads a row by ~8pt on top of this: 24 + 8
+        // lands on the stock 32 at 100%, so the row is the standard one up
+        // to there and follows the text above it.
+        .frame(height: 24 * zoom)
+        .contentShape(Rectangle())
     }
 }
 
@@ -328,7 +339,13 @@ struct AppearanceSettingsView: View {
                         }
                         .labelsHidden()
                         .pickerStyle(.segmented)
-                        .frame(width: 280 * zoom)
+                        // Its own width, not a stated one. A segmented control
+                        // overflows a frame narrower than its segments instead
+                        // of squeezing them, and it overflows symmetrically —
+                        // so a stated 280 that five labels don't fit into (any
+                        // zoom under 100%) spilled out past the row's trailing
+                        // padding and sat flush against the card's edge.
+                        .fixedSize()
                     }
                 }
                 SettingsSection(
