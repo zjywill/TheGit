@@ -12,6 +12,7 @@ import SwiftUI
 struct PullRequestDetailView: View {
     @ObservedObject var repo: RepoState
     let pr: PullRequest
+    @ObservedObject private var agents = AgentTools.shared
     @Environment(\.uiZoom) private var zoom
 
     private var forge: Forge { repo.forge ?? .github }
@@ -69,6 +70,21 @@ struct PullRequestDetailView: View {
                         ? "You're already on \(headBranch) — the code is right here."
                         : "Check \(headBranch) out locally (moves HEAD)"
                 )
+
+            // Next to Checkout, because it's the other answer to "and now
+            // what": you've read the diff, and either you take it on
+            // yourself or you hand it to something that will. Gone entirely
+            // when neither CLI is installed — see HandoffMenu.
+            if !agents.available.isEmpty {
+                Menu("Hand Off") {
+                    HandoffMenu(tasks: HandoffTask.forPullRequests) { task, agent in
+                        repo.handOff(task, to: agent, pullRequest: pr)
+                    }
+                }
+                .controlSize(.regular)
+                .fixedSize()
+                .help("Open a terminal in this repo with an agent already working on \(forge.label(pr.number)).")
+            }
 
             Button("Open in Browser") { repo.openPullRequestInBrowser(pr) }
                 .controlSize(.regular)

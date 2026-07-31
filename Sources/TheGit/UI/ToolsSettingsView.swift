@@ -163,6 +163,11 @@ struct ToolsSettingsView: View {
 
     private func probe() async {
         brewInstalled = Toolchain.brewInstalled
+        // Somebody who just installed an agent is exactly who clicks this
+        // button, and the answer this pane reads is the same one the Hand
+        // Off menus read — so ask the shell again, then republish.
+        await Shell.resolveLoginPath()
+        AgentTools.shared.recheck()
         var rows: [ToolStatus] = []
         for tool in DevTool.allCases {
             let path = tool == .git ? Toolchain.installedGit() : Shell.which(tool.binary)

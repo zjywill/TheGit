@@ -2194,6 +2194,41 @@ final class RepoState: ObservableObject, Identifiable {
         }
     }
 
+    // MARK: - Hand off to a coding agent
+
+    /// Hands a pull request to Claude or Codex: a terminal opens in this
+    /// repo with the agent already working on it. The app writes the brief
+    /// and then gets out of the way — nothing here waits on the agent, and
+    /// nothing in the repo has changed yet when the window appears.
+    func handOff(_ task: HandoffTask, to agent: AgentTool, pullRequest pr: PullRequest) {
+        handOff(task, to: agent, subject: HandoffSubject(pr))
+    }
+
+    func handOff(_ task: HandoffTask, to agent: AgentTool, issue: Issue) {
+        handOff(task, to: agent, subject: HandoffSubject(issue))
+    }
+
+    private func handOff(_ task: HandoffTask, to agent: AgentTool, subject: HandoffSubject) {
+        guard let forge else { return }
+        Task {
+            // Worth the round trip: "rebase onto main" in the prompt beats
+            // making the agent guess which branch this repo calls its
+            // mainline.
+            let base = await git.defaultBranch(remote: snapshot.defaultRemote)
+            do {
+                try Handoff.launch(
+                    agent,
+                    prompt: Handoff.prompt(task, subject: subject, forge: forge, base: base),
+                    cwd: path,
+                    label: "\(forge.label(subject.number)) \(task.slug)",
+                    target: .preferred
+                )
+            } catch {
+                report(error)
+            }
+        }
+    }
+
     /// Opens the compose sheet with sensible branches already picked:
     /// the given branch (or HEAD) against the repo's mainline.
     func createPullRequest(from branch: Branch? = nil) {
