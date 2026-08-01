@@ -157,7 +157,6 @@ struct RootView: View {
                 // every tab keep their positions across a switch.
                 VStack(spacing: 0) {
                     AppTopBar()
-                    Divider()
                     // App-level status directly below the window navigation.
                     if let update = updates.update {
                         UpdateBanner(

@@ -28,6 +28,8 @@ struct RepoView: View {
     private static let sidebarWidthKey = "sidebarPaneWidth"
     private static let commitWidthKey = "commitPanelWidth"
     private static let sidebarWidthRange: ClosedRange<CGFloat> = 252...332
+    /// The stable space the sidebar resize gesture measures in.
+    static let splitSpace = "RepoViewSplit"
 
     private static func storedWidth(key: String, fallback: CGFloat) -> CGFloat {
         let width = UserDefaults.standard.double(forKey: key)
@@ -77,7 +79,6 @@ struct RepoView: View {
                 RepoTabsBar()
                     .frame(height: AppTopBar.height)
                     .background(.bar)
-                Divider()
                 if let update = updates.update {
                     UpdateBanner(
                         update: update,
@@ -87,10 +88,22 @@ struct RepoView: View {
                     Divider()
                 }
                 // Repository commands stay directly below their active tab.
+                // No hard rules between the chrome rows or into the content
+                // — like Xcode's, the bands separate by material alone. The
+                // content pane instead gets small top corners, so it reads
+                // as its own surface tucked under the chrome; the notches
+                // show the column's bar material behind it.
                 RepoCommandBar(repo: repo, trailingWidth: commitPaneWidth)
-                Divider()
                 workArea
+                    .clipShape(UnevenRoundedRectangle(
+                        topLeadingRadius: 8,
+                        bottomLeadingRadius: 0,
+                        bottomTrailingRadius: 0,
+                        topTrailingRadius: 8,
+                        style: .continuous
+                    ))
             }
+            .background(.bar)
             .animation(
                 .easeOut(duration: reduceMotion ? 0 : 0.2),
                 value: updates.update
@@ -112,6 +125,12 @@ struct RepoView: View {
                 .offset(x: sidebarIdealWidth - 4)
             }
         }
+        // The handle's drag gesture measures in this space — the split
+        // itself, which never moves. Its own local space moves WITH the
+        // width it is changing: each frame's width change shifts the next
+        // translation sample, and the feedback shook the whole layout
+        // during a drag. (Same trap as the tab strip's coordinateSpace.)
+        .coordinateSpace(name: Self.splitSpace)
         // Bottom centre of the panes, which lands over the oldest loaded
         // commits — the one part of this window nobody is reading when a
         // command fails. The other two candidates are both worse: the
@@ -720,9 +739,12 @@ private struct SidebarResizeHandle: View {
         Color.clear
             .contentShape(Rectangle())
             .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { dragChanged($0.translation.width) }
-                    .onEnded { _ in dragEnded() }
+                DragGesture(
+                    minimumDistance: 0,
+                    coordinateSpace: .named(RepoView.splitSpace)
+                )
+                .onChanged { dragChanged($0.translation.width) }
+                .onEnded { _ in dragEnded() }
             )
             .onHover { hovering in
                 if hovering, !cursorIsPushed {
