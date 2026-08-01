@@ -1332,7 +1332,10 @@ final class RepoState: ObservableObject, Identifiable {
             if case .remote = branch.kind {
                 try await git.checkoutRemote(branch, localExists: localExists)
             } else {
-                try await git.checkout(branch: branch.name)
+                // Switching to a branch means switching to what it is now,
+                // so a local branch that's only behind its upstream catches
+                // up on the way in — no fetch, no user's commits touched.
+                try await git.checkout(branch: branch.name, catchUp: true)
             }
         }
     }

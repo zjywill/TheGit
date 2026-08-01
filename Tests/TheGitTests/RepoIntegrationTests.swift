@@ -696,6 +696,96 @@ final class RepoIntegrationTests: XCTestCase {
         XCTAssertEqual(remoteSide.trimmingCharacters(in: .whitespacesAndNewlines), "side work")
     }
 
+    // MARK: - Checkout
+
+    /// A repo whose local `main` sits one commit behind an already-fetched
+    /// `origin/main`, checked out on `side`. Returns the repo path and the
+    /// sha origin/main points at.
+    private func repoWithStaleLocalMain(_ name: String) async throws -> (path: String, tip: String) {
+        let origin = root.appendingPathComponent("\(name)-origin.git").path
+        try await Shell.run("/usr/bin/env", ["git", "init", "-q", "--bare", "-b", "main", origin])
+        let path = try await makeRepo(name)
+        try await git(path, ["remote", "add", "origin", origin])
+        try await git(path, ["push", "-q", "-u", "origin", "main"])
+
+        try write("upstream\n", to: path + "/upstream.txt")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "upstream work"])
+        try await git(path, ["push", "-q", "origin", "main"])
+        let tip = try await git(path, ["rev-parse", "HEAD"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Rewind the local branch only: origin/main keeps the new commit,
+        // which is exactly the state a fetch leaves behind.
+        try await git(path, ["reset", "-q", "--hard", "HEAD~1"])
+        try await git(path, ["checkout", "-q", "-b", "side"])
+        return (path, tip)
+    }
+
+    /// Checking out a local branch that is only behind its upstream lands
+    /// on the upstream's tip — no separate Pull afterwards.
+    func testCheckoutCatchesUpABranchThatIsOnlyBehind() async throws {
+        let (path, tip) = try await repoWithStaleLocalMain("checkout-behind")
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        let main = try XCTUnwrap(repo.snapshot.localBranches.first { $0.name == "main" })
+        XCTAssertEqual(main.behind, 1)
+
+        repo.checkout(main)
+        try await waitUntil("main to catch up to origin/main", {
+            FileManager.default.fileExists(atPath: path + "/upstream.txt")
+        }, refreshing: { await repo.refresh() })
+        XCTAssertNil(repo.errorMessage)
+        XCTAssertEqual(repo.snapshot.currentBranch, "main")
+        let head = try await git(path, ["rev-parse", "HEAD"])
+        XCTAssertEqual(head.trimmingCharacters(in: .whitespacesAndNewlines), tip)
+    }
+
+    /// "Checkout origin/main" off the graph when a stale local `main`
+    /// exists: it switches to that local branch, so it has to bring it up
+    /// to the remote tip the menu item named.
+    func testCheckoutOfARemoteBranchLandsOnTheRemoteTip() async throws {
+        let (path, tip) = try await repoWithStaleLocalMain("checkout-remote-tip")
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        let remote = try XCTUnwrap(repo.snapshot.remoteBranches.first { $0.name == "origin/main" })
+
+        repo.checkout(remote)
+        try await waitUntil("main to land on origin/main", {
+            FileManager.default.fileExists(atPath: path + "/upstream.txt")
+        }, refreshing: { await repo.refresh() })
+        XCTAssertNil(repo.errorMessage)
+        XCTAssertEqual(repo.snapshot.currentBranch, "main")
+        let head = try await git(path, ["rev-parse", "HEAD"])
+        XCTAssertEqual(head.trimmingCharacters(in: .whitespacesAndNewlines), tip)
+    }
+
+    /// The guard that keeps catching-up lossless: a branch carrying its own
+    /// unpushed commit has diverged, so the checkout leaves it exactly
+    /// where it is. Bringing the upstream in there is Pull's decision.
+    func testCheckoutLeavesADivergedBranchWhereItIs() async throws {
+        let (path, _) = try await repoWithStaleLocalMain("checkout-diverged")
+        try await git(path, ["checkout", "-q", "main"])
+        try write("local\n", to: path + "/local.txt")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "local work"])
+        let local = try await git(path, ["rev-parse", "HEAD"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        try await git(path, ["checkout", "-q", "side"])
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        let main = try XCTUnwrap(repo.snapshot.localBranches.first { $0.name == "main" })
+        repo.checkout(main)
+        try await waitUntil("the checkout to land", { [weak repo] in
+            repo?.snapshot.currentBranch == "main"
+        }, refreshing: { await repo.refresh() })
+        XCTAssertNil(repo.errorMessage)
+
+        let head = try await git(path, ["rev-parse", "HEAD"])
+        XCTAssertEqual(head.trimmingCharacters(in: .whitespacesAndNewlines), local)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path + "/upstream.txt"))
+    }
+
     /// Merge straight from a commit row in the graph: git takes the sha, so
     /// the commit's work lands on the current branch even though no branch
     /// name was involved.
