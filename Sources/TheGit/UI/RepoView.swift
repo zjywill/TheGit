@@ -352,16 +352,12 @@ struct RepoView: View {
     }
 }
 
-/// The same floating capsule shell used by the Settings window in Issue #34:
-/// the capsule owns the window's top-left corner and wraps the traffic
-/// lights in its own title row. The repository's high-volume navigator
-/// remains ScrollView-backed; only its structural chrome is shared with the
-/// verified Settings design.
+/// The macOS 27 sidebar: one flat surface flush with the window's leading,
+/// top, and bottom edges — no floating capsule, no inset, no border, the
+/// way Mail's sidebar sits. The traffic lights live in its title row. The
+/// repository's high-volume navigator remains ScrollView-backed.
 private struct RepoSidebarShell: View {
     @ObservedObject var repo: RepoState
-
-    private static let capsuleInset: CGFloat = 8
-    private static let capsuleRadius: CGFloat = 18
 
     var body: some View {
         VStack(spacing: 0) {
@@ -370,29 +366,15 @@ private struct RepoSidebarShell: View {
                     .frame(width: 54, height: 20)
                 Spacer(minLength: 0)
             }
-            // 16 inside + the capsule's 8 outside = the 24 the home top bar
-            // also gives its lights, so a screen switch never moves them.
+            // 16 from the window edge, centred in the title-bar band — the
+            // home top bar gives its lights the same spot, so a screen
+            // switch never moves them.
             .padding(.leading, 16)
-            .frame(height: AppTopBar.height - Self.capsuleInset)
+            .frame(height: AppTopBar.height)
             SidebarView(repo: repo)
                 .id(repo.id)
         }
         .background(SidebarGlass())
-            .clipShape(
-                RoundedRectangle(
-                    cornerRadius: Self.capsuleRadius,
-                    style: .continuous
-                )
-            )
-            .overlay(
-                RoundedRectangle(
-                    cornerRadius: Self.capsuleRadius,
-                    style: .continuous
-                )
-                .stroke(Color.primary.opacity(0.10))
-            )
-            .padding(.leading, Self.capsuleInset)
-            .padding(.vertical, Self.capsuleInset)
     }
 }
 

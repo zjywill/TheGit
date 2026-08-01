@@ -270,10 +270,9 @@ struct AppTopBar: View {
             HStack(spacing: 0) {
                 WindowControls()
                     .frame(width: 54, height: 20)
-                    // 24 from the window edge and 8 down: where the capsule
-                    // (8 inset + 16 padding) puts them on the repo screen.
-                    .padding(.leading, 24)
-                    .padding(.top, 8)
+                    // 16 from the window edge, centred in the band: where
+                    // the flush sidebar puts them on the repo screen.
+                    .padding(.leading, 16)
                 Spacer(minLength: 0)
             }
             .frame(width: RepoView.storedSidebarWidth())
