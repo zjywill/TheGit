@@ -87,7 +87,9 @@ final class MergeConflictTests: XCTestCase {
             """ + "\n"
         let doc = try XCTUnwrap(ConflictDocument.parse(text))
         XCTAssertEqual(doc.conflicts[0].ours, [])
-        let session = MergeEditorSession(file: file(), document: doc, encoding: .utf8)
+        let session = MergeEditorSession(
+            file: file(), document: doc, encoding: .utf8, originalData: Data()
+        )
         let row = try XCTUnwrap(session.alignedRows.first)
         XCTAssertNil(row.left)
         XCTAssertNotNil(row.right?.ref)
@@ -98,7 +100,7 @@ final class MergeConflictTests: XCTestCase {
         // Zero lines to take, but the conflict is now decided.
         XCTAssertEqual(session.sideState(0, side: .ours), .all)
         XCTAssertTrue(session.allResolved)
-        XCTAssertEqual(session.resolvedContent(), "\n")
+        XCTAssertEqual(session.resolvedContent(), "")
     }
 
     // MARK: - Taking and output
@@ -118,7 +120,9 @@ final class MergeConflictTests: XCTestCase {
             bottom
             """ + "\n"
         let doc = try XCTUnwrap(ConflictDocument.parse(text))
-        let session = MergeEditorSession(file: file(), document: doc, encoding: .utf8)
+        let session = MergeEditorSession(
+            file: file(), document: doc, encoding: .utf8, originalData: Data()
+        )
 
         XCTAssertFalse(session.allResolved)
         // Take B first, then A: B's line must come out on top.
@@ -161,7 +165,9 @@ final class MergeConflictTests: XCTestCase {
             >>>>>>> main
             """ + "\n"
         let doc = try XCTUnwrap(ConflictDocument.parse(text))
-        let session = MergeEditorSession(file: file(), document: doc, encoding: .utf8)
+        let session = MergeEditorSession(
+            file: file(), document: doc, encoding: .utf8, originalData: Data()
+        )
 
         XCTAssertEqual(session.wholeSideState(.ours), .none)
         session.setWholeSide(.ours, on: true)
@@ -200,7 +206,9 @@ final class MergeConflictTests: XCTestCase {
             bottom
             """ + "\n"
         let doc = try XCTUnwrap(ConflictDocument.parse(text))
-        let session = MergeEditorSession(file: file(), document: doc, encoding: .utf8)
+        let session = MergeEditorSession(
+            file: file(), document: doc, encoding: .utf8, originalData: Data()
+        )
 
         // Conflict 1 picked, conflict 2 untouched: the seed has real
         // text for the first and the untouched markers for the second.
@@ -221,7 +229,9 @@ final class MergeConflictTests: XCTestCase {
         // Markers still present: the gate holds.
         XCTAssertTrue(session.isEditing)
         XCTAssertTrue(session.draftHasMarkers)
-        XCTAssertFalse(session.canSave)
+        // Save remains available so a legitimate marker literal is not a
+        // permanent trap; RepoState presents an explicit warning first.
+        XCTAssertTrue(session.canSave)
 
         // The user resolves by hand — a mix no checkbox could produce.
         session.draft = "top\ntheirs line\nmid\no2 and t2, merged by hand\nbottom\n"
@@ -234,6 +244,50 @@ final class MergeConflictTests: XCTestCase {
         XCTAssertFalse(session.isEditing)
         XCTAssertFalse(session.canSave)  // conflict 2 still unresolved
         XCTAssertEqual(session.resolvedContent(), "top\ntheirs line\nmid\nbottom\n")
+    }
+
+    @MainActor
+    func testHandEditRecognizesDiff3AndPartialMarkerLines() throws {
+        let doc = try XCTUnwrap(ConflictDocument.parse(simple))
+        let session = MergeEditorSession(
+            file: file(), document: doc, encoding: .utf8, originalData: Data()
+        )
+        session.beginEditing()
+
+        for marker in [
+            "<<<<<<< HEAD",
+            "||||||| merged common ancestors",
+            "=======",
+            ">>>>>>> main",
+            "<<<<<<<",
+        ] {
+            session.draft = "ordinary\n\(marker)\ntext\n"
+            XCTAssertTrue(session.draftHasMarkers, "missed marker: \(marker)")
+        }
+
+        session.draft = "let value = \"<<<<<<<not a marker\"\n"
+        XCTAssertFalse(session.draftHasMarkers)
+    }
+
+    @MainActor
+    func testDirtyStateDistinguishesOpeningFromChangingHandEdit() throws {
+        let doc = try XCTUnwrap(ConflictDocument.parse(simple))
+        let session = MergeEditorSession(
+            file: file(), document: doc, encoding: .utf8, originalData: Data()
+        )
+
+        XCTAssertFalse(session.hasUnsavedChanges)
+        session.beginEditing()
+        XCTAssertFalse(session.handEditIsDirty)
+        XCTAssertFalse(session.hasUnsavedChanges)
+
+        session.draft?.append("// changed\n")
+        XCTAssertTrue(session.handEditIsDirty)
+        XCTAssertTrue(session.hasUnsavedChanges)
+
+        session.cancelEditing()
+        session.setSide(0, side: .ours, on: true)
+        XCTAssertTrue(session.hasUnsavedChanges)
     }
 
     /// The aligned rows both columns scroll as one: shared lines carry
@@ -252,7 +306,9 @@ final class MergeConflictTests: XCTestCase {
             bottom
             """ + "\n"
         let doc = try XCTUnwrap(ConflictDocument.parse(text))
-        let session = MergeEditorSession(file: file(), document: doc, encoding: .utf8)
+        let session = MergeEditorSession(
+            file: file(), document: doc, encoding: .utf8, originalData: Data()
+        )
         let rows = session.alignedRows
         XCTAssertEqual(rows.count, 4)  // top, o1|t1, o2|filler, bottom
 

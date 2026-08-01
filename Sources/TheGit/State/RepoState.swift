@@ -101,6 +101,76 @@ enum DropIntent: Identifiable {
     }
 }
 
+/// A merge-editor draft that would be lost by the action the user just
+/// requested. The action itself stays private on RepoState; this value is
+/// only the copy the confirmation alert needs.
+enum MergeDiscardPrompt: Identifiable {
+    case leaveEditor(fileName: String)
+    case cancelHandEdit(fileName: String)
+
+    var id: String {
+        switch self {
+        case .leaveEditor(let fileName): return "leave-" + fileName
+        case .cancelHandEdit(let fileName): return "hand-edit-" + fileName
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .leaveEditor(let fileName):
+            return "Discard edits to \(fileName)?"
+        case .cancelHandEdit:
+            return "Discard hand edits?"
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .leaveEditor:
+            return "Your conflict choices and hand edits have not been saved."
+        case .cancelHandEdit:
+            return "The text you changed by hand will be discarded. Your A and B selections will remain."
+        }
+    }
+
+    var confirmLabel: String {
+        switch self {
+        case .leaveEditor: return "Discard Edits"
+        case .cancelHandEdit: return "Discard Hand Edits"
+        }
+    }
+}
+
+/// The working tree or conflict status changed after the merge editor
+/// opened. Saving is paused until the user chooses which version wins.
+enum MergeExternalChangePrompt: Identifiable {
+    case fileContents(fileName: String)
+    case conflictStatus(fileName: String)
+
+    var id: String {
+        switch self {
+        case .fileContents(let fileName): return "contents-" + fileName
+        case .conflictStatus(let fileName): return "status-" + fileName
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .fileContents: return "File changed on disk"
+        case .conflictStatus: return "Conflict changed outside TheGit"
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .fileContents(let fileName):
+            return "\(fileName) was modified after this editor opened. Reload to use the file on disk, or overwrite it with this draft."
+        case .conflictStatus(let fileName):
+            return "\(fileName) is no longer marked as conflicted. Reload to inspect its current state, or overwrite it with this draft and stage it again."
+        }
+    }
+}
+
 /// Observable state for one open repository (one tab).
 @MainActor
 final class RepoState: ObservableObject, Identifiable {
@@ -256,6 +326,12 @@ final class RepoState: ObservableObject, Identifiable {
     /// The open merge editor, shown over the graph like a diff. One at a
     /// time — opening another conflict replaces it.
     @Published var mergeSession: MergeEditorSession?
+    @Published var mergeDiscardPrompt: MergeDiscardPrompt?
+    @Published var mergeExternalChangePrompt: MergeExternalChangePrompt?
+    @Published var confirmMergeMarkerSave = false
+    private var pendingMergeDiscardAction: (() -> Void)?
+    private var markerSaveOverwritesExternalChanges = false
+    private var externalChangeAllowsMarkers = false
     /// Graph visibility filters (GitKraken Solo / Hide). Session-only.
     @Published var soloRev: String?
     @Published var hiddenRefs: Set<String> = []
@@ -976,10 +1052,21 @@ final class RepoState: ObservableObject, Identifiable {
     /// overwrite a file git no longer marks conflicted (operation aborted,
     /// or resolved from a terminal). Both refresh paths call this.
     private func closeMergeEditorIfStale(_ snap: RepoSnapshot) {
-        guard let session = mergeSession,
-              !snap.conflicted.contains(where: { $0.id == session.file.id })
-        else { return }
-        mergeSession = nil
+        guard let session = mergeSession else { return }
+        if snap.conflicted.contains(where: { $0.id == session.file.id }) {
+            session.acknowledgedExternalStatusChange = false
+            return
+        }
+        guard !session.isSaving else { return }
+        if session.hasUnsavedChanges {
+            if mergeExternalChangePrompt == nil,
+               !session.acknowledgedExternalStatusChange {
+                externalChangeAllowsMarkers = false
+                mergeExternalChangePrompt = .conflictStatus(fileName: session.file.fileName)
+            }
+        } else {
+            clearMergeEditor()
+        }
     }
 
     /// GitKraken lands you on git's own prepared message mid-merge instead
@@ -1945,11 +2032,17 @@ final class RepoState: ObservableObject, Identifiable {
     /// The list already brought the body along, so the panel has content
     /// on its first frame and only the comments arrive later.
     func viewIssue(_ issue: Issue) {
+        requestLeavingMergeEditor { [weak self] in
+            self?.viewIssueImmediately(issue)
+        }
+    }
+
+    private func viewIssueImmediately(_ issue: Issue) {
         // The centre pane has one overlay slot: an issue replaces
         // whatever diff or file history was showing, exactly as opening
         // a diff replaces the issue (see selectFile & co.). Stacked, the
         // lower one is not "still open" — it is unreachable.
-        closeDiff()
+        clearDiffAndMergeEditor()
         closeFileHistory()
         // A request under review goes too, and its fetches with it: the
         // slot holds one thing, and leaving `prToView` set left the review
@@ -1987,8 +2080,14 @@ final class RepoState: ObservableObject, Identifiable {
     /// the number, title and branch, so the panel draws immediately and
     /// fills in.
     func viewPullRequest(_ pr: PullRequest) {
+        requestLeavingMergeEditor { [weak self] in
+            self?.viewPullRequestImmediately(pr)
+        }
+    }
+
+    private func viewPullRequestImmediately(_ pr: PullRequest) {
         // One overlay slot in the centre pane — see viewIssue.
-        closeDiff()
+        clearDiffAndMergeEditor()
         closeFileHistory()
         issueToView = nil
         prToView = pr
@@ -2809,9 +2908,16 @@ final class RepoState: ObservableObject, Identifiable {
     }
 
     func selectCommitFile(_ file: FileChange) {
+        requestLeavingMergeEditor { [weak self] in
+            self?.selectCommitFileImmediately(file)
+        }
+    }
+
+    private func selectCommitFileImmediately(_ file: FileChange) {
         guard let hash = selectedCommit else { return }
         issueToView = nil
         prToView = nil
+        clearMergeEditor()
         selectedFile = file
         diffCommit = hash
         diffLines = []
@@ -2909,8 +3015,15 @@ final class RepoState: ObservableObject, Identifiable {
     // MARK: - File history
 
     func showFileHistory(_ path: String) {
+        requestLeavingMergeEditor { [weak self] in
+            self?.showFileHistoryImmediately(path)
+        }
+    }
+
+    private func showFileHistoryImmediately(_ path: String) {
         // Clear the slot now, not when the history arrives — the click
         // should visibly take over the pane even while git runs.
+        clearDiffAndMergeEditor()
         issueToView = nil
         prToView = nil
         Task {
@@ -2928,9 +3041,16 @@ final class RepoState: ObservableObject, Identifiable {
 
     /// From the history list: show this file's diff within that commit.
     func selectHistoryEntry(_ commit: Commit, path filePath: String) {
+        requestLeavingMergeEditor { [weak self] in
+            self?.selectHistoryEntryImmediately(commit, path: filePath)
+        }
+    }
+
+    private func selectHistoryEntryImmediately(_ commit: Commit, path filePath: String) {
         selectedCommit = commit.hash
         issueToView = nil
         prToView = nil
+        clearMergeEditor()
         selectedFile = FileChange(path: filePath, status: "M", area: .unstaged)
         diffCommit = commit.hash
         diffLines = []
@@ -2951,9 +3071,15 @@ final class RepoState: ObservableObject, Identifiable {
     // MARK: - Diff view
 
     func selectFile(_ file: FileChange) {
+        requestLeavingMergeEditor { [weak self] in
+            self?.selectFileImmediately(file)
+        }
+    }
+
+    private func selectFileImmediately(_ file: FileChange) {
         issueToView = nil
         prToView = nil
-        mergeSession = nil
+        clearMergeEditor()
         selectedFile = file
         diffCommit = nil
         diffLines = []
@@ -3001,6 +3127,12 @@ final class RepoState: ObservableObject, Identifiable {
     }
 
     func closeDiff() {
+        requestLeavingMergeEditor { [weak self] in
+            self?.clearDiffAndMergeEditor()
+        }
+    }
+
+    private func clearDiffAndMergeEditor() {
         selectedFile = nil
         diffCommit = nil
         diffLines = []
@@ -3008,7 +3140,7 @@ final class RepoState: ObservableObject, Identifiable {
         showRawPointer = false
         // Same overlay slot (see viewIssue): whatever clears the diff
         // clears the merge editor with it.
-        mergeSession = nil
+        clearMergeEditor()
     }
 
     // MARK: - Merge editor
@@ -3018,37 +3150,223 @@ final class RepoState: ObservableObject, Identifiable {
     /// deleted on one side) have nothing to pick from — those fall back
     /// to the plain diff view.
     func openMergeEditor(_ file: FileChange) {
+        requestLeavingMergeEditor { [weak self] in
+            self?.openMergeEditorImmediately(file)
+        }
+    }
+
+    private func openMergeEditorImmediately(_ file: FileChange) {
         issueToView = nil
         prToView = nil
-        var encoding = String.Encoding.utf8
-        guard
-            let text = try? String(contentsOfFile: path + "/" + file.path, usedEncoding: &encoding),
-            let document = ConflictDocument.parse(text)
+        let fullPath = path + "/" + file.path
+        guard let source = readMergeEditorSource(at: fullPath),
+              let document = ConflictDocument.parse(source.text)
         else {
-            selectFile(file)
+            selectFileImmediately(file)
             return
         }
-        closeDiff()
-        mergeSession = MergeEditorSession(file: file, document: document, encoding: encoding)
+        clearDiffAndMergeEditor()
+        mergeSession = MergeEditorSession(
+            file: file,
+            document: document,
+            encoding: source.encoding,
+            originalData: source.data
+        )
     }
 
     func closeMergeEditor() {
-        mergeSession = nil
+        requestLeavingMergeEditor { [weak self] in
+            self?.clearMergeEditor()
+        }
+    }
+
+    func cancelMergeHandEdit() {
+        guard let session = mergeSession, session.isEditing, !session.isSaving else { return }
+        guard session.handEditIsDirty else {
+            session.cancelEditing()
+            return
+        }
+        requestMergeDiscard(
+            .cancelHandEdit(fileName: session.file.fileName),
+            action: { [weak self, weak session] in
+                guard let self, let session, self.mergeSession === session else { return }
+                session.cancelEditing()
+            }
+        )
     }
 
     /// Write the picked result over the conflicted file and stage it —
     /// the same "resolved" git sees from `git add` after a hand edit.
-    func saveMergeResolution() {
-        guard let session = mergeSession else { return }
+    func saveMergeResolution(allowMarkers: Bool = false, overwriteExternalChanges: Bool = false) {
+        guard let session = mergeSession, session.canSave, !session.isSaving else { return }
+        if session.draftHasMarkers, !allowMarkers {
+            markerSaveOverwritesExternalChanges = overwriteExternalChanges
+            confirmMergeMarkerSave = true
+            return
+        }
+        let stillConflicted = snapshot.conflicted.contains { $0.id == session.file.id }
+        if !stillConflicted, !overwriteExternalChanges {
+            externalChangeAllowsMarkers = allowMarkers
+            mergeExternalChangePrompt = .conflictStatus(fileName: session.file.fileName)
+            return
+        }
         let content = session.resolvedContent()
         let fullPath = path + "/" + session.file.path
         let repoRelative = session.file.path
         let encoding = session.encoding
-        mergeSession = nil
-        performIndexOnly { git in
-            try content.write(toFile: fullPath, atomically: true, encoding: encoding)
-            try await git.stage(repoRelative)
+        guard let output = content.data(using: encoding, allowLossyConversion: false) else {
+            errorMessage = "The resolution cannot be saved using \(String.localizedName(of: encoding))."
+            return
         }
+
+        Task {
+            session.isSaving = true
+            defer { session.isSaving = false }
+            do {
+                let current = try Data(contentsOf: URL(fileURLWithPath: fullPath))
+                guard current == session.originalData || overwriteExternalChanges else {
+                    externalChangeAllowsMarkers = allowMarkers
+                    mergeExternalChangePrompt = .fileContents(fileName: session.file.fileName)
+                    return
+                }
+
+                try output.write(to: URL(fileURLWithPath: fullPath), options: .atomic)
+                // If staging fails, the editor stays open. Treat our own
+                // successful write as the new baseline so Save can retry.
+                session.originalData = output
+                do {
+                    try await git.stage(repoRelative)
+                } catch {
+                    errorMessage = "\(session.file.fileName) was saved, but Git could not mark it resolved: \(error.localizedDescription)"
+                    return
+                }
+
+                guard mergeSession === session else { return }
+                let afterStage = try Data(contentsOf: URL(fileURLWithPath: fullPath))
+                guard afterStage == output else {
+                    externalChangeAllowsMarkers = allowMarkers
+                    mergeExternalChangePrompt = .fileContents(fileName: session.file.fileName)
+                    return
+                }
+                clearMergeEditor()
+                await refreshStatus()
+            } catch {
+                report(error)
+            }
+        }
+    }
+
+    func confirmPendingMergeDiscard() {
+        let action = pendingMergeDiscardAction
+        pendingMergeDiscardAction = nil
+        mergeDiscardPrompt = nil
+        action?()
+    }
+
+    func cancelPendingMergeDiscard() {
+        pendingMergeDiscardAction = nil
+        mergeDiscardPrompt = nil
+    }
+
+    func reloadMergeEditorAfterExternalChange() {
+        guard let file = mergeSession?.file else {
+            mergeExternalChangePrompt = nil
+            return
+        }
+        mergeExternalChangePrompt = nil
+        externalChangeAllowsMarkers = false
+        clearMergeEditor()
+        openMergeEditorImmediately(file)
+    }
+
+    func overwriteMergeResolutionAfterExternalChange() {
+        let allowMarkers = externalChangeAllowsMarkers
+        externalChangeAllowsMarkers = false
+        mergeExternalChangePrompt = nil
+        saveMergeResolution(
+            allowMarkers: allowMarkers,
+            overwriteExternalChanges: true
+        )
+    }
+
+    func keepEditingAfterExternalChange() {
+        if case .conflictStatus = mergeExternalChangePrompt {
+            mergeSession?.acknowledgedExternalStatusChange = true
+        }
+        externalChangeAllowsMarkers = false
+        mergeExternalChangePrompt = nil
+    }
+
+    func confirmMergeMarkerSaveAnyway() {
+        let overwrite = markerSaveOverwritesExternalChanges
+        markerSaveOverwritesExternalChanges = false
+        confirmMergeMarkerSave = false
+        saveMergeResolution(allowMarkers: true, overwriteExternalChanges: overwrite)
+    }
+
+    func cancelMergeMarkerSave() {
+        markerSaveOverwritesExternalChanges = false
+        confirmMergeMarkerSave = false
+    }
+
+    private func requestLeavingMergeEditor(_ action: @escaping () -> Void) {
+        guard let session = mergeSession else {
+            action()
+            return
+        }
+        guard !session.isSaving else { return }
+        guard session.hasUnsavedChanges else {
+            clearMergeEditor()
+            action()
+            return
+        }
+        requestMergeDiscard(
+            .leaveEditor(fileName: session.file.fileName),
+            action: { [weak self, weak session] in
+                guard let self, let session, self.mergeSession === session else { return }
+                self.clearMergeEditor()
+                action()
+            }
+        )
+    }
+
+    private func requestMergeDiscard(
+        _ prompt: MergeDiscardPrompt,
+        action: @escaping () -> Void
+    ) {
+        pendingMergeDiscardAction = action
+        mergeDiscardPrompt = prompt
+    }
+
+    private func clearMergeEditor() {
+        mergeSession = nil
+        pendingMergeDiscardAction = nil
+        mergeDiscardPrompt = nil
+        mergeExternalChangePrompt = nil
+        externalChangeAllowsMarkers = false
+        markerSaveOverwritesExternalChanges = false
+        confirmMergeMarkerSave = false
+    }
+
+    /// Read bytes before and after Foundation's encoding detection. A file
+    /// changing during the read is retried, so `text` and `data` always
+    /// describe the same version.
+    private func readMergeEditorSource(
+        at fullPath: String
+    ) -> (data: Data, text: String, encoding: String.Encoding)? {
+        let url = URL(fileURLWithPath: fullPath)
+        for _ in 0..<2 {
+            guard let before = try? Data(contentsOf: url) else { return nil }
+            var encoding = String.Encoding.utf8
+            guard let text = try? String(contentsOf: url, usedEncoding: &encoding),
+                  let after = try? Data(contentsOf: url)
+            else { return nil }
+            if before == after {
+                return (after, text, encoding)
+            }
+        }
+        errorMessage = "\(url.lastPathComponent) changed while it was being opened. Try again."
+        return nil
     }
 
     // MARK: - Conflict resolution
@@ -3057,25 +3375,45 @@ final class RepoState: ObservableObject, Identifiable {
     // rebase itself is still in progress either way, so `operationState`
     // cannot have changed — only `status` has.
     func acceptOurs(_ file: FileChange) {
-        performIndexOnly { try await $0.acceptSide(file.path, ours: true) }
+        requestLeavingMergeEditor { [weak self] in
+            guard let self else { return }
+            self.clearMergeEditor()
+            self.performIndexOnly { try await $0.acceptSide(file.path, ours: true) }
+        }
     }
 
     func acceptTheirs(_ file: FileChange) {
-        performIndexOnly { try await $0.acceptSide(file.path, ours: false) }
+        requestLeavingMergeEditor { [weak self] in
+            guard let self else { return }
+            self.clearMergeEditor()
+            self.performIndexOnly { try await $0.acceptSide(file.path, ours: false) }
+        }
     }
 
     func markResolved(_ file: FileChange) {
-        performIndexOnly { try await $0.stage(file.path) }
+        requestLeavingMergeEditor { [weak self] in
+            guard let self else { return }
+            self.clearMergeEditor()
+            self.performIndexOnly { try await $0.stage(file.path) }
+        }
     }
 
     func continueOperation() {
         guard let op = snapshot.operation else { return }
-        perform { try await $0.continueOperation(op) }
+        requestLeavingMergeEditor { [weak self] in
+            guard let self else { return }
+            self.clearMergeEditor()
+            self.perform { try await $0.continueOperation(op) }
+        }
     }
 
     func abortOperation() {
         guard let op = snapshot.operation else { return }
-        perform { try await $0.abortOperation(op) }
+        requestLeavingMergeEditor { [weak self] in
+            guard let self else { return }
+            self.clearMergeEditor()
+            self.perform { try await $0.abortOperation(op) }
+        }
     }
 
     // MARK: - Commit context-menu actions

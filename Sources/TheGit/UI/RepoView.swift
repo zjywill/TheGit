@@ -7,6 +7,7 @@ import SwiftUI
 /// file history, an issue, a pull request — see `workArea`.
 struct RepoView: View {
     @ObservedObject var repo: RepoState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// User-dragged pane widths, persisted across relaunches and Launchpad
     /// round-trips. Read once per view identity into @State: idealWidth
@@ -19,6 +20,27 @@ struct RepoView: View {
 
     private static let sidebarWidthKey = "sidebarPaneWidth"
     private static let commitWidthKey = "commitPanelWidth"
+
+    private var mergeDiscardPresented: Binding<Bool> {
+        Binding(
+            get: { repo.mergeDiscardPrompt != nil },
+            set: { if !$0 { repo.cancelPendingMergeDiscard() } }
+        )
+    }
+
+    private var mergeExternalChangePresented: Binding<Bool> {
+        Binding(
+            get: { repo.mergeExternalChangePrompt != nil },
+            set: { if !$0 { repo.keepEditingAfterExternalChange() } }
+        )
+    }
+
+    private var mergeMarkerSavePresented: Binding<Bool> {
+        Binding(
+            get: { repo.confirmMergeMarkerSave },
+            set: { if !$0 { repo.cancelMergeMarkerSave() } }
+        )
+    }
 
     private static func storedWidth(key: String, fallback: CGFloat) -> CGFloat {
         let width = UserDefaults.standard.double(forKey: key)
@@ -82,6 +104,63 @@ struct RepoView: View {
         .background(
             Color.clear
                 .sheet(isPresented: $repo.showCreatePR) { CreatePullRequestView(repo: repo) }
+        )
+        .background(
+            Color.clear
+                .alert(
+                    repo.mergeDiscardPrompt?.title ?? "",
+                    isPresented: mergeDiscardPresented
+                ) {
+                    if let prompt = repo.mergeDiscardPrompt {
+                        Button(prompt.confirmLabel, role: .destructive) {
+                            repo.confirmPendingMergeDiscard()
+                        }
+                    }
+                    Button("Keep Editing", role: .cancel) {
+                        repo.cancelPendingMergeDiscard()
+                    }
+                } message: {
+                    if let prompt = repo.mergeDiscardPrompt {
+                        Text(prompt.message)
+                    }
+                }
+        )
+        .background(
+            Color.clear
+                .alert(
+                    repo.mergeExternalChangePrompt?.title ?? "",
+                    isPresented: mergeExternalChangePresented
+                ) {
+                    Button("Reload File") {
+                        repo.reloadMergeEditorAfterExternalChange()
+                    }
+                    Button("Overwrite Anyway", role: .destructive) {
+                        repo.overwriteMergeResolutionAfterExternalChange()
+                    }
+                    Button("Keep Editing", role: .cancel) {
+                        repo.keepEditingAfterExternalChange()
+                    }
+                } message: {
+                    if let prompt = repo.mergeExternalChangePrompt {
+                        Text(prompt.message)
+                    }
+                }
+        )
+        .background(
+            Color.clear
+                .alert(
+                    "Conflict markers remain",
+                    isPresented: mergeMarkerSavePresented
+                ) {
+                    Button("Save With Markers", role: .destructive) {
+                        repo.confirmMergeMarkerSaveAnyway()
+                    }
+                    Button("Keep Editing", role: .cancel) {
+                        repo.cancelMergeMarkerSave()
+                    }
+                } message: {
+                    Text("The output still contains conflict-marker lines. Save only if those lines are intentional file content.")
+                }
         )
         // Keyed on the repo, not on view identity: this view is no longer
         // rebuilt per tab (see the note on the panes above), so a plain
@@ -200,10 +279,12 @@ struct RepoView: View {
                         MergeEditorView(repo: repo, session: session)
                             // Same fade-in as the diff below, same instant
                             // removal — close is usually Esc.
-                            .transition(.asymmetric(
-                                insertion: .opacity.animation(.easeOut(duration: 0.12)),
-                                removal: .identity
-                            ))
+                            .transition(reduceMotion
+                                ? .identity
+                                : .asymmetric(
+                                    insertion: .opacity.animation(.easeOut(duration: 0.12)),
+                                    removal: .identity
+                                ))
                     }
                     if repo.selectedFile != nil {
                         FileDiffView(repo: repo)

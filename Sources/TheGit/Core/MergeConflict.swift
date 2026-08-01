@@ -151,6 +151,11 @@ final class MergeEditorSession: ObservableObject {
     let document: ConflictDocument
     let encoding: String.Encoding
     let alignedRows: [MergeAlignedRow]
+    /// Exact bytes this editor parsed. Save compares the working tree
+    /// against them before writing so another editor cannot be silently
+    /// overwritten. Updated after our own successful write, even if
+    /// staging then fails, so a retry remains possible.
+    var originalData: Data
 
     /// Per conflict: nil until the user touches it, then the taken lines
     /// in click order. The nil/empty distinction is the Save gate — an
@@ -162,11 +167,19 @@ final class MergeEditorSession: ObservableObject {
     /// the whole truth once it exists: Save writes it verbatim and the
     /// checkboxes freeze — regenerating from picks would eat the edits.
     @Published var draft: String?
+    @Published var isSaving = false
+    var acknowledgedExternalStatusChange = false
 
-    init(file: FileChange, document: ConflictDocument, encoding: String.Encoding) {
+    init(
+        file: FileChange,
+        document: ConflictDocument,
+        encoding: String.Encoding,
+        originalData: Data
+    ) {
         self.file = file
         self.document = document
         self.encoding = encoding
+        self.originalData = originalData
         self.choices = Array(repeating: nil, count: document.conflicts.count)
         self.alignedRows = Self.aligned(document)
     }
@@ -358,23 +371,28 @@ final class MergeEditorSession: ObservableObject {
                 for ref in choices[index] ?? [] { lines.append(text(of: ref)) }
             }
         }
-        return lines.joined(separator: "\n") + (document.endsWithNewline ? "\n" : "")
+        return Self.join(lines, endingWithNewline: document.endsWithNewline)
     }
 
     // MARK: - Hand editing
 
     var isEditing: Bool { draft != nil }
+    var handEditIsDirty: Bool {
+        guard let draft else { return false }
+        return draft != editableContent()
+    }
+    var hasUnsavedChanges: Bool { anyTouched || handEditIsDirty }
 
-    /// A hand-edit that still contains conflict markers is a file nobody
-    /// meant to save — the gate the Save button checks while editing.
+    /// Marker lines still in a hand edit usually mean the conflict is not
+    /// resolved. All four diff3 forms count, including a lone/partial
+    /// marker. The UI warns rather than permanently blocking Save because
+    /// source files can legitimately contain marker-looking literals.
     var draftHasMarkers: Bool {
         guard let draft else { return false }
-        return draft.components(separatedBy: "\n").contains {
-            $0.hasPrefix("<<<<<<<") || $0 == "=======" || $0.hasPrefix(">>>>>>>")
-        }
+        return draft.components(separatedBy: "\n").contains(where: Self.isConflictMarkerLine)
     }
 
-    var canSave: Bool { isEditing ? !draftHasMarkers : allResolved }
+    var canSave: Bool { isEditing || allResolved }
 
     func beginEditing() {
         draft = editableContent()
@@ -411,6 +429,26 @@ final class MergeEditorSession: ObservableObject {
                 }
             }
         }
-        return lines.joined(separator: "\n") + (document.endsWithNewline ? "\n" : "")
+        return Self.join(lines, endingWithNewline: document.endsWithNewline)
+    }
+
+    private static func join(_ lines: [String], endingWithNewline: Bool) -> String {
+        guard !lines.isEmpty else { return "" }
+        return lines.joined(separator: "\n") + (endingWithNewline ? "\n" : "")
+    }
+
+    private static func isConflictMarkerLine(_ line: String) -> Bool {
+        guard let first = line.first, "<|=>".contains(first) else { return false }
+        let markerLength = line.prefix { $0 == first }.count
+        guard markerLength >= 7 else { return false }
+        let remainder = line.dropFirst(markerLength)
+        switch first {
+        case "=":
+            return remainder.allSatisfy(\.isWhitespace)
+        case "<", "|", ">":
+            return remainder.isEmpty || remainder.first?.isWhitespace == true
+        default:
+            return false
+        }
     }
 }

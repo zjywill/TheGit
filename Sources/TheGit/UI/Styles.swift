@@ -29,14 +29,18 @@ extension View {
 /// Press feedback for plain icon buttons: subtle scale-down, fast ease-out.
 /// (Bordered buttons get this from AppKit for free; .plain ones don't.)
 struct PressEffectButtonStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var scale: CGFloat = 0.94
     var pressedOpacity: Double = 0.7
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? scale : 1)
+            .scaleEffect(configuration.isPressed && !reduceMotion ? scale : 1)
             .opacity(configuration.isPressed ? pressedOpacity : 1)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .animation(
+                reduceMotion ? nil : .easeOut(duration: 0.12),
+                value: configuration.isPressed
+            )
     }
 }
 
