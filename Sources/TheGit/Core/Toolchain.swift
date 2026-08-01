@@ -9,6 +9,8 @@ enum DevTool: String, CaseIterable, Identifiable {
     case gh
     case glab
     case gitLFS = "git-lfs"
+    case claude
+    case codex
 
     var id: String { rawValue }
     var binary: String { rawValue }
@@ -21,6 +23,8 @@ enum DevTool: String, CaseIterable, Identifiable {
         case .gh: return "GitHub CLI (gh)"
         case .glab: return "GitLab CLI (glab)"
         case .gitLFS: return "Git LFS"
+        case .claude: return "Claude Code (claude)"
+        case .codex: return "Codex CLI (codex)"
         }
     }
 
@@ -32,6 +36,17 @@ enum DevTool: String, CaseIterable, Identifiable {
         case .gh: return "Pull requests on GitHub: the sidebar list, checkout, and Create Pull Request."
         case .glab: return "Merge requests on GitLab: the sidebar list, checkout, and Create Merge Request."
         case .gitLFS: return "Large File Storage — shows LFS-tracked files and keeps their smudge/clean filters working."
+        case .claude, .codex: return "Hand Off: opens this agent in the repo — in the terminal you pick under Hand Off — already reviewing, fixing, or unpicking the conflicts of what you right-clicked."
+        }
+    }
+
+    /// The Homebrew formula, when there is one worth suggesting. nil sends
+    /// the user to the tool's own page instead of guessing at a tap or a
+    /// cask name that may not be there.
+    var brewFormula: String? {
+        switch self {
+        case .git, .gh, .glab, .gitLFS: return rawValue
+        case .claude, .codex: return nil
         }
     }
 
@@ -43,6 +58,8 @@ enum DevTool: String, CaseIterable, Identifiable {
         case .gh: return "https://cli.github.com"
         case .glab: return "https://gitlab.com/gitlab-org/cli#installation"
         case .gitLFS: return "https://git-lfs.com"
+        case .claude: return "https://claude.com/claude-code"
+        case .codex: return "https://github.com/openai/codex"
         }
     }
 }
@@ -57,7 +74,10 @@ enum InstallHint: Equatable {
     case website(String)
 
     static func hint(for tool: DevTool, brewInstalled: Bool) -> InstallHint {
-        brewInstalled ? .command("brew install " + tool.rawValue) : .website(tool.website)
+        guard brewInstalled, let formula = tool.brewFormula else {
+            return .website(tool.website)
+        }
+        return .command("brew install " + formula)
     }
 
     /// The text a sidebar row or settings row shows.

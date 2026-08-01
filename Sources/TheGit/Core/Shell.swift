@@ -17,11 +17,55 @@ enum Shell {
         "/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin", "/usr/bin", "/bin",
     ]
 
+    /// What the user's login shell has on PATH, once we've asked it. Empty
+    /// until then, which only means `which` searches the two lists above.
+    ///
+    /// Guesses can't replace this: a Node-managed CLI lives at
+    /// ~/.nvm/versions/node/v22.17.0/bin, a path only that user's .zshrc
+    /// knows, and installers that drop a binary in ~/.local/bin are now the
+    /// norm rather than the exception.
+    private static var loginDirs: [String] = []
+
+    /// Asks the user's own shell where things are. One interactive login
+    /// shell per launch — interactive because PATH is set in .zshrc far
+    /// more often than in .zprofile — so this belongs at startup and
+    /// nowhere near a hot path.
+    static func resolveLoginPath() async {
+        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        guard FileManager.default.isExecutableFile(atPath: shell) else { return }
+        let out = try? await run(
+            shell, ["-ilc", "printf '\(pathOpen)%s\(pathClose)' \"$PATH\""],
+            label: "\(shell) -ilc printf $PATH"
+        )
+        guard let dirs = loginPath(from: out ?? ""), !dirs.isEmpty else { return }
+        loginDirs = dirs
+    }
+
+    // An interactive shell prints things of its own — a motd, a prompt
+    // preamble — so the answer is fenced rather than read as the whole of
+    // stdout.
+    private static let pathOpen = "<TheGitPATH>"
+    private static let pathClose = "</TheGitPATH>"
+
+    /// The fenced PATH out of a login shell's chatter, split into
+    /// directories. nil when the fence isn't there at all — an empty list
+    /// and "the shell never answered" must not be the same thing.
+    static func loginPath(from output: String) -> [String]? {
+        guard let start = output.range(of: pathOpen),
+            let end = output.range(of: pathClose, options: .backwards),
+            start.upperBound <= end.lowerBound
+        else { return nil }
+        return output[start.upperBound..<end.lowerBound]
+            .split(separator: ":")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
     /// Absolute path of an executable, or nil when it isn't installed.
     static func which(_ binary: String) -> String? {
         let pathDirs = (ProcessInfo.processInfo.environment["PATH"] ?? "")
             .split(separator: ":").map(String.init)
-        for dir in pathDirs + extraDirs {
+        for dir in pathDirs + loginDirs + extraDirs {
             let candidate = dir + "/" + binary
             if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
         }

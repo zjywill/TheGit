@@ -386,14 +386,25 @@ actor GitClient {
         try await run(["commit", "-m", message])
     }
 
-    func checkout(branch: String) async throws {
-        try await withAutoStash("checkout") { try await run(["checkout", branch]) }
+    /// `catchUp` advances the branch to its upstream when it is behind —
+    /// see `fastForward(to:)`. Off by default so the checkouts that are a
+    /// step inside a larger operation (drag-and-drop merge/rebase, tags,
+    /// detached commits) keep landing exactly where they're told.
+    func checkout(branch: String, catchUp: Bool = false) async throws {
+        try await withAutoStash("checkout") {
+            try await run(["checkout", branch])
+            if catchUp { try await fastForward(to: "@{upstream}") }
+        }
     }
 
     /// Checkout a remote branch as a new local tracking branch (or switch
     /// if a local with the same name exists). `--track <remote>/<branch>`
     /// is explicit, so it stays unambiguous with multiple remotes —
     /// DWIM `checkout <name>` errors when two remotes have the branch.
+    ///
+    /// The local branch is then caught up to the remote one: picking
+    /// "Checkout origin/main" and landing on a local `main` from last week
+    /// is the one thing the menu item doesn't say.
     func checkoutRemote(_ branch: Branch, localExists: Bool) async throws {
         guard case .remote = branch.kind else {
             try await checkout(branch: branch.name)
@@ -402,10 +413,27 @@ actor GitClient {
         try await withAutoStash("checkout") {
             if localExists {
                 try await run(["checkout", branch.shortName])
+                try await fastForward(to: branch.name)
             } else {
                 try await run(["checkout", "--track", branch.name])
             }
         }
+    }
+
+    /// Move the checked-out branch up to `ref` when it is strictly behind
+    /// it — HEAD an ancestor of the ref, so no local commit and no local
+    /// state is at stake, and every object is already here from the last
+    /// fetch. Anything else (diverged, ahead, no upstream, detached HEAD,
+    /// unknown ref) leaves HEAD alone: that's a real pull's job, and it
+    /// belongs to the Pull button.
+    private func fastForward(to ref: String) async throws {
+        // `merge-base --is-ancestor` exits non-zero both when HEAD isn't an
+        // ancestor and when the ref doesn't resolve — nothing to do either way.
+        guard (try? await run(["merge-base", "--is-ancestor", "HEAD", ref])) != nil else { return }
+        let head = try await run(["rev-parse", "HEAD"])
+        let target = try await run(["rev-parse", ref])
+        guard head != target else { return }
+        try await run(["merge", "--ff-only", ref])
     }
 
     // MARK: - Submodules

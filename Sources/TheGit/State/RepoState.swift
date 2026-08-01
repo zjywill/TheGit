@@ -1347,7 +1347,10 @@ final class RepoState: ObservableObject, Identifiable {
             if case .remote = branch.kind {
                 try await git.checkoutRemote(branch, localExists: localExists)
             } else {
-                try await git.checkout(branch: branch.name)
+                // Switching to a branch means switching to what it is now,
+                // so a local branch that's only behind its upstream catches
+                // up on the way in — no fetch, no user's commits touched.
+                try await git.checkout(branch: branch.name, catchUp: true)
             }
         }
     }
@@ -2205,6 +2208,41 @@ final class RepoState: ObservableObject, Identifiable {
                 try await forgeClient.openInBrowser(pr, forge: forge)
             } catch {
                 errorMessage = forgeFailure(error).alertText
+            }
+        }
+    }
+
+    // MARK: - Hand off to a coding agent
+
+    /// Hands a pull request to Claude or Codex: a terminal opens in this
+    /// repo with the agent already working on it. The app writes the brief
+    /// and then gets out of the way — nothing here waits on the agent, and
+    /// nothing in the repo has changed yet when the window appears.
+    func handOff(_ task: HandoffTask, to agent: AgentTool, pullRequest pr: PullRequest) {
+        handOff(task, to: agent, subject: HandoffSubject(pr))
+    }
+
+    func handOff(_ task: HandoffTask, to agent: AgentTool, issue: Issue) {
+        handOff(task, to: agent, subject: HandoffSubject(issue))
+    }
+
+    private func handOff(_ task: HandoffTask, to agent: AgentTool, subject: HandoffSubject) {
+        guard let forge else { return }
+        Task {
+            // Worth the round trip: "rebase onto main" in the prompt beats
+            // making the agent guess which branch this repo calls its
+            // mainline.
+            let base = await git.defaultBranch(remote: snapshot.defaultRemote)
+            do {
+                try Handoff.launch(
+                    agent,
+                    prompt: Handoff.prompt(task, subject: subject, forge: forge, base: base),
+                    cwd: path,
+                    label: "\(forge.label(subject.number)) \(task.slug)",
+                    target: .preferred
+                )
+            } catch {
+                report(error)
             }
         }
     }
