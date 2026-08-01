@@ -57,6 +57,7 @@ struct TheGitApp: App {
         // would stack a second, unrelated tab bar above it — and its View
         // menu items sit right next to ours, one slip away. Off entirely.
         NSWindow.allowsAutomaticWindowTabbing = false
+        ThemeFrameCornerRadius.install()
     }
 
     var body: some Scene {
@@ -65,7 +66,6 @@ struct TheGitApp: App {
                 .environmentObject(appState)
                 .environment(\.uiZoom, zoom)
                 .frame(minWidth: Self.minContent.width, minHeight: Self.minContent.height)
-                .background(MainWindowChrome())
                 // The frame alone is not enough — see WindowFloor.
                 .background(WindowFloor(size: Self.minContent))
         }
@@ -102,8 +102,11 @@ struct TheGitApp: App {
                 Button("Zoom Out") { setZoom(zoomLevel - 1) }
                     .keyboardShortcut("-")
                     .disabled(zoomLevel <= 0)
+                // ⌥⌘0, not the browsers' ⌘0: the tab strip owns ⌘0 for the
+                // Dashboard (the zero of its ⌘1…⌘9 family), and two live
+                // bindings on one chord fire nondeterministically.
                 Button("Actual Size") { setZoom(UIZoom.defaultLevel) }
-                    .keyboardShortcut("0")
+                    .keyboardShortcut("0", modifiers: [.command, .option])
                     .disabled(zoomLevel == UIZoom.defaultLevel)
             }
         }
@@ -113,6 +116,27 @@ struct TheGitApp: App {
         Settings {
             SettingsRootView()
                 .environment(\.uiZoom, zoom)
+        }
+    }
+}
+
+/// On macOS 26 the window's outer corner radius is 26pt with a visible
+/// toolbar and 16pt without one, decided inside NSThemeFrame with no public
+/// override. This app hides the toolbar because a visible one suppresses
+/// the custom tab row drawn in the title-bar band — but the design wants
+/// the toolbar-class radius. Swizzles the private radius getters to return
+/// the toolbar value; measured on 26.x, guarded so a future macOS that
+/// removes the selectors just keeps its default corners.
+enum ThemeFrameCornerRadius {
+    private static let radius: CGFloat = 26
+
+    static func install() {
+        guard let cls: AnyClass = NSClassFromString("NSThemeFrame") else { return }
+        for name in ["cornerRadius", "_cornerRadius", "_topCornerSize"] {
+            let sel = NSSelectorFromString(name)
+            guard let method = class_getInstanceMethod(cls, sel) else { continue }
+            let block: @convention(block) (AnyObject) -> CGFloat = { _ in radius }
+            method_setImplementation(method, imp_implementationWithBlock(block))
         }
     }
 }
@@ -127,12 +151,46 @@ struct RootView: View {
             if let repo = appState.activeRepo {
                 RepoView(repo: repo)
             } else {
-                homeWorkspace
+                // The home screens share the repository screen's top-row
+                // geometry exactly — AppTopBar reserves a leading rail as
+                // wide as the sidebar capsule, so the traffic lights and
+                // every tab keep their positions across a switch.
+                VStack(spacing: 0) {
+                    AppTopBar()
+                    Divider()
+                    // App-level status directly below the window navigation.
+                    if let update = updates.update {
+                        UpdateBanner(
+                            update: update,
+                            openReleasePage: { updates.openReleasePage() },
+                            dismiss: { updates.skipCurrentUpdate() }
+                        )
+                        Divider()
+                    }
+                    if appState.showingRepositories {
+                        RepositoriesView()
+                    } else {
+                        DashboardView()
+                    }
+                }
             }
         }
         // Here rather than on the banner itself: showing the banner is this
         // stack's change, so this is the transaction its transition rides on.
         .animation(.easeOut(duration: reduceMotion ? 0 : 0.2), value: updates.update)
+        // The top bar owns the title-bar space on every screen; the window
+        // chrome below keeps the real title bar transparent over it.
+        .ignoresSafeArea(.container, edges: .top)
+        // No system glass over the top bar. With the content owning the
+        // title-bar band, macOS 26 still draws its scroll-edge effect there
+        // whenever the screen below happens to be scrollable — which dimmed
+        // the tabs on the Dashboard but not on Repositories, whose list
+        // fits. The bar draws its own material; the effect is never right.
+        .modifier(HideTopScrollEdgeEffect())
+        // Inside RootView, not on the WindowGroup root: SwiftUI quietly
+        // reasserts title-bar properties when the screen below changes, and
+        // only a view that re-renders on that change re-applies the chrome.
+        .background(MainWindowChrome())
         .alert(
             "Not a Git repository",
             isPresented: Binding(
@@ -181,39 +239,134 @@ struct RootView: View {
         }
     }
 
-    /// The two app-level destinations stay full width. Only a repository
-    /// owns a navigator column, so opening Dashboard or Repositories restores
-    /// the original single-surface window instead of leaving an empty rail.
-    private var homeWorkspace: some View {
-        VStack(spacing: 0) {
-            // App-level status sits immediately below the window navigation.
-            if let update = updates.update {
-                UpdateBanner(
-                    update: update,
-                    openReleasePage: { updates.openReleasePage() },
-                    dismiss: { updates.skipCurrentUpdate() }
-                )
-                Divider()
+}
+
+/// See the note at its use site in RootView. Its own modifier only because
+/// `scrollEdgeEffectHidden` needs an availability guard.
+private struct HideTopScrollEdgeEffect: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.scrollEdgeEffectHidden(true, for: .top)
+        } else {
+            content
+        }
+    }
+}
+
+/// The home screens' top row, drawn to the repository screen's geometry:
+/// a leading rail exactly as wide as the sidebar capsule holds the traffic
+/// lights where the capsule's own title row holds them, and the tab strip
+/// starts where it starts beside the capsule. The strip used to live in a
+/// different row on each screen and every switch teleported it; now a
+/// switch changes nothing above the content.
+struct AppTopBar: View {
+    @EnvironmentObject var appState: AppState
+
+    /// Fixed, not zoomed: this row shares the window's title-bar space and
+    /// the traffic lights are system-sized.
+    static let height: CGFloat = 52
+
+    var body: some View {
+        HStack(spacing: 0) {
+            HStack(spacing: 0) {
+                WindowControls()
+                    .frame(width: 54, height: 20)
+                    // 24 from the window edge and 8 down: where the capsule
+                    // (8 inset + 16 padding) puts them on the repo screen.
+                    .padding(.leading, 24)
+                    .padding(.top, 8)
+                Spacer(minLength: 0)
             }
+            .frame(width: RepoView.storedSidebarWidth())
             RepoTabsBar()
-            Divider()
-            if appState.showingRepositories {
-                RepositoriesView()
-            } else {
-                DashboardView()
+            // The home screens' commands, where their toolbar items used to
+            // be. A repository's commands live in its own command bar below.
+            if appState.activeRepo == nil {
+                HStack(spacing: 2) {
+                    if appState.showingRepositories {
+                        TopBarIconButton(
+                            systemImage: "folder.badge.plus",
+                            help: "Add every Git repository inside a folder",
+                            disabled: appState.scanning
+                        ) { appState.scanFolderPanel() }
+                        TopBarIconButton(
+                            systemImage: "rectangle.stack.badge.plus",
+                            help: "Group repositories under a heading of your own"
+                        ) { appState.addCatalogSection() }
+                        TopBarIconButton(
+                            systemImage: "arrow.clockwise",
+                            help: "Re-read every folder in the list (⌘R)",
+                            spinning: appState.refreshingCatalog,
+                            shortcut: "r"
+                        ) { appState.refreshCatalog(userInitiated: true) }
+                    } else {
+                        TopBarIconButton(
+                            systemImage: "folder.badge.plus",
+                            help: "Open Repository (⌘O)"
+                        ) { appState.openRepoPanel() }
+                        TopBarIconButton(
+                            systemImage: "arrow.clockwise",
+                            help: "Re-read every repository (⌘R)",
+                            spinning: appState.refreshingDashboard,
+                            shortcut: "r"
+                        ) { appState.refreshDashboard() }
+                    }
+                }
+                .padding(.trailing, 10)
             }
         }
-        // These commands belong only to the two app-level destinations.
-        // Keeping their toolbar on this subtree is also structural: a
-        // repository window draws its floating sidebar into the title-bar
-        // safe area, so a toolbar owned by RootView would reserve an empty
-        // strip above that entire layout.
-        .toolbar {
-            if appState.showingRepositories {
-                RepositoriesToolbar()
-            } else {
-                DashboardToolbar()
-            }
+        .frame(height: Self.height)
+        .background(.bar)
+    }
+}
+
+/// One top-bar action: the same quiet icon-in-a-rounded-rect the pinned
+/// tabs use, so the row reads as one family of controls.
+private struct TopBarIconButton: View {
+    let systemImage: String
+    let help: String
+    var disabled = false
+    var spinning = false
+    var shortcut: KeyEquivalent?
+    let action: () -> Void
+
+    @Environment(\.uiZoom) private var zoom
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .zoomFont(12)
+                .foregroundStyle(.secondary)
+                .refreshSpin(spinning)
+                .frame(width: 30 * zoom, height: 28 * zoom)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(hovering ? Color.primary.opacity(0.04) : .clear)
+                        .animation(.easeOut(duration: 0.12), value: hovering)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.rowPressEffect)
+        .disabled(disabled)
+        .modifier(OptionalShortcut(key: shortcut))
+        .help(help)
+        .onHover {
+            hovering = $0
+            AppState.pointerOverTopControl = $0
+        }
+    }
+}
+
+/// `.keyboardShortcut` has no none-case; this applies one only when asked.
+private struct OptionalShortcut: ViewModifier {
+    let key: KeyEquivalent?
+
+    func body(content: Content) -> some View {
+        if let key {
+            content.keyboardShortcut(key)
+        } else {
+            content
         }
     }
 }
@@ -350,9 +503,8 @@ private struct TabWidthKey: PreferenceKey {
     }
 }
 
-/// Top tab bar: one tab per open repository, like a browser. On repository
-/// screens it belongs to the detail column; Dashboard and Repositories use
-/// the same bar across their full-width workspace.
+/// Top tab bar: one tab per open repository, like a browser. It lives in
+/// AppTopBar's single row on every screen.
 ///
 /// Reordering is a plain drag gesture, not a pasteboard drag. Two reasons,
 /// both learned the hard way: `.draggable` in this strip never started a
@@ -363,7 +515,6 @@ private struct TabWidthKey: PreferenceKey {
 struct RepoTabsBar: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.uiZoom) private var zoom
-    var fillsTitleBar = false
 
     private static let spacing: CGFloat = 2
     /// The drag gesture measures in this space — the strip itself, which
@@ -465,8 +616,9 @@ struct RepoTabsBar: View {
             }
         }
         .padding(.horizontal, 10 * zoom)
-        .frame(height: fillsTitleBar ? 52 : 38 * zoom)
-        .background(.bar)
+        // The bar fills AppTopBar's fixed row; the row owns the height and
+        // the background.
+        .frame(maxHeight: .infinity)
         .onPreferenceChange(TabWidthKey.self) { widths = $0 }
     }
 }
@@ -577,9 +729,12 @@ private struct WindowFloor: NSViewRepresentable {
     }
 }
 
-/// Keeps the standard titled window, and therefore the system's large outer
-/// corner radius, while removing the redundant app name from its chrome.
-/// SwiftUI reasserts title-bar properties when toolbars appear or disappear,
+/// The window's one chrome, applied once and never handed back mid-session:
+/// transparent title bar, no title, content owning the full height. Every
+/// screen shares it, so switching tabs can't change the window's outline —
+/// the old per-screen pair of chromes restored each other's settings on
+/// every switch, flashing the "TheGit" title and swapping corner radii.
+/// SwiftUI reasserts title-bar properties when windows change key state,
 /// so this follows the same key/occlusion pattern as the Settings window.
 private struct MainWindowChrome: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -596,17 +751,45 @@ private struct MainWindowChrome: NSViewRepresentable {
     final class Coordinator {
         private weak var window: NSWindow?
         private var observers: [NSObjectProtocol] = []
+        private var propertyClamps: [NSKeyValueObservation] = []
 
         func attach(to window: NSWindow) {
             apply(to: window)
             guard self.window !== window else { return }
             self.window = window
+            // Synchronous clamps, not another deferred re-apply: SwiftUI
+            // re-shows the title inside its screen-switch commit, and any
+            // notification-driven fix lands a frame later — the user sees
+            // "TheGit" blink in the title bar on every switch. KVO fires
+            // inside the setter, so the wrong value never reaches a frame.
+            // The re-set from inside the handler recurses once and stops on
+            // the equality guard.
+            propertyClamps = [
+                window.observe(\.titleVisibility) { window, _ in
+                    if window.titleVisibility != .hidden {
+                        window.titleVisibility = .hidden
+                    }
+                },
+                window.observe(\.titlebarAppearsTransparent) { window, _ in
+                    if !window.titlebarAppearsTransparent {
+                        window.titlebarAppearsTransparent = true
+                    }
+                },
+            ]
             let center = NotificationCenter.default
             observers.forEach(center.removeObserver)
             observers = [
                 NSWindow.didBecomeKeyNotification,
                 NSWindow.didResignKeyNotification,
                 NSWindow.didChangeOcclusionStateNotification,
+                // The load-bearing one: SwiftUI re-shows the title and the
+                // title-bar material somewhere in its own commit after a
+                // screen switch, later than any deferred re-apply from this
+                // side. didUpdate fires on every window display pass, so the
+                // clamp lands the same frame as whatever undid it. apply()
+                // writes only on an actual difference — steady state is a
+                // few property reads.
+                NSWindow.didUpdateNotification,
             ].map { name in
                 center.addObserver(forName: name, object: window, queue: .main) {
                     [weak self] note in
@@ -623,10 +806,28 @@ private struct MainWindowChrome: NSViewRepresentable {
             if !window.titlebarAppearsTransparent {
                 window.titlebarAppearsTransparent = true
             }
+            if !window.styleMask.contains(.fullSizeContentView) {
+                window.styleMask.insert(.fullSizeContentView)
+            }
+            if window.titlebarSeparatorStyle != .none {
+                window.titlebarSeparatorStyle = .none
+            }
+            // The app draws its own top bar in this space; a visible (even
+            // empty) toolbar covers that row. This costs the window macOS
+            // 26's larger toolbar corner radius (36pt), measured against the
+            // 21pt it gets without one — on Tahoe the radius follows toolbar
+            // visibility and nothing else, so a custom row in the title-bar
+            // band and the 36pt radius are mutually exclusive.
+            // The app draws its own top bar in this space; a visible (even
+            // empty) toolbar suppresses SwiftUI content drawn in the title-
+            // bar band. The toolbar-sized 26pt corner radius comes from the
+            // swizzle in ThemeFrameCornerRadius instead.
+            window.toolbar?.isVisible = false
         }
 
         deinit {
             observers.forEach(NotificationCenter.default.removeObserver)
+            propertyClamps.forEach { $0.invalidate() }
         }
     }
 }

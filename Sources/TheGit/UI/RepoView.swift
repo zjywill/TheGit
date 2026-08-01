@@ -17,6 +17,13 @@ struct RepoView: View {
     @State private var sidebarIdealWidth = RepoView.storedSidebarWidth()
     @State private var commitIdealWidth = RepoView.storedWidth(
         key: RepoView.commitWidthKey, fallback: 300)
+    /// The commit panel's LIVE width, unlike commitIdealWidth (whose
+    /// deliberate read-once semantics are documented on workArea). Only the
+    /// command bar reads it: its capsule centres over the graph pane, so it
+    /// has to track the divider through a drag and the window through a
+    /// resize.
+    @State private var commitPaneWidth = RepoView.storedWidth(
+        key: RepoView.commitWidthKey, fallback: 300)
 
     private static let sidebarWidthKey = "sidebarPaneWidth"
     private static let commitWidthKey = "commitPanelWidth"
@@ -27,7 +34,9 @@ struct RepoView: View {
         return width > 0 ? CGFloat(width) : fallback
     }
 
-    private static func storedSidebarWidth() -> CGFloat {
+    /// Internal: AppTopBar sizes the home screens' leading rail with this,
+    /// so the tab strip starts at the same x on every screen.
+    static func storedSidebarWidth() -> CGFloat {
         let width = storedWidth(key: sidebarWidthKey, fallback: 292)
         return sidebarWidthRange ~= width ? width : 292
     }
@@ -59,12 +68,15 @@ struct RepoView: View {
             // the sidebar (and its per-tab filter box) resets.
             RepoSidebarShell(repo: repo)
                 .frame(width: sidebarIdealWidth)
-                .ignoresSafeArea(.container, edges: .top)
 
             VStack(spacing: 0) {
-                // Tabs fill the title-bar row beside the sidebar's traffic
-                // lights. They stay present on every repository detail view.
-                RepoTabsBar(fillsTitleBar: true)
+                // The tab strip, in the title-bar band beside the capsule.
+                // Its x matches the home screens exactly: their top bar
+                // reserves a rail of the same stored sidebar width, so a
+                // switch never moves a tab (see AppTopBar).
+                RepoTabsBar()
+                    .frame(height: AppTopBar.height)
+                    .background(.bar)
                 Divider()
                 if let update = updates.update {
                     UpdateBanner(
@@ -75,7 +87,7 @@ struct RepoView: View {
                     Divider()
                 }
                 // Repository commands stay directly below their active tab.
-                RepoCommandBar(repo: repo)
+                RepoCommandBar(repo: repo, trailingWidth: commitPaneWidth)
                 Divider()
                 workArea
             }
@@ -86,7 +98,6 @@ struct RepoView: View {
             // The graph and commit panel minima together. The window floor
             // keeps the complete split above this constraint.
             .frame(minWidth: 660)
-            .ignoresSafeArea(.container, edges: .top)
         }
         // A transparent resize target replaces HSplitView's visible divider.
         // It keeps the panel directly draggable without drawing a straight
@@ -101,11 +112,6 @@ struct RepoView: View {
                 .offset(x: sidebarIdealWidth - 4)
             }
         }
-        // Match the floating Settings sidebar from Issue #34: content owns
-        // the whole window height and the native traffic lights live inside
-        // the sidebar's own title row.
-        .ignoresSafeArea(.container, edges: .top)
-        .background(RepoWindowChrome())
         // Bottom centre of the panes, which lands over the oldest loaded
         // commits — the one part of this window nobody is reading when a
         // command fails. The other two candidates are both worse: the
@@ -282,6 +288,7 @@ struct RepoView: View {
                 .frame(minWidth: 260, idealWidth: commitIdealWidth, maxWidth: 420)
                 .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
                     Self.store($0, key: Self.commitWidthKey)
+                    commitPaneWidth = $0
                 }
             }
             // An issue and a pull request share ONE wrapper, and the
@@ -326,150 +333,80 @@ struct RepoView: View {
     }
 }
 
-/// Lets the repository's custom tabs and floating sidebar own the title-bar
-/// row while AppKit keeps ownership of the real traffic-light controls.
-private struct RepoWindowChrome: NSViewRepresentable {
-    func makeCoordinator() -> Coordinator { Coordinator() }
-
-    func makeNSView(context: Context) -> NSView { NSView() }
-
-    func updateNSView(_ view: NSView, context: Context) {
-        DispatchQueue.main.async {
-            guard let window = view.window else { return }
-            context.coordinator.attach(to: window)
-        }
-    }
-
-    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
-        coordinator.restore()
-    }
-
-    final class Coordinator {
-        private weak var window: NSWindow?
-        private var observers: [NSObjectProtocol] = []
-        private var titlebarAppearedTransparent = false
-        private var titleWasVisible = true
-        private var hadFullSizeContentView = false
-        private var toolbarWasVisible: Bool?
-        private var separatorStyle: NSTitlebarSeparatorStyle?
-
-        func attach(to window: NSWindow) {
-            if self.window !== window {
-                restore()
-                self.window = window
-                titlebarAppearedTransparent = window.titlebarAppearsTransparent
-                titleWasVisible = window.titleVisibility == .visible
-                hadFullSizeContentView = window.styleMask.contains(.fullSizeContentView)
-                toolbarWasVisible = window.toolbar?.isVisible
-                separatorStyle = window.titlebarSeparatorStyle
-            }
-            apply(to: window)
-            guard observers.isEmpty else { return }
-            let center = NotificationCenter.default
-            observers = [
-                NSWindow.didBecomeKeyNotification,
-                NSWindow.didResignKeyNotification,
-                NSWindow.didChangeOcclusionStateNotification,
-            ].map { name in
-                center.addObserver(forName: name, object: window, queue: .main) {
-                    [weak self] note in
-                    guard let window = note.object as? NSWindow else { return }
-                    self?.apply(to: window)
-                }
-            }
-        }
-
-        private func apply(to window: NSWindow) {
-            if !window.titlebarAppearsTransparent {
-                window.titlebarAppearsTransparent = true
-            }
-            if window.titleVisibility != .hidden {
-                window.titleVisibility = .hidden
-            }
-            if !window.styleMask.contains(.fullSizeContentView) {
-                window.styleMask.insert(.fullSizeContentView)
-            }
-            if window.titlebarSeparatorStyle != .none {
-                window.titlebarSeparatorStyle = .none
-            }
-            // The repository draws its own tab row in this space. Keeping an
-            // empty toolbar visible would cover that row even though the
-            // content extends under the title bar.
-            window.toolbar?.isVisible = false
-        }
-
-        func restore() {
-            let center = NotificationCenter.default
-            observers.forEach(center.removeObserver)
-            observers = []
-            if let window {
-                window.titlebarAppearsTransparent = titlebarAppearedTransparent
-                window.titleVisibility = titleWasVisible ? .visible : .hidden
-                if !hadFullSizeContentView {
-                    window.styleMask.remove(.fullSizeContentView)
-                }
-                if let separatorStyle {
-                    window.titlebarSeparatorStyle = separatorStyle
-                }
-                if let toolbarWasVisible {
-                    window.toolbar?.isVisible = toolbarWasVisible
-                }
-            }
-            window = nil
-            toolbarWasVisible = nil
-            separatorStyle = nil
-        }
-
-        deinit {
-            restore()
-        }
-    }
-}
-
-/// The same floating sidebar shell used by the Settings window in Issue #34.
-/// The repository's high-volume navigator remains ScrollView-backed; only
-/// its structural chrome is shared with the verified Settings design.
+/// The same floating capsule shell used by the Settings window in Issue #34:
+/// the capsule owns the window's top-left corner and wraps the traffic
+/// lights in its own title row. The repository's high-volume navigator
+/// remains ScrollView-backed; only its structural chrome is shared with the
+/// verified Settings design.
 private struct RepoSidebarShell: View {
     @ObservedObject var repo: RepoState
 
-    private static let titleBarHeight: CGFloat = 52
     private static let capsuleInset: CGFloat = 8
     private static let capsuleRadius: CGFloat = 18
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
-                RepoWindowControls()
+                WindowControls()
                     .frame(width: 54, height: 20)
                 Spacer(minLength: 0)
             }
+            // 16 inside + the capsule's 8 outside = the 24 the home top bar
+            // also gives its lights, so a screen switch never moves them.
             .padding(.leading, 16)
-            .frame(height: Self.titleBarHeight - Self.capsuleInset)
+            .frame(height: AppTopBar.height - Self.capsuleInset)
             SidebarView(repo: repo)
                 .id(repo.id)
         }
-        .background(RepoSidebarMaterial())
-        .clipShape(
-            RoundedRectangle(
-                cornerRadius: Self.capsuleRadius,
-                style: .continuous
+        .background(SidebarGlass())
+            .clipShape(
+                RoundedRectangle(
+                    cornerRadius: Self.capsuleRadius,
+                    style: .continuous
+                )
             )
-        )
-        .overlay(
-            RoundedRectangle(
-                cornerRadius: Self.capsuleRadius,
-                style: .continuous
+            .overlay(
+                RoundedRectangle(
+                    cornerRadius: Self.capsuleRadius,
+                    style: .continuous
+                )
+                .stroke(Color.primary.opacity(0.10))
             )
-            .stroke(Color.primary.opacity(0.10))
-        )
-        .padding(.leading, Self.capsuleInset)
-        .padding(.vertical, Self.capsuleInset)
+            .padding(.leading, Self.capsuleInset)
+            .padding(.vertical, Self.capsuleInset)
+    }
+}
+
+/// The capsule's one glass recipe, shared with the pinned section headers
+/// inside it so header and capsule stay a single seamless surface in both
+/// appearances. The lightening wash over the raw material is what keeps the
+/// panel from reading grey in light mode: bare `.sidebar` material over a
+/// dark desktop lands mid-grey, where Xcode's and App Store's light
+/// sidebars are nearly white. `windowBackgroundColor` is white in light and
+/// near-black in dark, so the wash brightens light mode and leaves dark
+/// mode's depth alone.
+struct SidebarGlass: View {
+    var body: some View {
+        ZStack {
+            RepoSidebarMaterial()
+            // Matched against Xcode 26's light navigator, which measures
+            // RGB 247 and is nearly solid — so light mode pins that value
+            // directly and lets only a trace of the glass through. Dark mode
+            // keeps a deeper wash of the window color; the material carries
+            // the tone there and a fixed value would flatten it.
+            Color(nsColor: NSColor(name: nil) { appearance in
+                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                    ? NSColor.windowBackgroundColor.withAlphaComponent(0.45)
+                    : NSColor(srgbRed: 247 / 255, green: 247 / 255,
+                              blue: 247 / 255, alpha: 1)
+            })
+        }
     }
 }
 
 /// `NSVisualEffectView` in sidebar material, matching SettingsRootView.
 /// SwiftUI material blends only inside the opaque window and reads flat.
-private struct RepoSidebarMaterial: NSViewRepresentable {
+struct RepoSidebarMaterial: NSViewRepresentable {
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
         view.material = .sidebar
@@ -481,11 +418,11 @@ private struct RepoSidebarMaterial: NSViewRepresentable {
     func updateNSView(_ view: NSVisualEffectView, context: Context) {}
 }
 
-/// Stable traffic-light geometry inside the floating sidebar. AppKit keeps
+/// Stable traffic-light geometry inside the app's top bar. AppKit keeps
 /// the actual window and its actions; these controls only replace the title
-/// bar's visible buttons, whose bare-titlebar position is too close to the
-/// capsule edge and is reasserted during every resize.
-private struct RepoWindowControls: NSViewRepresentable {
+/// bar's visible buttons, whose bare-titlebar position is reasserted during
+/// every resize.
+struct WindowControls: NSViewRepresentable {
     func makeNSView(context: Context) -> RepoWindowControlHostView {
         RepoWindowControlHostView()
     }
@@ -494,12 +431,11 @@ private struct RepoWindowControls: NSViewRepresentable {
         view.attachIfNeeded()
     }
 
-    static func dismantleNSView(
-        _ view: RepoWindowControlHostView,
-        coordinator: ()
-    ) {
-        view.restore()
-    }
+    // No dismantle restore: every screen shows these controls, and a screen
+    // switch replaces one host with another. SwiftUI attaches the new host
+    // before tearing the old one down, so a restore here would re-show the
+    // native buttons over the new host's row for a frame — or longer, since
+    // the new host only re-hides them on the next window notification.
 }
 
 fileprivate enum RepoWindowControlKind: CaseIterable {
@@ -524,7 +460,7 @@ fileprivate enum RepoWindowControlKind: CaseIterable {
     }
 }
 
-private final class RepoWindowControlHostView: NSView {
+final class RepoWindowControlHostView: NSView {
     private struct OriginalControl {
         let button: NSButton
         let wasHidden: Bool
@@ -812,6 +748,11 @@ private struct SidebarResizeHandle: View {
 /// app navigation first, then actions for that navigation target.
 struct RepoCommandBar: View {
     @ObservedObject var repo: RepoState
+    /// Live width of the commit panel in the split below. The command
+    /// capsule centres over the graph pane — everything left of that panel —
+    /// and the search capsule centres over the panel itself, so both track
+    /// the divider drag and the window resize.
+    var trailingWidth: CGFloat = 300
     @FocusState private var searchFocused: Bool
     @Environment(\.uiZoom) private var zoom
     @AppStorage("pullMode") private var pullModeRaw = RepoState.PullMode.ff.rawValue
@@ -834,21 +775,34 @@ struct RepoCommandBar: View {
 
     private func commandRow(_ metrics: RepoCommandMetrics) -> some View {
         HStack(spacing: 0) {
-            // Match the search field's width on the leading side so the
-            // command capsule is centred in the detail column, not merely in
-            // whatever space the trailing search happens to leave behind.
-            ZStack(alignment: .leading) {
-                if repo.isBusy {
-                    ProgressView()
-                        .controlSize(.small)
-                        .frame(width: 18 * zoom, height: 28 * zoom)
-                        .transition(.opacity)
+            // This flexible region spans exactly the graph pane below (the
+            // trailing region is pinned to the commit panel's width), so
+            // centring in it is centring over the graph — wherever the
+            // divider is dragged. The busy spinner hangs at its leading
+            // edge, out of the capsule's way.
+            ZStack {
+                HStack(spacing: 0) {
+                    if repo.isBusy {
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(width: 18 * zoom, height: 28 * zoom)
+                            .transition(.opacity)
+                    }
+                    Spacer(minLength: 0)
                 }
+
+                commandCluster(metrics)
             }
-            .frame(width: metrics.searchWidth * zoom, alignment: .leading)
+            .frame(maxWidth: .infinity)
 
-            Spacer(minLength: 0)
+            searchCapsule(metrics)
+                // Centred within the commit panel's width; the max() keeps
+                // the capsule whole if the panel is dragged narrower than it.
+                .frame(width: max(trailingWidth, metrics.searchWidth * zoom + 16))
+        }
+    }
 
+    private func commandCluster(_ metrics: RepoCommandMetrics) -> some View {
             HStack(spacing: metrics.commandSpacing * zoom) {
                 HStack(spacing: metrics.pullSpacing * zoom) {
                     RepoCommandButton(
@@ -952,9 +906,9 @@ struct RepoCommandBar: View {
             .padding(.horizontal, metrics.surfacePadding * zoom)
             .frame(height: 34 * zoom)
             .repoCommandSurface()
+    }
 
-            Spacer(minLength: 0)
-
+    private func searchCapsule(_ metrics: RepoCommandMetrics) -> some View {
             HStack(spacing: 5 * zoom) {
                 Image(systemName: "magnifyingglass")
                     .zoomFont(11)
@@ -991,7 +945,6 @@ struct RepoCommandBar: View {
             .frame(width: metrics.searchWidth * zoom, height: 34 * zoom)
             .repoCommandSurface()
             .help("Search commits by message, author, or sha (⌘F, esc to clear)")
-        }
     }
 }
 
