@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Right panel: unstaged / staged files + commit message + commit button.
@@ -48,9 +49,11 @@ struct CommitPanelView: View {
                 files: repo.snapshot.unstaged,
                 actionIcon: "plus.circle",
                 actionHelp: "Stage file",
+                actionTitle: "Stage",
                 bulkTitle: "Stage All",
                 emptyText: "No unstaged changes — working tree is clean",
                 action: { repo.stage($0) },
+                batchAction: { repo.stage($0) },
                 bulkAction: { repo.stageAll() },
                 repo: repo
             )
@@ -60,9 +63,11 @@ struct CommitPanelView: View {
                 files: repo.snapshot.staged,
                 actionIcon: "minus.circle",
                 actionHelp: "Unstage file",
+                actionTitle: "Unstage",
                 bulkTitle: "Unstage All",
                 emptyText: "No staged changes — stage files to commit them",
                 action: { repo.unstage($0) },
+                batchAction: { repo.unstage($0) },
                 bulkAction: { repo.unstageAll() },
                 repo: repo
             )
@@ -531,9 +536,11 @@ struct FileSection: View {
     let files: [FileChange]
     let actionIcon: String
     let actionHelp: String
+    let actionTitle: String
     let bulkTitle: String
     let emptyText: String
     let action: (FileChange) -> Void
+    let batchAction: ([FileChange]) -> Void
     let bulkAction: () -> Void
     @ObservedObject var repo: RepoState
     @Environment(\.uiZoom) private var zoom
@@ -547,18 +554,65 @@ struct FileSection: View {
         return (rows * FileListMetrics.row + (rows - 1) * FileListMetrics.spacing) * zoom + 4
     }
 
+    private var selectedFiles: [FileChange] {
+        repo.selectedWorkingTreeFiles(in: files)
+    }
+
+    private var allSelected: Bool {
+        !files.isEmpty && selectedFiles.count == files.count
+    }
+
+    private var selectAllIcon: String {
+        if allSelected { return "checkmark.square.fill" }
+        return selectedFiles.isEmpty ? "square" : "minus.square.fill"
+    }
+
+    private var batchActionLabel: String {
+        let count = selectedFiles.count
+        if count == 0 || count == files.count { return bulkTitle }
+        return "\(actionTitle) \(count)"
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 8) {
                 Text("\(title) (\(files.count))")
                     .zoomFont(11, weight: .semibold)
                     .tracking(0.3)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
                     .contentTransition(.numericText(value: Double(files.count)))
                     .animation(.easeOut(duration: 0.2), value: files.count)
                 Spacer()
                 if !files.isEmpty {
-                    Button(bulkTitle) { bulkAction() }
+                    Button {
+                        if allSelected {
+                            repo.clearFileSelection(in: files)
+                            focusedFileID = nil
+                        } else {
+                            focusedFileID = repo.selectAllFiles(in: files)?.id
+                        }
+                    } label: {
+                        Image(systemName: selectAllIcon)
+                            .zoomFont(12)
+                            .frame(width: 18 * zoom, height: 18 * zoom)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.pressEffect)
+                    .foregroundStyle(
+                        selectedFiles.isEmpty ? Color.secondary : Color.accentColor
+                    )
+                    .help(allSelected ? "Clear selection" : "Select all \(title.lowercased())")
+                    .accessibilityLabel(allSelected ? "Clear selection" : "Select all")
+
+                    Button(batchActionLabel) {
+                        let selection = selectedFiles
+                        if selection.isEmpty {
+                            bulkAction()
+                        } else {
+                            batchAction(selection)
+                        }
+                    }
                         .buttonStyle(.pressEffect)
                         .zoomFont(11)
                         .foregroundStyle(Color.accentColor)
@@ -579,40 +633,77 @@ struct FileSection: View {
                     .padding(.horizontal, 12)
                     .padding(.bottom, 10)
             } else {
-                ScrollView {
-                    LazyVStack(spacing: FileListMetrics.spacing * zoom) {
-                        ForEach(files) { file in
-                            FileRow(
-                                file: file,
-                                actionIcon: actionIcon,
-                                actionHelp: actionHelp,
-                                isSelected: repo.selectedFile?.id == file.id,
-                                action: { action(file) },
-                                select: {
-                                    repo.selectFile(file)
-                                    focusedFileID = file.id
+                let selection = selectedFiles
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: FileListMetrics.spacing * zoom) {
+                            ForEach(files) { file in
+                                let fileIsSelected = repo.selectedWorkingTreeFileIDs.contains(file.id)
+                                FileRow(
+                                    file: file,
+                                    actionIcon: actionIcon,
+                                    actionHelp: selection.count > 1 && fileIsSelected
+                                        ? "\(actionTitle) \(selection.count) selected files"
+                                        : actionHelp,
+                                    isSelected: fileIsSelected,
+                                    isFocused: focusedFileID == file.id,
+                                    action: {
+                                        if selection.count > 1 && fileIsSelected {
+                                            batchAction(selection)
+                                        } else {
+                                            action(file)
+                                        }
+                                    },
+                                    select: {
+                                        let modifiers = NSEvent.modifierFlags
+                                        focusedFileID = repo.selectFile(
+                                            file,
+                                            in: files,
+                                            extending: modifiers.contains(.shift),
+                                            toggling: modifiers.contains(.command)
+                                        )?.id
+                                    }
+                                )
+                                .id(file.id)
+                                .focusable()
+                                .focused($focusedFileID, equals: file.id)
+                                .focusEffectDisabled()
+                                .onMoveCommand { direction in
+                                    let movement: RepoState.FileSelectionDirection?
+                                    switch direction {
+                                    case .up: movement = .previous
+                                    case .down: movement = .next
+                                    default: movement = nil
+                                    }
+                                    guard let movement,
+                                          let selected = repo.moveFileSelection(
+                                            movement,
+                                            extendingSelection: NSEvent.modifierFlags.contains(.shift)
+                                          )
+                                    else { return }
+                                    focusedFileID = selected.id
                                 }
-                            )
-                            .focusable()
-                            .focused($focusedFileID, equals: file.id)
-                            .onMoveCommand { direction in
-                                let movement: RepoState.FileSelectionDirection?
-                                switch direction {
-                                case .up: movement = .previous
-                                case .down: movement = .next
-                                default: movement = nil
+                                .onCommand(#selector(NSResponder.selectAll(_:))) {
+                                    focusedFileID = repo.selectAllFiles(in: files)?.id
                                 }
-                                guard let movement,
-                                      let selected = repo.moveFileSelection(movement)
-                                else { return }
-                                focusedFileID = selected.id
+                                .contextTarget("file:" + file.id, repo)
+                                .contextMenu {
+                                    FileMenu(file: file, sectionFiles: files, repo: repo)
+                                }
+                                .padding(
+                                    .horizontal,
+                                    (FileListMetrics.inset - FileListMetrics.bleed) * zoom
+                                )
                             }
-                            .contextTarget("file:" + file.id, repo)
-                            .contextMenu { FileMenu(file: file, repo: repo) }
-                            .padding(.horizontal, (FileListMetrics.inset - FileListMetrics.bleed) * zoom)
                         }
+                        .padding(.vertical, 2)
                     }
-                    .padding(.vertical, 2)
+                    .onChange(of: focusedFileID) { _, id in
+                        guard let id else { return }
+                        // With no anchor SwiftUI performs the smallest scroll
+                        // needed to reveal the focused row.
+                        proxy.scrollTo(id)
+                    }
                 }
                 .frame(maxHeight: contentHeight)
             }
@@ -624,14 +715,39 @@ struct FileSection: View {
 /// unstaged variants differ only in the first block.
 struct FileMenu: View {
     let file: FileChange
+    let sectionFiles: [FileChange]
     @ObservedObject var repo: RepoState
+
+    private var selectedFiles: [FileChange] {
+        guard repo.selectedWorkingTreeFileIDs.contains(file.id) else { return [] }
+        return repo.selectedWorkingTreeFiles(in: sectionFiles)
+    }
+
+    private func actionLabel(_ verb: String) -> String {
+        guard selectedFiles.count > 1 else { return verb }
+        return selectedFiles.count == sectionFiles.count
+            ? "\(verb) All"
+            : "\(verb) \(selectedFiles.count) Selected"
+    }
 
     var body: some View {
         if file.area == .staged {
-            Button("Unstage") { repo.unstage(file) }
+            Button(actionLabel("Unstage")) {
+                if selectedFiles.count > 1 {
+                    repo.unstage(selectedFiles)
+                } else {
+                    repo.unstage(file)
+                }
+            }
             Button("Unstage and delete file…") { repo.fileToDelete = file }
         } else {
-            Button("Stage") { repo.stage(file) }
+            Button(actionLabel("Stage")) {
+                if selectedFiles.count > 1 {
+                    repo.stage(selectedFiles)
+                } else {
+                    repo.stage(file)
+                }
+            }
             if file.status != "?" {
                 // Untracked files have nothing to restore — Delete covers them.
                 Button("Discard changes…", role: .destructive) { repo.fileToDiscard = file }
@@ -764,6 +880,7 @@ struct FileRow: View {
     let actionIcon: String
     let actionHelp: String
     let isSelected: Bool
+    let isFocused: Bool
     let action: () -> Void
     let select: () -> Void
     @State private var hovering = false
@@ -817,9 +934,16 @@ struct FileRow: View {
             RoundedRectangle(cornerRadius: 5)
                 .fill(rowFill)
         )
+        .overlay {
+            if isFocused {
+                RoundedRectangle(cornerRadius: 5)
+                    .strokeBorder(Color.accentColor.opacity(0.7), lineWidth: 1)
+            }
+        }
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
         // Single click opens the diff — a many-times-a-day action, instant.
         .onTapGesture { select() }
     }

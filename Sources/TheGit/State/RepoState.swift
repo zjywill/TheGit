@@ -282,6 +282,11 @@ final class RepoState: ObservableObject, Identifiable {
     @Published var promptText = ""
     @Published var branchToDelete: PendingBranchDelete?
     @Published var commitToHardReset: Commit?
+    /// Working-tree rows selected for a batch Stage/Unstage. This is kept
+    /// separate from `selectedFile`, which is the one file whose diff is
+    /// open, because a multi-selection still needs one primary preview.
+    @Published private(set) var selectedWorkingTreeFileIDs: Set<FileChange.ID> = []
+    private var workingTreeSelectionAnchorID: FileChange.ID?
     @Published var selectedFile: FileChange?
     @Published var diffLines: [DiffLine] = []
     @Published var imageDiff: ImageDiff?
@@ -1005,13 +1010,7 @@ final class RepoState: ObservableObject, Identifiable {
             updateLineage()
             revealCurrentBranch()
             syncMergeDraft()
-            // Close the diff if its file no longer has changes — but only
-            // for working-tree diffs. A commit's diff (diffCommit set) is
-            // historical and must survive background refreshes.
-            if diffCommit == nil, let file = selectedFile {
-                let all = snap.staged + snap.unstaged + snap.conflicted
-                if !all.contains(where: { $0.id == file.id }) { closeDiff() }
-            }
+            reconcileWorkingTreeFileSelection(with: snap)
             updateInitialCommitGuide(for: snap)
         } catch {
             report(error)
@@ -1100,10 +1099,7 @@ final class RepoState: ObservableObject, Identifiable {
                 updateLineage()
                 revealCurrentBranch()
             }
-            if diffCommit == nil, let file = selectedFile {
-                let all = snap.staged + snap.unstaged + snap.conflicted
-                if !all.contains(where: { $0.id == file.id }) { closeDiff() }
-            }
+            reconcileWorkingTreeFileSelection(with: snap)
         } catch {
             report(error)
         }
@@ -1238,6 +1234,18 @@ final class RepoState: ObservableObject, Identifiable {
 
     func stage(_ file: FileChange) { performIndexOnly { try await $0.stage(file.path) } }
     func unstage(_ file: FileChange) { performIndexOnly { try await $0.unstage(file.path) } }
+    func stage(_ files: [FileChange]) {
+        let paths = files.map(\.path)
+        guard !paths.isEmpty else { return }
+        closeDiff()
+        performIndexOnly { try await $0.stage(paths) }
+    }
+    func unstage(_ files: [FileChange]) {
+        let paths = files.map(\.path)
+        guard !paths.isEmpty else { return }
+        closeDiff()
+        performIndexOnly { try await $0.unstage(paths) }
+    }
     func stageAll() { performIndexOnly { try await $0.stageAll() } }
     func unstageAll() { performIndexOnly { try await $0.unstageAll() } }
 
@@ -3008,6 +3016,8 @@ final class RepoState: ObservableObject, Identifiable {
         guard let hash = selectedCommit else { return }
         issueToView = nil
         prToView = nil
+        selectedWorkingTreeFileIDs = []
+        workingTreeSelectionAnchorID = nil
         selectedFile = file
         diffCommit = hash
         diffLines = []
@@ -3147,6 +3157,8 @@ final class RepoState: ObservableObject, Identifiable {
         selectedCommit = commit.hash
         issueToView = nil
         prToView = nil
+        selectedWorkingTreeFileIDs = []
+        workingTreeSelectionAnchorID = nil
         let file = FileChange(path: filePath, status: "M", area: .unstaged)
         selectedFile = file
         diffCommit = commit.hash
@@ -3187,11 +3199,117 @@ final class RepoState: ObservableObject, Identifiable {
 
     // MARK: - Diff view
 
+    func selectedWorkingTreeFiles(in files: [FileChange]) -> [FileChange] {
+        files.filter { selectedWorkingTreeFileIDs.contains($0.id) }
+    }
+
+    /// Apply Finder-style selection semantics inside one visual file
+    /// section. A selection never spans staged and unstaged lists because
+    /// their available batch action is different.
+    @discardableResult
+    func selectFile(
+        _ file: FileChange,
+        in files: [FileChange],
+        extending: Bool = false,
+        toggling: Bool = false
+    ) -> FileChange? {
+        guard let clickedIndex = files.firstIndex(where: { $0.id == file.id }) else {
+            return nil
+        }
+
+        let sectionIDs = Set(files.map(\.id))
+        let selectionIsInSection = selectedWorkingTreeFileIDs.isSubset(of: sectionIDs)
+
+        if extending {
+            let anchorIndex: Int
+            if selectionIsInSection,
+               let anchor = workingTreeSelectionAnchorID,
+               let index = files.firstIndex(where: { $0.id == anchor }) {
+                anchorIndex = index
+            } else if let selectedFile,
+                      let index = files.firstIndex(where: { $0.id == selectedFile.id }) {
+                anchorIndex = index
+                workingTreeSelectionAnchorID = selectedFile.id
+            } else {
+                anchorIndex = clickedIndex
+                workingTreeSelectionAnchorID = file.id
+            }
+
+            let bounds = min(anchorIndex, clickedIndex)...max(anchorIndex, clickedIndex)
+            let rangeIDs = Set(bounds.map { files[$0].id })
+            selectedWorkingTreeFileIDs = toggling && selectionIsInSection
+                ? selectedWorkingTreeFileIDs.union(rangeIDs)
+                : rangeIDs
+            loadWorkingTreeDiff(file)
+            return file
+        }
+
+        if toggling && selectionIsInSection {
+            workingTreeSelectionAnchorID = file.id
+            if selectedWorkingTreeFileIDs.contains(file.id) {
+                selectedWorkingTreeFileIDs.remove(file.id)
+                guard !selectedWorkingTreeFileIDs.isEmpty else {
+                    closeDiff()
+                    return nil
+                }
+                if selectedFile?.id == file.id {
+                    let replacement = files.first {
+                        selectedWorkingTreeFileIDs.contains($0.id)
+                    }
+                    if let replacement { loadWorkingTreeDiff(replacement) }
+                    return replacement
+                }
+                return selectedFile
+            }
+
+            selectedWorkingTreeFileIDs.insert(file.id)
+            loadWorkingTreeDiff(file)
+            return file
+        }
+
+        selectedWorkingTreeFileIDs = [file.id]
+        workingTreeSelectionAnchorID = file.id
+        loadWorkingTreeDiff(file)
+        return file
+    }
+
+    @discardableResult
+    func selectAllFiles(in files: [FileChange]) -> FileChange? {
+        guard let first = files.first else { return nil }
+        let sectionIDs = Set(files.map(\.id))
+        selectedWorkingTreeFileIDs = sectionIDs
+
+        if let selectedFile, diffCommit == nil, sectionIDs.contains(selectedFile.id) {
+            if workingTreeSelectionAnchorID == nil {
+                workingTreeSelectionAnchorID = selectedFile.id
+            }
+            return selectedFile
+        }
+
+        workingTreeSelectionAnchorID = first.id
+        loadWorkingTreeDiff(first)
+        return first
+    }
+
+    func clearFileSelection(in files: [FileChange]) {
+        let sectionIDs = Set(files.map(\.id))
+        selectedWorkingTreeFileIDs.subtract(sectionIDs)
+        if let anchor = workingTreeSelectionAnchorID, sectionIDs.contains(anchor) {
+            workingTreeSelectionAnchorID = nil
+        }
+        if let selectedFile, diffCommit == nil, sectionIDs.contains(selectedFile.id) {
+            closeDiff()
+        }
+    }
+
     /// Move within the file list that owns the current working-tree
     /// selection. Staged, unstaged and conflicted rows are separate visual
     /// sections, so an arrow key never crosses a section boundary.
     @discardableResult
-    func moveFileSelection(_ direction: FileSelectionDirection) -> FileChange? {
+    func moveFileSelection(
+        _ direction: FileSelectionDirection,
+        extendingSelection: Bool = false
+    ) -> FileChange? {
         guard diffCommit == nil, let selectedFile else { return nil }
 
         let files: [FileChange]
@@ -3215,11 +3333,16 @@ final class RepoState: ObservableObject, Identifiable {
         guard files.indices.contains(nextIndex) else { return selectedFile }
 
         let nextFile = files[nextIndex]
-        selectFile(nextFile)
-        return nextFile
+        return selectFile(nextFile, in: files, extending: extendingSelection)
     }
 
     func selectFile(_ file: FileChange) {
+        selectedWorkingTreeFileIDs = [file.id]
+        workingTreeSelectionAnchorID = file.id
+        loadWorkingTreeDiff(file)
+    }
+
+    private func loadWorkingTreeDiff(_ file: FileChange) {
         issueToView = nil
         prToView = nil
         selectedFile = file
@@ -3294,12 +3417,47 @@ final class RepoState: ObservableObject, Identifiable {
     func closeDiff() {
         fileDiffTask?.cancel()
         fileDiffTask = nil
+        selectedWorkingTreeFileIDs = []
+        workingTreeSelectionAnchorID = nil
         selectedFile = nil
         diffCommit = nil
         diffLines = []
         imageDiff = nil
         lfsPointer = nil
         showRawPointer = false
+    }
+
+    /// Keep selection ids aligned with status records after Git changes a
+    /// row's area or removes it. If the primary row disappeared but other
+    /// selected rows remain, preview the first survivor instead of dropping
+    /// the whole batch selection.
+    private func reconcileWorkingTreeFileSelection(with snapshot: RepoSnapshot) {
+        guard diffCommit == nil else { return }
+        let all = snapshot.staged + snapshot.unstaged + snapshot.conflicted
+        let validIDs = Set(all.map(\.id))
+        let reconciled = selectedWorkingTreeFileIDs.intersection(validIDs)
+        if reconciled != selectedWorkingTreeFileIDs {
+            selectedWorkingTreeFileIDs = reconciled
+        }
+        if let anchor = workingTreeSelectionAnchorID, !validIDs.contains(anchor) {
+            workingTreeSelectionAnchorID = nil
+        }
+
+        guard let selectedFile else { return }
+        guard !validIDs.contains(selectedFile.id) else {
+            if selectedWorkingTreeFileIDs.isEmpty {
+                selectedWorkingTreeFileIDs = [selectedFile.id]
+            }
+            return
+        }
+
+        if let replacement = all.first(where: {
+            selectedWorkingTreeFileIDs.contains($0.id)
+        }) {
+            loadWorkingTreeDiff(replacement)
+        } else {
+            closeDiff()
+        }
     }
 
     // MARK: - Conflict resolution

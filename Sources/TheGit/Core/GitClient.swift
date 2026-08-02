@@ -478,7 +478,12 @@ actor GitClient {
     // MARK: - Mutations
 
     func stage(_ path: String) async throws {
-        try await run(["add", "--", path])
+        try await stage([path])
+    }
+
+    func stage(_ paths: [String]) async throws {
+        guard !paths.isEmpty else { return }
+        try await run(["add", "--"] + paths)
     }
 
     func stageAll() async throws {
@@ -486,7 +491,12 @@ actor GitClient {
     }
 
     func unstage(_ path: String) async throws {
-        try await run(["reset", "-q", "HEAD", "--", path])
+        try await unstage([path])
+    }
+
+    func unstage(_ paths: [String]) async throws {
+        guard !paths.isEmpty else { return }
+        try await run(["reset", "-q", "HEAD", "--"] + paths)
     }
 
     func unstageAll() async throws {

@@ -1257,6 +1257,34 @@ final class RepoIntegrationTests: XCTestCase {
         XCTAssertNil(repo.errorMessage)
     }
 
+    func testBatchStageAndUnstageOperateOnOnlyTheSelectedFiles() async throws {
+        let path = try await makeRepo("stage-batch")
+        try write("one\n", to: path + "/one.txt")
+        try write("two\n", to: path + "/two.txt")
+        try write("three\n", to: path + "/three.txt")
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        let selected = repo.snapshot.unstaged.filter {
+            $0.path == "one.txt" || $0.path == "two.txt"
+        }
+        XCTAssertEqual(selected.count, 2)
+
+        repo.stage(selected)
+        XCTAssertTrue(repo.selectedWorkingTreeFileIDs.isEmpty)
+        try await waitUntil("only the selected files to be staged") {
+            repo.snapshot.staged.map(\.path).sorted() == ["one.txt", "two.txt"]
+                && untrackedPaths(repo) == ["three.txt"]
+        }
+
+        repo.unstage(repo.snapshot.staged)
+        try await waitUntil("the selected staged files to return") {
+            repo.snapshot.staged.isEmpty
+                && untrackedPaths(repo).sorted() == ["one.txt", "three.txt", "two.txt"]
+        }
+        XCTAssertNil(repo.errorMessage)
+    }
+
     /// What actually makes staging cheap, stated as behaviour: it re-reads
     /// `git status` and nothing else, so a commit made behind the app's back
     /// is still not in the log afterwards. The file watcher's full refresh
