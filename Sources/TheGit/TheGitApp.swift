@@ -501,6 +501,14 @@ private struct TabWidthKey: PreferenceKey {
     }
 }
 
+/// How much tab strip lies beyond each edge of its viewport. Zero on an edge
+/// means nothing is cut off there, which is what keeps the fade below from
+/// dimming a strip that fits.
+private struct TabScrollEdges: Equatable {
+    var leading: CGFloat = 0
+    var trailing: CGFloat = 0
+}
+
 /// Top tab bar: one tab per open repository, like a browser. It lives in
 /// AppTopBar's single row on every screen.
 ///
@@ -520,6 +528,13 @@ struct RepoTabsBar: View {
     /// change moves the tab, which moves the coordinate space, which skews
     /// the next translation, which moves the tab again.
     static let coordinateSpace = "RepoTabsBar"
+    /// The scrolling viewport, which the strip's own frame is read against to
+    /// recover the scroll offset.
+    private static let scrollSpace = "RepoTabsScroll"
+    /// How far a tab dissolves at an edge it runs past. Long enough to read
+    /// as a fade rather than a soft edge, short enough that the tab beside
+    /// it stays fully legible.
+    private static let fadeWidth: CGFloat = 24
 
     @State private var widths: [String: CGFloat] = [:]
     /// The tab under the pointer, its slot centre when the drag began, and
@@ -528,6 +543,26 @@ struct RepoTabsBar: View {
     @State private var dragStartCenter: CGFloat = 0
     @State private var dragTranslation: CGFloat = 0
     @State private var tabScrollID: String?
+    /// The strip's frame in the viewport's space, and the viewport's width.
+    /// Together they say how much strip lies past each edge.
+    @State private var contentBounds: CGRect = .zero
+    @State private var viewportWidth: CGFloat = 0
+
+    private var scrollEdges: TabScrollEdges {
+        // Before the first measurement there is no viewport to overflow.
+        guard viewportWidth > 0 else { return TabScrollEdges() }
+        return TabScrollEdges(
+            leading: -contentBounds.minX,
+            trailing: contentBounds.maxX - viewportWidth
+        )
+    }
+
+    /// The fade ramps up over the first `fadeWidth` points that go past an
+    /// edge, so a tab starting to leave dims gradually instead of the whole
+    /// gradient switching on at the first scrolled pixel.
+    private func fade(_ overflow: CGFloat) -> CGFloat {
+        min(max(overflow, 0), Self.fadeWidth)
+    }
 
     private var centers: [CGFloat] {
         TabStrip.centers(
@@ -594,6 +629,14 @@ struct RepoTabsBar: View {
                 }
                 .coordinateSpace(name: Self.coordinateSpace)
                 .scrollTargetLayout()
+                // Where the strip sits inside its viewport, which is the only
+                // way to tell a tab that is genuinely cut off from one that
+                // simply ends near the edge. macOS 14 has no
+                // onScrollGeometryChange, so this reads the offset off the
+                // content's own frame in the viewport's coordinate space.
+                .onGeometryChange(for: CGRect.self) { geometry in
+                    geometry.frame(in: .named(Self.scrollSpace))
+                } action: { contentBounds = $0 }
             }
             .scrollIndicators(.hidden)
             .scrollPosition(id: $tabScrollID)
@@ -606,12 +649,27 @@ struct RepoTabsBar: View {
             }
             .onGeometryChange(for: CGFloat.self) { geometry in
                 geometry.size.width
-            } action: { _ in
+            } action: { width in
+                viewportWidth = width
                 guard draggingID == nil else { return }
                 // Keeping the selected id as the semantic scroll position
                 // prevents a resize from leaving half of its tab clipped.
                 tabScrollID = appState.activeRepoID
             }
+            .coordinateSpace(name: Self.scrollSpace)
+            // A tab that runs past an edge was being sliced flat — worst on
+            // the selected one, whose fill ended in a hard vertical line
+            // against the neighbouring control. Fading it out instead reads
+            // as "there is more strip over here" rather than as damage.
+            .mask(
+                HStack(spacing: 0) {
+                    LinearGradient(colors: [.clear, .black], startPoint: .leading, endPoint: .trailing)
+                        .frame(width: fade(scrollEdges.leading))
+                    Color.black
+                    LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
+                        .frame(width: fade(scrollEdges.trailing))
+                }
+            )
         }
         .padding(.horizontal, 10 * zoom)
         // The bar fills AppTopBar's fixed row; the row owns the height and
