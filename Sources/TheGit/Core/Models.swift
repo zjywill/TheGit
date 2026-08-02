@@ -92,6 +92,8 @@ struct FileChange: Identifiable, Hashable, Codable {
     let path: String
     let status: Character // M A D R C U ? etc.
     let area: ChangeArea
+    /// The source path for a rename or copy.
+    var oldPath: String? = nil
 
     var id: String { path + String(status) + (area == .staged ? "+s" : "+u") }
     var fileName: String { (path as NSString).lastPathComponent }
@@ -104,12 +106,13 @@ struct FileChange: Identifiable, Hashable, Codable {
     // no notion of. Bridged through a String rather than changed here: the
     // whole app switches on that Character, and widening it to String for
     // the sake of the cache would touch every one of those sites.
-    enum CodingKeys: String, CodingKey { case path, status, area }
+    enum CodingKeys: String, CodingKey { case path, status, area, oldPath }
 
-    init(path: String, status: Character, area: ChangeArea) {
+    init(path: String, status: Character, area: ChangeArea, oldPath: String? = nil) {
         self.path = path
         self.status = status
         self.area = area
+        self.oldPath = oldPath
     }
 
     init(from decoder: Decoder) throws {
@@ -117,6 +120,7 @@ struct FileChange: Identifiable, Hashable, Codable {
         path = try c.decode(String.self, forKey: .path)
         status = try c.decode(String.self, forKey: .status).first ?? " "
         area = try c.decode(ChangeArea.self, forKey: .area)
+        oldPath = try c.decodeIfPresent(String.self, forKey: .oldPath)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -124,6 +128,7 @@ struct FileChange: Identifiable, Hashable, Codable {
         try c.encode(path, forKey: .path)
         try c.encode(String(status), forKey: .status)
         try c.encode(area, forKey: .area)
+        try c.encodeIfPresent(oldPath, forKey: .oldPath)
     }
 }
 

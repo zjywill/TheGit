@@ -249,20 +249,33 @@ enum GitParsers {
                 }
             } else if line.hasPrefix("1 ") || line.hasPrefix("2 ") {
                 // "1 XY sub mH mI mW hH hI path" / "2 ... path\torigPath"
-                let fields = line.split(separator: " ", maxSplits: 8, omittingEmptySubsequences: false)
-                guard fields.count >= 9 else { continue }
+                let renamed = line.hasPrefix("2 ")
+                // Type 2 has one extra field before the paths: R100/C087.
+                let pathIndex = renamed ? 9 : 8
+                let fields = line.split(
+                    separator: " ",
+                    maxSplits: pathIndex,
+                    omittingEmptySubsequences: false
+                )
+                guard fields.count > pathIndex else { continue }
                 let xy = fields[1]
-                var path = String(fields[8])
-                if line.hasPrefix("2 "), let tab = path.firstIndex(of: "\t") {
+                var path = String(fields[pathIndex])
+                var oldPath: String?
+                if renamed, let tab = path.firstIndex(of: "\t") {
+                    oldPath = String(path[path.index(after: tab)...])
                     path = String(path[..<tab]) // new path for renames
                 }
                 let x = xy.first ?? "."
                 let y = xy.count > 1 ? Array(xy)[1] : "."
                 if x != "." {
-                    staged.append(FileChange(path: path, status: x, area: .staged))
+                    staged.append(FileChange(
+                        path: path, status: x, area: .staged, oldPath: oldPath
+                    ))
                 }
                 if y != "." {
-                    unstaged.append(FileChange(path: path, status: y, area: .unstaged))
+                    unstaged.append(FileChange(
+                        path: path, status: y, area: .unstaged, oldPath: oldPath
+                    ))
                 }
             } else if line.hasPrefix("? ") {
                 let path = String(line.dropFirst(2))

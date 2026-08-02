@@ -94,6 +94,23 @@ enum Shell {
         label: String? = nil,
         timeout: TimeInterval? = nil
     ) async throws -> String {
+        let data = try await runData(
+            executable, args, cwd: cwd, env: env, label: label, timeout: timeout
+        )
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+
+    /// Binary-preserving counterpart to `run`, used for Git blobs such as
+    /// PNG and WebP files. Error messages are still decoded as text.
+    @discardableResult
+    static func runData(
+        _ executable: String,
+        _ args: [String],
+        cwd: String? = nil,
+        env: [String: String] = [:],
+        label: String? = nil,
+        timeout: TimeInterval? = nil
+    ) async throws -> Data {
         let child = ChildProcess()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
@@ -136,7 +153,6 @@ enum Shell {
                     // has nothing to kill and no verdict to give.
                     let ending = child.finish()
 
-                    let out = String(data: outData, encoding: .utf8) ?? ""
                     switch ending {
                     case .cancelled:
                         continuation.resume(throwing: CancellationError())
@@ -147,12 +163,13 @@ enum Shell {
                         ))
                     case nil where process.terminationStatus != 0:
                         let err = String(data: errData, encoding: .utf8) ?? ""
+                        let out = String(data: outData, encoding: .utf8) ?? ""
                         continuation.resume(throwing: ShellError(
                             command: label ?? args.joined(separator: " "),
                             message: err.isEmpty ? out : err
                         ))
                     case nil:
-                        continuation.resume(returning: out)
+                        continuation.resume(returning: outData)
                     }
                 }
             }

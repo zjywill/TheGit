@@ -537,6 +537,7 @@ struct FileSection: View {
     let bulkAction: () -> Void
     @ObservedObject var repo: RepoState
     @Environment(\.uiZoom) private var zoom
+    @FocusState private var focusedFileID: FileChange.ID?
 
     /// What the rows genuinely need, so the list never claims more. When
     /// two long lists both want more than the panel has, the VStack splits
@@ -587,8 +588,25 @@ struct FileSection: View {
                                 actionHelp: actionHelp,
                                 isSelected: repo.selectedFile?.id == file.id,
                                 action: { action(file) },
-                                select: { repo.selectFile(file) }
+                                select: {
+                                    repo.selectFile(file)
+                                    focusedFileID = file.id
+                                }
                             )
+                            .focusable()
+                            .focused($focusedFileID, equals: file.id)
+                            .onMoveCommand { direction in
+                                let movement: RepoState.FileSelectionDirection?
+                                switch direction {
+                                case .up: movement = .previous
+                                case .down: movement = .next
+                                default: movement = nil
+                                }
+                                guard let movement,
+                                      let selected = repo.moveFileSelection(movement)
+                                else { return }
+                                focusedFileID = selected.id
+                            }
                             .contextTarget("file:" + file.id, repo)
                             .contextMenu { FileMenu(file: file, repo: repo) }
                             .padding(.horizontal, (FileListMetrics.inset - FileListMetrics.bleed) * zoom)

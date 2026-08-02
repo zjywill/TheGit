@@ -142,6 +142,11 @@ final class RepoState: ObservableObject, Identifiable {
         case stash = "Stash"
     }
 
+    enum FileSelectionDirection {
+        case previous
+        case next
+    }
+
     @Published var snapshot = RepoSnapshot() {
         didSet { scheduleSnapshotSave() }
     }
@@ -279,6 +284,7 @@ final class RepoState: ObservableObject, Identifiable {
     @Published var commitToHardReset: Commit?
     @Published var selectedFile: FileChange?
     @Published var diffLines: [DiffLine] = []
+    @Published var imageDiff: ImageDiff?
     /// Set when the open diff is an LFS pointer diff: the view shows what
     /// the object is instead of three lines of oid text.
     @Published var lfsPointer: LFSPointerDiff?
@@ -286,6 +292,7 @@ final class RepoState: ObservableObject, Identifiable {
     @Published var showRawPointer = false
     /// Raw structure of the current diff, for hunk-level staging.
     private var parsedDiff = ParsedDiff()
+    private var fileDiffTask: Task<Void, Never>?
     /// Graph visibility filters (GitKraken Solo / Hide). Session-only.
     @Published var soloRev: String?
     @Published var hiddenRefs: Set<String> = []
@@ -389,6 +396,7 @@ final class RepoState: ObservableObject, Identifiable {
     @Published private(set) var prDiffState: ReviewDiffState = .loading
     @Published private(set) var prSelectedFile: ReviewFile?
     @Published private(set) var prDiffLines: [DiffLine] = []
+    @Published private(set) var prImageDiff: ImageDiff?
     /// Files the reviewer has ticked off, kept per request so switching
     /// between two of them doesn't lose either one's progress. Session-only:
     /// a tick is a reading aid, not a verdict worth restoring next launch.
@@ -2048,6 +2056,7 @@ final class RepoState: ObservableObject, Identifiable {
         prFiles = []
         prSelectedFile = nil
         prDiffLines = []
+        prImageDiff = nil
         prDiffState = .loading
         prRange = nil
         prViewedFiles = viewedByRequest[pr.number] ?? []
@@ -2064,6 +2073,7 @@ final class RepoState: ObservableObject, Identifiable {
         prFiles = []
         prSelectedFile = nil
         prDiffLines = []
+        prImageDiff = nil
         prRange = nil
     }
 
@@ -2142,10 +2152,25 @@ final class RepoState: ObservableObject, Identifiable {
         guard let range = prRange else { return }
         prSelectedFile = file
         prDiffLines = []
+        prImageDiff = nil
         prFileDiffTask?.cancel()
         let number = prToView?.number
         prFileDiffTask = Task {
             do {
+                do {
+                    if let image = try await git.reviewFileImageDiff(range: range, file: file) {
+                        guard !Task.isCancelled, prToView?.number == number,
+                              prSelectedFile?.path == file.path
+                        else { return }
+                        prImageDiff = image
+                        return
+                    }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    // An image-looking path with an unavailable or invalid
+                    // blob still gets Git's ordinary binary/text fallback.
+                }
                 let text = try await git.reviewFileDiff(range: range, file: file)
                 guard !Task.isCancelled, prToView?.number == number,
                       prSelectedFile?.path == file.path
@@ -2986,15 +3011,35 @@ final class RepoState: ObservableObject, Identifiable {
         selectedFile = file
         diffCommit = hash
         diffLines = []
+        imageDiff = nil
         lfsPointer = nil
-        Task {
+        fileDiffTask?.cancel()
+        fileDiffTask = Task {
             do {
+                do {
+                    if let image = try await git.commitImageDiff(hash, file: file) {
+                        guard !Task.isCancelled, selectedFile?.id == file.id,
+                              diffCommit == hash
+                        else { return }
+                        imageDiff = image
+                        parsedDiff = ParsedDiff()
+                        return
+                    }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    // Fall through to the established textual diff.
+                }
                 let text = try await git.commitFileDiff(hash, path: file.path)
-                lfsPointer = LFSParsers.pointerDiff(text)
                 let parsed = DiffParser.parse(text)
+                guard !Task.isCancelled, selectedFile?.id == file.id,
+                      diffCommit == hash
+                else { return }
+                lfsPointer = LFSParsers.pointerDiff(text)
                 parsedDiff = parsed
                 diffLines = parsed.lines
             } catch {
+                guard !Task.isCancelled else { return }
                 report(error)
             }
         }
@@ -3102,18 +3147,39 @@ final class RepoState: ObservableObject, Identifiable {
         selectedCommit = commit.hash
         issueToView = nil
         prToView = nil
-        selectedFile = FileChange(path: filePath, status: "M", area: .unstaged)
+        let file = FileChange(path: filePath, status: "M", area: .unstaged)
+        selectedFile = file
         diffCommit = commit.hash
         diffLines = []
+        imageDiff = nil
         lfsPointer = nil
-        Task {
+        fileDiffTask?.cancel()
+        fileDiffTask = Task {
             do {
+                do {
+                    if let image = try await git.commitImageDiff(commit.hash, file: file) {
+                        guard !Task.isCancelled, selectedFile?.id == file.id,
+                              diffCommit == commit.hash
+                        else { return }
+                        imageDiff = image
+                        parsedDiff = ParsedDiff()
+                        return
+                    }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    // Fall through to the established textual diff.
+                }
                 let text = try await git.commitFileDiff(commit.hash, path: filePath)
-                lfsPointer = LFSParsers.pointerDiff(text)
                 let parsed = DiffParser.parse(text)
+                guard !Task.isCancelled, selectedFile?.id == file.id,
+                      diffCommit == commit.hash
+                else { return }
+                lfsPointer = LFSParsers.pointerDiff(text)
                 parsedDiff = parsed
                 diffLines = parsed.lines
             } catch {
+                guard !Task.isCancelled else { return }
                 report(error)
             }
         }
@@ -3121,27 +3187,82 @@ final class RepoState: ObservableObject, Identifiable {
 
     // MARK: - Diff view
 
+    /// Move within the file list that owns the current working-tree
+    /// selection. Staged, unstaged and conflicted rows are separate visual
+    /// sections, so an arrow key never crosses a section boundary.
+    @discardableResult
+    func moveFileSelection(_ direction: FileSelectionDirection) -> FileChange? {
+        guard diffCommit == nil, let selectedFile else { return nil }
+
+        let files: [FileChange]
+        if selectedFile.area == .staged {
+            files = snapshot.staged
+        } else if snapshot.conflicted.contains(where: { $0.id == selectedFile.id }) {
+            files = snapshot.conflicted
+        } else {
+            files = snapshot.unstaged
+        }
+
+        guard let currentIndex = files.firstIndex(where: { $0.id == selectedFile.id }) else {
+            return nil
+        }
+        let offset: Int
+        switch direction {
+        case .previous: offset = -1
+        case .next: offset = 1
+        }
+        let nextIndex = currentIndex + offset
+        guard files.indices.contains(nextIndex) else { return selectedFile }
+
+        let nextFile = files[nextIndex]
+        selectFile(nextFile)
+        return nextFile
+    }
+
     func selectFile(_ file: FileChange) {
         issueToView = nil
         prToView = nil
         selectedFile = file
         diffCommit = nil
         diffLines = []
+        imageDiff = nil
         lfsPointer = nil
-        Task {
+        fileDiffTask?.cancel()
+        fileDiffTask = Task {
             do {
+                do {
+                    if let image = try await git.workingTreeImageDiff(file) {
+                        guard !Task.isCancelled, selectedFile?.id == file.id,
+                              diffCommit == nil
+                        else { return }
+                        imageDiff = image
+                        parsedDiff = ParsedDiff()
+                        return
+                    }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    // Fall through to text when the image path is stale or
+                    // the contents are not actually a supported raster.
+                }
                 let parsed: ParsedDiff
+                var pointer: LFSPointerDiff?
                 if file.status == "?" {
                     let content = (try? String(contentsOfFile: path + "/" + file.path, encoding: .utf8)) ?? ""
                     parsed = DiffParser.synthesizeAdded(content)
                 } else {
                     let text = try await git.diff(path: file.path, staged: file.area == .staged)
-                    lfsPointer = LFSParsers.pointerDiff(text)
+                    pointer = LFSParsers.pointerDiff(text)
                     parsed = DiffParser.parse(text)
                 }
+                guard !Task.isCancelled, selectedFile?.id == file.id,
+                      diffCommit == nil
+                else { return }
+                lfsPointer = pointer
                 parsedDiff = parsed
                 diffLines = parsed.lines
             } catch {
+                guard !Task.isCancelled else { return }
                 report(error)
             }
         }
@@ -3171,9 +3292,12 @@ final class RepoState: ObservableObject, Identifiable {
     }
 
     func closeDiff() {
+        fileDiffTask?.cancel()
+        fileDiffTask = nil
         selectedFile = nil
         diffCommit = nil
         diffLines = []
+        imageDiff = nil
         lfsPointer = nil
         showRawPointer = false
     }

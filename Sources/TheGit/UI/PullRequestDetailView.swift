@@ -485,6 +485,9 @@ struct PullRequestDetailView: View {
                     .zoomFont(12)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let image = repo.prImageDiff {
+                ImageDiffView(diff: image)
+                    .id(repo.prSelectedFile?.path)
             } else if repo.prSelectedFile?.isBinary == true {
                 Text("Binary file — nothing to show as text.")
                     .zoomFont(12)
