@@ -215,6 +215,46 @@ struct CommitPanelView: View {
         } message: {
             Text("The file will be removed from disk. Uncommitted changes in it are lost.")
         }
+        .alert(
+            "Stop tracking \(repo.pendingIgnore?.file.fileName ?? "")?",
+            isPresented: Binding(
+                get: { repo.pendingIgnore != nil },
+                set: { if !$0 { repo.pendingIgnore = nil } }
+            ),
+            presenting: repo.pendingIgnore
+        ) { _ in
+            Button("Ignore and Stop Tracking") { repo.confirmIgnore() }
+            Button("Cancel", role: .cancel) {}
+        } message: { pending in
+            // Spell out the index part: the file staying on disk while the
+            // next commit records it as deleted is the surprising half.
+            Text("""
+                \(pending.pattern) goes into \(pending.ignoreFile). \
+                Git only ignores files it isn't already tracking, so \
+                \(pending.file.fileName) is removed from the index — it stays \
+                on disk, and the next commit records it as deleted for \
+                everyone else.
+                """)
+        }
+        .alert(
+            "Stop tracking \(repo.fileToUntrack?.fileName ?? "")?",
+            isPresented: Binding(
+                get: { repo.fileToUntrack != nil },
+                set: { if !$0 { repo.fileToUntrack = nil } }
+            )
+        ) {
+            Button("Stop Tracking") { repo.confirmStopTracking() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            // No pattern is written here, so say what that leaves behind:
+            // without an ignore rule the file comes straight back as
+            // untracked, which looks like the action did nothing.
+            Text("""
+                The file is removed from the index and stays on disk. The next \
+                commit records it as deleted for everyone else, and unless an \
+                ignore rule covers it, it reappears here as an untracked file.
+                """)
+        }
     }
 
     /// The divider above the message box doubles as its resize handle —
@@ -579,19 +619,20 @@ struct FileMenu: View {
                 Button("Discard changes…", role: .destructive) { repo.fileToDiscard = file }
             }
         }
-        // Untracked only: git ignores nothing that is already in the index,
-        // so offering it on a tracked file would be a menu item that does
-        // nothing. Those files need "Stop tracking" instead.
-        if file.status == "?" {
-            Menu("Ignore") {
-                IgnoreButtons(file: file, repo: repo, local: false)
-                Divider()
-                // .git/info/exclude — same effect, but private to this
-                // clone: nothing to commit, nothing pushed to the team.
-                Menu("Ignore for me only") {
-                    IgnoreButtons(file: file, repo: repo, local: true)
-                }
+        Menu("Ignore") {
+            IgnoreButtons(file: file, repo: repo, local: false)
+            Divider()
+            // .git/info/exclude — same effect, but private to this
+            // clone: nothing to commit, nothing pushed to the team.
+            Menu("Ignore for me only") {
+                IgnoreButtons(file: file, repo: repo, local: true)
             }
+        }
+        // The index half of Ignore on its own, for a file that is already
+        // covered by an ignore rule — or that the user wants to word the
+        // rule for by hand. Untracked files are not in the index to leave.
+        if file.status != "?" {
+            Button("Stop tracking…") { repo.fileToUntrack = file }
         }
         // Only with git-lfs installed, and only for a file it isn't
         // already storing — "Track" on an LFS file would be a no-op.
@@ -646,20 +687,34 @@ struct IgnoreButtons: View {
     let local: Bool
 
     private var ext: String { (file.fileName as NSString).pathExtension }
+    /// git ignores nothing that is already in the index, so ignoring a
+    /// tracked file also has to drop it from the index — a change worth a
+    /// confirmation, and worth an ellipsis on the menu item.
+    private var tracked: Bool { file.status != "?" }
 
     var body: some View {
-        Button("Ignore \"\(file.fileName)\"") {
-            repo.ignore(pattern: GitIgnore.filePattern(file.path), local: local)
+        Button(title("Ignore \"\(file.fileName)\"")) {
+            apply(GitIgnore.filePattern(file.path))
         }
         if !ext.isEmpty {
-            Button("Ignore all \"*.\(ext)\" files") {
-                repo.ignore(pattern: GitIgnore.extensionPattern(ext), local: local)
+            Button(title("Ignore all \"*.\(ext)\" files")) {
+                apply(GitIgnore.extensionPattern(ext))
             }
         }
         if !file.directory.isEmpty {
-            Button("Ignore everything in \"\(file.directory)\"") {
-                repo.ignore(pattern: GitIgnore.directoryPattern(file.directory), local: local)
+            Button(title("Ignore everything in \"\(file.directory)\"")) {
+                apply(GitIgnore.directoryPattern(file.directory))
             }
+        }
+    }
+
+    private func title(_ text: String) -> String { tracked ? text + "…" : text }
+
+    private func apply(_ pattern: String) {
+        if tracked {
+            repo.pendingIgnore = .init(file: file, pattern: pattern, local: local)
+        } else {
+            repo.ignore(pattern: pattern, local: local)
         }
     }
 }

@@ -382,6 +382,15 @@ actor GitClient {
         try await run(["reset", "-q", "HEAD"])
     }
 
+    /// Take a path out of the index but leave it on disk — what git calls
+    /// `rm --cached`, and what the UI calls "Stop tracking". `--force`
+    /// covers the file that was staged and then edited again: its index
+    /// content matches neither HEAD nor the working tree, and git would
+    /// rather refuse than pick a side. Nothing is deleted either way.
+    func untrack(_ path: String) async throws {
+        try await run(["rm", "--cached", "--force", "--", path])
+    }
+
     func commit(message: String) async throws {
         try await run(["commit", "-m", message])
     }

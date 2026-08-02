@@ -297,6 +297,12 @@ final class RepoState: ObservableObject, Identifiable {
     @Published var commitFiles: [FileChange] = []
     @Published var fileToDelete: FileChange?
     @Published var fileToDiscard: FileChange?
+    /// An Ignore picked on a file git already tracks, waiting on the
+    /// confirmation dialog — see `confirmIgnore`.
+    @Published var pendingIgnore: PendingIgnore?
+    /// "Stop tracking", waiting on its confirmation — see
+    /// `confirmStopTracking`.
+    @Published var fileToUntrack: FileChange?
     @Published var showAddRemote = false
     @Published var newRemoteName = "origin"
     @Published var newRemoteURL = ""
@@ -2690,10 +2696,25 @@ final class RepoState: ObservableObject, Identifiable {
         perform { try await $0.stashFile(file.path) }
     }
 
+    /// An Ignore chosen on a tracked file. Held until the user confirms,
+    /// because the pattern alone would do nothing: git ignores only what
+    /// isn't in the index, so the file has to leave the index too.
+    struct PendingIgnore: Identifiable {
+        let file: FileChange
+        let pattern: String
+        let local: Bool
+
+        var id: String { file.id + pattern + (local ? "+local" : "") }
+        /// Where the pattern is written, for the dialog's wording.
+        var ignoreFile: String { local ? ".git/info/exclude" : ".gitignore" }
+    }
+
     /// Append a pattern to the repo's root `.gitignore` — or, when `local`
     /// is set, to `.git/info/exclude`, which ignores the file for this
-    /// clone only and never shows up in a commit.
-    func ignore(pattern: String, local: Bool = false) {
+    /// clone only and never shows up in a commit. `untrack` drops one path
+    /// from the index afterwards, which is what makes the pattern bite on a
+    /// file git is already tracking.
+    func ignore(pattern: String, local: Bool = false, untrack: String? = nil) {
         Task {
             do {
                 let url: URL
@@ -2712,11 +2733,37 @@ final class RepoState: ObservableObject, Identifiable {
                 if let updated = GitIgnore.append(pattern, to: content) {
                     try updated.write(to: url, atomically: true, encoding: .utf8)
                 }
+                // The pattern goes down first: with the file out of the
+                // index and nothing ignoring it yet, a refresh landing in
+                // between would show it as a brand new untracked file.
+                if let untrack {
+                    try await git.untrack(untrack)
+                }
             } catch {
                 report(error)
             }
             await refresh(quiet: true)
         }
+    }
+
+    /// Confirmed from the ignore dialog: write the pattern, then take the
+    /// file out of the index so the pattern actually applies to it. Only
+    /// the file that was right-clicked is untracked — other tracked files
+    /// matching the same pattern keep their history in the index.
+    func confirmIgnore() {
+        guard let pending = pendingIgnore else { return }
+        pendingIgnore = nil
+        ignore(pattern: pending.pattern, local: pending.local, untrack: pending.file.path)
+    }
+
+    /// Confirmed from the stop-tracking dialog: the same index removal as
+    /// the ignore path, without writing any pattern. For the file that
+    /// belongs on disk but not in the repo and is already covered by an
+    /// ignore rule somewhere — or that the user would rather ignore by hand.
+    func confirmStopTracking() {
+        guard let file = fileToUntrack else { return }
+        fileToUntrack = nil
+        performIndexOnly { try await $0.untrack(file.path) }
     }
 
     func openFile(_ file: FileChange) {
