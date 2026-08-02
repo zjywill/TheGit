@@ -137,6 +137,38 @@ struct RepoView: View {
         // bottom right is the Commit button, and the top is the row that
         // just changed, or failed to.
         .overlay(alignment: .bottom) { ErrorToastLayer(repo: repo) }
+        // A fresh repository needs a decision and several commands, not the
+        // transient one-line error strip. Its own presentation layer keeps
+        // it independent from the destructive-action alerts below.
+        .background(
+            Color.clear
+                .alert(
+                    "Create the first commit in Terminal",
+                    isPresented: Binding(
+                        get: { repo.initialCommitGuide != nil },
+                        set: { if !$0 { repo.initialCommitGuide = nil } }
+                    )
+                ) {
+                    Button("Copy Commands") {
+                        if let guide = repo.initialCommitGuide {
+                            RepoState.copyToPasteboard(guide.commands)
+                        }
+                    }
+                    Button("Close", role: .cancel) {}
+                } message: {
+                    if let guide = repo.initialCommitGuide {
+                        Text("""
+                        "\(guide.repositoryName)" has no commits yet, so TheGit has no HEAD to display.
+
+                        Run these commands in Terminal. They stage the repository's files, show what will be committed, and create the first commit:
+
+                        \(guide.commands)
+
+                        TheGit will refresh automatically after the commit.
+                        """)
+                    }
+                }
+        )
         // On its own layer, not in the chain below: a .sheet stacked with
         // the alerts and confirmationDialog on this same view never
         // presents — they compete for one presentation slot, and the

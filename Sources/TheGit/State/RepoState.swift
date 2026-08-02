@@ -66,6 +66,35 @@ enum BranchPrompt: Identifiable {
     }
 }
 
+/// Instructions for taking a freshly initialized repository through the one
+/// Git operation TheGit cannot represent yet: creating its first commit.
+///
+/// The app only presents and copies these commands. Running them stays in
+/// Terminal, so staging every file and choosing the first message remain an
+/// explicit user action.
+struct InitialCommitGuide: Equatable {
+    let path: String
+
+    var repositoryName: String {
+        (path as NSString).lastPathComponent
+    }
+
+    var commands: String {
+        """
+        cd \(Self.shellQuoted(path))
+        git add .
+        git status
+        git commit --allow-empty -m 'Initial commit'
+        """
+    }
+
+    /// Single-quoted for the user's shell. A repository path can contain an
+    /// apostrophe, so interpolation inside double quotes is not sufficient.
+    private static func shellQuoted(_ text: String) -> String {
+        "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+}
+
 /// A branch delete waiting on confirmation. `includeRemote` is the
 /// one-step "delete it everywhere" variant.
 struct PendingBranchDelete: Identifiable, Hashable {
@@ -149,6 +178,10 @@ final class RepoState: ObservableObject, Identifiable {
     /// and the refresh loop and the file watcher can raise the same failure
     /// again a second later, which stacks dialogs on top of each other.
     @Published var errorNotice: ErrorNotice?
+    /// A fresh repository is valid, but it has no HEAD for the graph to
+    /// display. Present the terminal-only recovery once when its tab opens.
+    @Published var initialCommitGuide: InitialCommitGuide?
+    private var didPresentInitialCommitGuide = false
 
     /// The string way in, for the failures we word ourselves. Reads back the
     /// verbatim text, so `errorMessage == nil` still means "nothing failed".
@@ -851,6 +884,8 @@ final class RepoState: ObservableObject, Identifiable {
         pendingRefresh?.cancel()
         pendingRefresh = nil
         watcher = nil
+        initialCommitGuide = nil
+        didPresentInitialCommitGuide = false
     }
 
     /// What ⌘R and the toolbar's Refresh do: everything the tab shows, git
@@ -969,9 +1004,30 @@ final class RepoState: ObservableObject, Identifiable {
                 let all = snap.staged + snap.unstaged + snap.conflicted
                 if !all.contains(where: { $0.id == file.id }) { closeDiff() }
             }
+            updateInitialCommitGuide(for: snap)
         } catch {
             report(error)
         }
+    }
+
+    /// A zero-ref repository gets guidance, not a low-level Git failure.
+    /// Background refreshes must not reopen the alert after it is dismissed;
+    /// gaining a first commit clears the state and arms it for a future
+    /// genuinely empty repository.
+    private func updateInitialCommitGuide(for snapshot: RepoSnapshot) {
+        let hasNoCommits = snapshot.commits.isEmpty
+            && snapshot.localBranches.isEmpty
+            && snapshot.remoteBranches.isEmpty
+            && snapshot.tags.isEmpty
+            && snapshot.stashes.isEmpty
+        guard hasNoCommits else {
+            initialCommitGuide = nil
+            didPresentInitialCommitGuide = false
+            return
+        }
+        guard !didPresentInitialCommitGuide else { return }
+        didPresentInitialCommitGuide = true
+        initialCommitGuide = InitialCommitGuide(path: path)
     }
 
     /// GitKraken lands you on git's own prepared message mid-merge instead
@@ -2430,6 +2486,7 @@ final class RepoState: ObservableObject, Identifiable {
         cleanupError = nil
         defer { scanningCleanup = false }
         do {
+            await pruneCleanupRemoteTracking()
             cleanupCandidates = try await findCleanupCandidates()
         } catch {
             cleanupCandidates = []
@@ -2452,6 +2509,22 @@ final class RepoState: ObservableObject, Identifiable {
         cleanupSelection = selected ? Set(cleanupCandidates.map(\.id)) : []
     }
 
+    /// A tracking ref can outlive the branch on the server indefinitely.
+    /// Prune the default remote before scanning so a vanished remote branch
+    /// becomes `upstreamGone` and is not offered as though it still exists.
+    /// Cleanup remains useful offline: a failed fetch leaves the last known
+    /// refs in place and the normal best-effort signals still run.
+    private func pruneCleanupRemoteTracking() async {
+        let remote = snapshot.defaultRemote
+        guard snapshot.remoteNames.contains(remote) else { return }
+        do {
+            try await git.fetchRemote(remote)
+            await refresh(quiet: true)
+        } catch {
+            // Offline and unauthenticated scans still use local Git evidence.
+        }
+    }
+
     /// Batch deletes always ask, even when every row is safe. One click for
     /// twenty rows is exactly the case where the user hasn't read them one
     /// by one, so the dialog is where the stakes get stated.
@@ -2462,11 +2535,20 @@ final class RepoState: ObservableObject, Identifiable {
 
     /// Four signals, strongest first: the forge says the PR was merged;
     /// git says the tip is an ancestor; the squash probe says the work is
-    /// already upstream; the upstream branch is gone. Anything else is
-    /// left alone — a branch we can't explain is not a candidate.
+    /// already upstream; the upstream branch is gone. Remote deletion cannot
+    /// be undone, so a same-named merged PR only labels a remote candidate
+    /// after Git has proved its current tip is already in the remote base.
+    /// Anything else is left alone — a branch we can't explain is not a
+    /// candidate.
     private func findCleanupCandidates() async throws -> [CleanupCandidate] {
-        let base = await git.defaultBranch(remote: snapshot.defaultRemote)
+        let remote = snapshot.defaultRemote
+        let base = await git.defaultBranch(remote: remote)
+        let remoteBaseName = "\(remote)/\(base)"
+        let remoteBase = snapshot.remoteBranches.contains { $0.name == remoteBaseName }
+            ? remoteBaseName : base
         let merged = (try? await git.mergedBranches(into: base)) ?? []
+        let mergedRemote =
+            (try? await git.mergedRemoteBranches(remote: remote, into: remoteBase)) ?? []
         // Best effort: the whole scan still works offline or without a CLI.
         var mergedPRs: [String: Int] = [:]
         if let forge {
@@ -2478,6 +2560,10 @@ final class RepoState: ObservableObject, Identifiable {
 
         let candidates = snapshot.localBranches.filter {
             $0.name != base && !$0.isCurrent && !checkedOut.contains($0.name)
+        }
+        let remoteCandidates = snapshot.remoteBranches.filter {
+            guard case .remote(let name) = $0.kind else { return false }
+            return name == remote && $0.shortName != base
         }
         var worktreeBranches: [String: Worktree] = [:]
         for worktree in snapshot.worktrees
@@ -2507,6 +2593,32 @@ final class RepoState: ObservableObject, Identifiable {
             reasons[name] = .squashMerged(into: base)
         }
 
+        var remoteReasons: [String: CleanupCandidate.Reason] = [:]
+        var remoteNeedProbe: [String] = []
+        for branch in remoteCandidates {
+            if mergedRemote.contains(branch.name) {
+                if let number = mergedPRs[branch.shortName] {
+                    remoteReasons[branch.name] = .mergedPullRequest(
+                        number: number, prefix: forge?.numberPrefix ?? "#"
+                    )
+                } else {
+                    remoteReasons[branch.name] = .merged(into: remoteBase)
+                }
+            } else {
+                remoteNeedProbe.append(branch.name)
+            }
+        }
+        for name in await squashMerged(remoteNeedProbe, into: remoteBase) {
+            let shortName = String(name.dropFirst(remote.count + 1))
+            if let number = mergedPRs[shortName] {
+                remoteReasons[name] = .mergedPullRequest(
+                    number: number, prefix: forge?.numberPrefix ?? "#"
+                )
+            } else {
+                remoteReasons[name] = .squashMerged(into: remoteBase)
+            }
+        }
+
         var found: [CleanupCandidate] = []
         for branch in candidates {
             guard let reason = reasons[branch.name]
@@ -2523,6 +2635,15 @@ final class RepoState: ObservableObject, Identifiable {
                     (try? await git.countCommits("\(base)..\(branch.name)")) ?? 0
             }
             found.append(candidate)
+        }
+        for branch in remoteCandidates {
+            guard case .remote(let remoteName) = branch.kind,
+                  let reason = remoteReasons[branch.name]
+            else { continue }
+            found.append(CleanupCandidate(
+                target: .remoteBranch(remote: remoteName, name: branch.shortName),
+                reason: reason
+            ))
         }
 
         // The main worktree is never a candidate: git can't remove it, and
@@ -2600,13 +2721,15 @@ final class RepoState: ObservableObject, Identifiable {
                 if case .worktree(_, false) = $0.target { return true }
                 return false
             }
-            let branches = candidates.filter { !$0.isWorktree }
+            let remoteBranches = candidates.filter(\.isRemoteBranch)
+            let localBranches = candidates.filter(\.isLocalBranch)
 
             var cleaned: Set<String> = []
             var undone: [UndoableDelete] = []
             var failures: [(name: String, message: String)] = []
             var prunedStale = false
             var touchedWorktrees = false
+            var touchedRemotes: Set<String> = []
 
             if !stale.isEmpty {
                 do {
@@ -2630,7 +2753,23 @@ final class RepoState: ObservableObject, Identifiable {
                     failures.append((candidate.name, error.localizedDescription))
                 }
             }
-            for candidate in branches {
+            for candidate in remoteBranches {
+                guard case .remoteBranch(let remote, let name) = candidate.target else { continue }
+                do {
+                    try await git.deleteRemoteBranch(remote: remote, branch: name)
+                    touchedRemotes.insert(remote)
+                    cleaned.insert(candidate.id)
+                } catch {
+                    failures.append((candidate.name, error.localizedDescription))
+                }
+            }
+            // `push --delete` normally updates this ref itself. The fetch is
+            // still worthwhile after a batch: it prunes any other branch
+            // deleted on the server since the scan.
+            for remote in touchedRemotes {
+                try? await git.fetchRemote(remote)
+            }
+            for candidate in localBranches {
                 guard case .branch(let name, let tip) = candidate.target else { continue }
                 do {
                     try await git.deleteLocalBranch(name)

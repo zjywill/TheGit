@@ -65,11 +65,20 @@ actor GitClient {
         // --date-order interleaves parallel branches chronologically
         // (GitKraken-style) while still keeping children before parents.
         var args = ["log", "--date-order"]
+        // A freshly initialized repository has a symbolic HEAD but no
+        // commit behind it yet. Passing that unborn HEAD as a revision makes
+        // git log fail with "ambiguous argument 'HEAD'"; the named ref sets
+        // are still valid and simply produce an empty history.
+        let hasHead = (try? await run([
+            "rev-parse", "--verify", "--quiet", "HEAD",
+        ])) != nil
         if let solo {
-            args += [solo, "HEAD"]
+            args.append(solo)
+            if hasHead { args.append("HEAD") }
         } else {
             for pattern in hiddenPatterns { args.append("--exclude=\(pattern)") }
-            args += ["--branches", "--remotes", "--tags", "HEAD"]
+            args += ["--branches", "--remotes", "--tags"]
+            if hasHead { args.append("HEAD") }
             args += extraRevs
         }
         args += ["--format=\(Self.logFormat)", "-n", String(limit)]
@@ -959,6 +968,20 @@ actor GitClient {
         let out = try await run(["branch", "--merged", base, "--format=%(refname:short)"])
         return Set(out.split(separator: "\n").map {
             String($0).trimmingCharacters(in: .whitespaces)
+        })
+    }
+
+    /// Remote-tracking refs already contained by `base`. Keep the full
+    /// `origin/name` spelling so a same-named local branch cannot collide
+    /// with it in the cleanup scan.
+    func mergedRemoteBranches(remote: String, into base: String) async throws -> Set<String> {
+        let out = try await run([
+            "for-each-ref", "--merged=\(base)", "--format=%(refname:short)",
+            "refs/remotes/\(remote)",
+        ])
+        return Set(out.split(separator: "\n").compactMap {
+            let name = String($0).trimmingCharacters(in: .whitespaces)
+            return name.hasSuffix("/HEAD") ? nil : name
         })
     }
 
