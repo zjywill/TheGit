@@ -551,13 +551,20 @@ final class RepoWindowControlHostView: NSView {
 
     @objc private func performWindowAction(_ sender: RepoWindowControlButton) {
         guard let window = managedWindow else { return }
+        // The direct calls, not performClose/performMiniaturize/performZoom:
+        // the perform variants simulate a click on the standard buttons,
+        // and the standard buttons here are hidden and disabled — every
+        // perform was a silent no-op.
         switch sender.kind {
         case .close:
-            window.performClose(sender)
+            // Keeps the delegate's windowShouldClose consultation.
+            if window.delegate?.windowShouldClose?(window) ?? true {
+                window.close()
+            }
         case .miniaturize:
-            window.performMiniaturize(sender)
+            window.miniaturize(sender)
         case .zoom:
-            window.performZoom(sender)
+            window.zoom(sender)
         }
     }
 
@@ -584,10 +591,17 @@ final class RepoWindowControlHostView: NSView {
             control.button.isHidden = true
             control.button.alphaValue = 0
         }
+        // Enabled comes from the style mask, NOT from the native buttons:
+        // AppKit reports the buttons this view just hid as disabled, so
+        // mirroring them disabled all three replacements permanently —
+        // hover drew, clicks did nothing.
+        let mask = managedWindow?.styleMask ?? []
         for (button, kind) in zip(buttons, RepoWindowControlKind.allCases) {
-            button.isEnabled =
-                managedWindow?.standardWindowButton(kind.windowButton)?.isEnabled
-                ?? true
+            switch kind {
+            case .close: button.isEnabled = mask.contains(.closable)
+            case .miniaturize: button.isEnabled = mask.contains(.miniaturizable)
+            case .zoom: button.isEnabled = mask.contains(.resizable)
+            }
         }
     }
 
