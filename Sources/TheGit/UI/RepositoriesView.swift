@@ -414,45 +414,6 @@ enum CatalogMetrics {
     static let card: CGFloat = 8
 }
 
-/// The Repositories screen's toolbar: fill the list, and keep it honest.
-struct RepositoriesToolbar: ToolbarContent {
-    @EnvironmentObject var appState: AppState
-
-    var body: some ToolbarContent {
-        ToolbarItemGroup {
-            Button {
-                appState.scanFolderPanel()
-            } label: {
-                Label("Add Folder", systemImage: "folder.badge.plus")
-            }
-            .disabled(appState.scanning)
-            .help("Add every Git repository inside a folder")
-
-            Button {
-                appState.addCatalogSection()
-            } label: {
-                Label("New Section", systemImage: "rectangle.stack.badge.plus")
-            }
-            .help("Group repositories under a heading of your own")
-
-            Button {
-                appState.refreshCatalog(userInitiated: true)
-            } label: {
-                // Split into its two halves so the spin lands on the glyph
-                // alone: the systemImage form would turn the word with it.
-                Label {
-                    Text("Refresh")
-                } icon: {
-                    Image(systemName: "arrow.clockwise")
-                        .refreshSpin(appState.refreshingCatalog)
-                }
-            }
-            .keyboardShortcut("r")
-            .help("Re-read every folder in the list (⌘R)")
-        }
-    }
-}
-
 // MARK: - Rows
 
 /// A user section's heading: fold, name, count, and the menu that renames or

@@ -146,42 +146,6 @@ struct SectionHeading: View {
     }
 }
 
-/// The Dashboard's own toolbar. It exists partly because this screen has two
-/// real actions and partly because an empty toolbar collapses its strip and
-/// makes the window jump on every switch — see RootView.
-struct DashboardToolbar: ToolbarContent {
-    @EnvironmentObject var appState: AppState
-
-    var body: some ToolbarContent {
-        ToolbarItemGroup {
-            Button {
-                appState.openRepoPanel()
-            } label: {
-                Label("Open", systemImage: "folder.badge.plus")
-            }
-            // ⌘O is owned by the tab bar's + button, which is mounted on
-            // every screen — three views declaring the same shortcut is
-            // ambiguous, and two of them firing opens two panels.
-            .help("Open Repository (⌘O)")
-
-            Button {
-                appState.refreshDashboard()
-            } label: {
-                // Split into its two halves so the spin lands on the glyph
-                // alone: the systemImage form would turn the word with it.
-                Label {
-                    Text("Refresh")
-                } icon: {
-                    Image(systemName: "arrow.clockwise")
-                        .refreshSpin(appState.refreshingDashboard)
-                }
-            }
-            .keyboardShortcut("r")
-            .help("Re-read every repository (⌘R)")
-        }
-    }
-}
-
 /// How the activity tiles divide the width they're given. Every number in
 /// points before zoom, including the width handed in.
 ///
