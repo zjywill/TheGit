@@ -545,6 +545,15 @@ struct FileSection: View {
     @ObservedObject var repo: RepoState
     @Environment(\.uiZoom) private var zoom
     @FocusState private var focusedFileID: FileChange.ID?
+    /// The viewport, and how far the rows are scrolled inside it. Read off
+    /// the geometry rather than from onScrollGeometryChange, which macOS 14
+    /// doesn't have — same trick as the tab strip in TheGitApp.
+    @State private var viewportHeight: CGFloat = 0
+    @State private var scrollOffset: CGFloat = 0
+
+    private static let scrollSpace = "fileListViewport"
+    /// The LazyVStack's own top padding, part of a row's offset.
+    private static let listPadding: CGFloat = 2
 
     /// What the rows genuinely need, so the list never claims more. When
     /// two long lists both want more than the panel has, the VStack splits
@@ -571,6 +580,33 @@ struct FileSection: View {
         let count = selectedFiles.count
         if count == 0 || count == files.count { return bulkTitle }
         return "\(actionTitle) \(count)"
+    }
+
+    /// Scroll a keyboard-picked row into view, and only when it isn't
+    /// already there — arrowing through the visible middle of the list
+    /// must not move the list under the cursor.
+    ///
+    /// The anchor is the point: `scrollTo(id)` on its own asks for "the
+    /// smallest scroll that reveals this row", which a LazyVStack can't
+    /// answer for a row it hasn't built yet — and the row one step past
+    /// the edge, the one arrow keys always land on next, is exactly that
+    /// row. With an anchor the target is positioned from the layout
+    /// instead, so it works whether or not the row exists yet. Rows are a
+    /// fixed height, so where one sits is arithmetic.
+    private func reveal(_ id: FileChange.ID?, _ proxy: ScrollViewProxy) {
+        guard let id, let index = files.firstIndex(where: { $0.id == id }) else { return }
+        guard viewportHeight > 0 else {
+            proxy.scrollTo(id)
+            return
+        }
+        let step = (FileListMetrics.row + FileListMetrics.spacing) * zoom
+        let top = Self.listPadding + CGFloat(index) * step
+        let bottom = top + FileListMetrics.row * zoom
+        if top < scrollOffset - 0.5 {
+            proxy.scrollTo(id, anchor: .top)
+        } else if bottom > scrollOffset + viewportHeight + 0.5 {
+            proxy.scrollTo(id, anchor: .bottom)
+        }
     }
 
     var body: some View {
@@ -682,6 +718,11 @@ struct FileSection: View {
                                           )
                                     else { return }
                                     focusedFileID = selected.id
+                                    // Not only through the onChange below:
+                                    // focus can't land on a row the lazy
+                                    // stack hasn't built, and that is the
+                                    // one case that needs the scroll most.
+                                    reveal(selected.id, proxy)
                                 }
                                 .onCommand(#selector(NSResponder.selectAll(_:))) {
                                     focusedFileID = repo.selectAllFiles(in: files)?.id
@@ -696,13 +737,17 @@ struct FileSection: View {
                                 )
                             }
                         }
-                        .padding(.vertical, 2)
+                        .padding(.vertical, Self.listPadding)
+                        .onGeometryChange(for: CGFloat.self) { geometry in
+                            geometry.frame(in: .named(Self.scrollSpace)).minY
+                        } action: { scrollOffset = -$0 }
                     }
+                    .coordinateSpace(name: Self.scrollSpace)
+                    .onGeometryChange(for: CGFloat.self) { geometry in
+                        geometry.size.height
+                    } action: { viewportHeight = $0 }
                     .onChange(of: focusedFileID) { _, id in
-                        guard let id else { return }
-                        // With no anchor SwiftUI performs the smallest scroll
-                        // needed to reveal the focused row.
-                        proxy.scrollTo(id)
+                        reveal(id, proxy)
                     }
                 }
                 .frame(maxHeight: contentHeight)
