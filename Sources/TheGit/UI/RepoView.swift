@@ -7,7 +7,6 @@ import SwiftUI
 /// file history, an issue, a pull request — see `workArea`.
 struct RepoView: View {
     @ObservedObject var repo: RepoState
-    @ObservedObject private var updates = UpdateChecker.shared
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var sidebarDragStartWidth: CGFloat?
 
@@ -16,13 +15,6 @@ struct RepoView: View {
     /// UserDefaults on every pointer move would re-enter layout at 60fps.
     @State private var sidebarIdealWidth = RepoView.storedSidebarWidth()
     @State private var commitIdealWidth = RepoView.storedWidth(
-        key: RepoView.commitWidthKey, fallback: 300)
-    /// The commit panel's LIVE width, unlike commitIdealWidth (whose
-    /// deliberate read-once semantics are documented on workArea). Only the
-    /// command bar reads it: its capsule centres over the graph pane, so it
-    /// has to track the divider through a drag and the window through a
-    /// resize.
-    @State private var commitPaneWidth = RepoView.storedWidth(
         key: RepoView.commitWidthKey, fallback: 300)
 
     private static let sidebarWidthKey = "sidebarPaneWidth"
@@ -78,8 +70,6 @@ struct RepoView: View {
         return width > 0 ? CGFloat(width) : fallback
     }
 
-    /// Internal: AppTopBar sizes the home screens' leading rail with this,
-    /// so the tab strip starts at the same x on every screen.
     static func storedSidebarWidth() -> CGFloat {
         let width = storedWidth(key: sidebarWidthKey, fallback: 292)
         return sidebarWidthRange ~= width ? width : 292
@@ -113,46 +103,18 @@ struct RepoView: View {
             RepoSidebarShell(repo: repo)
                 .frame(width: sidebarIdealWidth)
 
-            VStack(spacing: 0) {
-                // The tab strip, in the title-bar band beside the capsule.
-                // Its x matches the home screens exactly: their top bar
-                // reserves a rail of the same stored sidebar width, so a
-                // switch never moves a tab (see AppTopBar).
-                RepoTabsBar()
-                    .frame(height: AppTopBar.height)
-                    .background(.bar)
-                if let update = updates.update {
-                    UpdateBanner(
-                        update: update,
-                        openReleasePage: { updates.openReleasePage() },
-                        dismiss: { updates.skipCurrentUpdate() }
-                    )
-                    Divider()
-                }
-                // Repository commands stay directly below their active tab.
-                // No hard rules between the chrome rows or into the content
-                // — like Xcode's, the bands separate by material alone. The
-                // content pane instead gets small top corners, so it reads
-                // as its own surface tucked under the chrome; the notches
-                // show the column's bar material behind it.
-                RepoCommandBar(repo: repo, trailingWidth: commitPaneWidth)
-                workArea
-                    .clipShape(UnevenRoundedRectangle(
-                        topLeadingRadius: 8,
-                        bottomLeadingRadius: 0,
-                        bottomTrailingRadius: 0,
-                        topTrailingRadius: 8,
-                        style: .continuous
-                    ))
-            }
-            .background(.bar)
-            .animation(
-                .easeOut(duration: reduceMotion ? 0 : 0.2),
-                value: updates.update
-            )
-            // The graph and commit panel minima together. The window floor
-            // keeps the complete split above this constraint.
-            .frame(minWidth: 660)
+            // The tab strip and the repository's commands both live above
+            // this view now — the strip in RootView's own row, the commands
+            // in the window toolbar over it. No hard rules between those
+            // bands or into the content, and no rounded top on the content
+            // either: the corners were there to tuck this surface under a
+            // command bar that sat directly above it, and against the tab
+            // strip they only cut two notches out of the graph.
+            workArea
+                .background(.bar)
+                // The graph and commit panel minima together. The window
+                // floor keeps the complete split above this constraint.
+                .frame(minWidth: 660)
         }
         // A transparent resize target replaces HSplitView's visible divider.
         // It keeps the panel directly draggable without drawing a straight
@@ -440,7 +402,6 @@ struct RepoView: View {
                 .frame(minWidth: 260, idealWidth: commitIdealWidth, maxWidth: 420)
                 .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
                     Self.store($0, key: Self.commitWidthKey)
-                    commitPaneWidth = $0
                 }
             }
             // An issue and a pull request share ONE wrapper, and the
@@ -485,29 +446,18 @@ struct RepoView: View {
     }
 }
 
-/// The macOS 27 sidebar: one flat surface flush with the window's leading,
-/// top, and bottom edges — no floating capsule, no inset, no border, the
-/// way Mail's sidebar sits. The traffic lights live in its title row. The
-/// repository's high-volume navigator remains ScrollView-backed.
+/// The macOS 27 sidebar: one flat surface flush with the window's leading
+/// and bottom edges — no floating capsule, no inset, no border, the way
+/// Mail's sidebar sits. It starts under the tab strip, which is app-level
+/// navigation and spans the window. The repository's high-volume navigator
+/// remains ScrollView-backed.
 private struct RepoSidebarShell: View {
     @ObservedObject var repo: RepoState
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 0) {
-                WindowControls()
-                    .frame(width: 54, height: 20)
-                Spacer(minLength: 0)
-            }
-            // 16 from the window edge, centred in the title-bar band — the
-            // home top bar gives its lights the same spot, so a screen
-            // switch never moves them.
-            .padding(.leading, 16)
-            .frame(height: AppTopBar.height)
-            SidebarView(repo: repo)
-                .id(repo.id)
-        }
-        .background(SidebarGlass())
+        SidebarView(repo: repo)
+            .id(repo.id)
+            .background(SidebarGlass())
     }
 }
 
@@ -552,313 +502,6 @@ struct RepoSidebarMaterial: NSViewRepresentable {
     func updateNSView(_ view: NSVisualEffectView, context: Context) {}
 }
 
-/// Stable traffic-light geometry inside the app's top bar. AppKit keeps
-/// the actual window and its actions; these controls only replace the title
-/// bar's visible buttons, whose bare-titlebar position is reasserted during
-/// every resize.
-struct WindowControls: NSViewRepresentable {
-    func makeNSView(context: Context) -> RepoWindowControlHostView {
-        RepoWindowControlHostView()
-    }
-
-    func updateNSView(_ view: RepoWindowControlHostView, context: Context) {
-        view.attachIfNeeded()
-    }
-
-    // No dismantle restore: every screen shows these controls, and a screen
-    // switch replaces one host with another. SwiftUI attaches the new host
-    // before tearing the old one down, so a restore here would re-show the
-    // native buttons over the new host's row for a frame — or longer, since
-    // the new host only re-hides them on the next window notification.
-}
-
-fileprivate enum RepoWindowControlKind: CaseIterable {
-    case close
-    case miniaturize
-    case zoom
-
-    var windowButton: NSWindow.ButtonType {
-        switch self {
-        case .close: return .closeButton
-        case .miniaturize: return .miniaturizeButton
-        case .zoom: return .zoomButton
-        }
-    }
-
-    var accessibilityLabel: String {
-        switch self {
-        case .close: return "Close window"
-        case .miniaturize: return "Minimize window"
-        case .zoom: return "Zoom window"
-        }
-    }
-}
-
-final class RepoWindowControlHostView: NSView {
-    private struct OriginalControl {
-        let button: NSButton
-        let wasHidden: Bool
-        let alpha: CGFloat
-    }
-
-    private weak var managedWindow: NSWindow?
-    private var originalControls: [OriginalControl] = []
-    private var observers: [NSObjectProtocol] = []
-    private var trackingArea: NSTrackingArea?
-    private var groupIsHovered = false {
-        didSet { updateButtonAppearance() }
-    }
-
-    private lazy var buttons: [RepoWindowControlButton] = {
-        RepoWindowControlKind.allCases.map { kind in
-            let button = RepoWindowControlButton(kind: kind)
-            button.target = self
-            button.action = #selector(performWindowAction(_:))
-            button.setAccessibilityLabel(kind.accessibilityLabel)
-            addSubview(button)
-            return button
-        }
-    }()
-
-    override var isFlipped: Bool { true }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        attachIfNeeded()
-    }
-
-    override func layout() {
-        super.layout()
-        for (index, button) in buttons.enumerated() {
-            button.frame = NSRect(
-                x: CGFloat(index) * 20,
-                y: 0,
-                width: 14,
-                height: bounds.height
-            )
-        }
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let trackingArea {
-            removeTrackingArea(trackingArea)
-        }
-        let area = NSTrackingArea(
-            rect: bounds,
-            options: [.activeAlways, .mouseEnteredAndExited],
-            owner: self
-        )
-        addTrackingArea(area)
-        trackingArea = area
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        groupIsHovered = true
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        groupIsHovered = false
-    }
-
-    func attachIfNeeded() {
-        guard let window else { return }
-        if managedWindow !== window {
-            restore()
-            managedWindow = window
-            originalControls = RepoWindowControlKind.allCases.compactMap { kind in
-                guard let button = window.standardWindowButton(kind.windowButton)
-                else { return nil }
-                return OriginalControl(
-                    button: button,
-                    wasHidden: button.isHidden,
-                    alpha: button.alphaValue
-                )
-            }
-            observe(window)
-        }
-        hideOriginalControls()
-        updateButtonAppearance()
-        needsLayout = true
-    }
-
-    @objc private func performWindowAction(_ sender: RepoWindowControlButton) {
-        guard let window = managedWindow else { return }
-        // The direct calls, not performClose/performMiniaturize/performZoom:
-        // the perform variants simulate a click on the standard buttons,
-        // and the standard buttons here are hidden and disabled — every
-        // perform was a silent no-op.
-        switch sender.kind {
-        case .close:
-            // Keeps the delegate's windowShouldClose consultation.
-            if window.delegate?.windowShouldClose?(window) ?? true {
-                window.close()
-            }
-        case .miniaturize:
-            window.miniaturize(sender)
-        case .zoom:
-            window.zoom(sender)
-        }
-    }
-
-    private func observe(_ window: NSWindow) {
-        let center = NotificationCenter.default
-        observers = [
-            NSWindow.didBecomeKeyNotification,
-            NSWindow.didResignKeyNotification,
-            NSWindow.didBecomeMainNotification,
-            NSWindow.didResignMainNotification,
-            NSWindow.didResizeNotification,
-            NSWindow.didChangeOcclusionStateNotification,
-        ].map { name in
-            center.addObserver(forName: name, object: window, queue: .main) {
-                [weak self] _ in
-                self?.hideOriginalControls()
-                self?.updateButtonAppearance()
-            }
-        }
-    }
-
-    private func hideOriginalControls() {
-        for control in originalControls {
-            control.button.isHidden = true
-            control.button.alphaValue = 0
-        }
-        // Enabled comes from the style mask, NOT from the native buttons:
-        // AppKit reports the buttons this view just hid as disabled, so
-        // mirroring them disabled all three replacements permanently —
-        // hover drew, clicks did nothing.
-        let mask = managedWindow?.styleMask ?? []
-        for (button, kind) in zip(buttons, RepoWindowControlKind.allCases) {
-            switch kind {
-            case .close: button.isEnabled = mask.contains(.closable)
-            case .miniaturize: button.isEnabled = mask.contains(.miniaturizable)
-            case .zoom: button.isEnabled = mask.contains(.resizable)
-            }
-        }
-    }
-
-    private func updateButtonAppearance() {
-        let isActive =
-            managedWindow?.isKeyWindow == true
-            || managedWindow?.isMainWindow == true
-        for button in buttons {
-            button.windowIsActive = isActive
-            button.groupIsHovered = groupIsHovered
-        }
-    }
-
-    func restore() {
-        let center = NotificationCenter.default
-        observers.forEach(center.removeObserver)
-        observers = []
-        for control in originalControls {
-            control.button.isHidden = control.wasHidden
-            control.button.alphaValue = control.alpha
-        }
-        originalControls = []
-        managedWindow = nil
-    }
-}
-
-private final class RepoWindowControlButton: NSButton {
-    fileprivate let kind: RepoWindowControlKind
-
-    var windowIsActive = false {
-        didSet { needsDisplay = true }
-    }
-    var groupIsHovered = false {
-        didSet { needsDisplay = true }
-    }
-
-    init(kind: RepoWindowControlKind) {
-        self.kind = kind
-        super.init(frame: .zero)
-        title = ""
-        isBordered = false
-        focusRingType = .none
-        setButtonType(.momentaryChange)
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func highlight(_ flag: Bool) {
-        super.highlight(flag)
-        needsDisplay = true
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        let diameter: CGFloat = 14
-        let circle = NSRect(
-            x: 0,
-            y: (bounds.height - diameter) / 2,
-            width: diameter,
-            height: diameter
-        )
-        let path = NSBezierPath(ovalIn: circle)
-        fillColor.setFill()
-        path.fill()
-        NSColor.black.withAlphaComponent(windowIsActive ? 0.16 : 0.10).setStroke()
-        path.lineWidth = 0.5
-        path.stroke()
-
-        guard windowIsActive, groupIsHovered else { return }
-        drawHoverSymbol(in: circle)
-    }
-
-    private var fillColor: NSColor {
-        guard windowIsActive else {
-            let match = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua])
-            return match == .darkAqua
-                ? NSColor(srgbRed: 0.34, green: 0.34, blue: 0.35, alpha: 1)
-                : NSColor(srgbRed: 0.76, green: 0.76, blue: 0.77, alpha: 1)
-        }
-
-        let color: NSColor
-        switch kind {
-        case .close:
-            color = NSColor(srgbRed: 1.00, green: 0.37, blue: 0.34, alpha: 1)
-        case .miniaturize:
-            color = NSColor(srgbRed: 1.00, green: 0.74, blue: 0.18, alpha: 1)
-        case .zoom:
-            color = NSColor(srgbRed: 0.16, green: 0.78, blue: 0.25, alpha: 1)
-        }
-        return isHighlighted
-            ? color.blended(withFraction: 0.18, of: .black) ?? color
-            : color
-    }
-
-    private func drawHoverSymbol(in circle: NSRect) {
-        let symbol = NSBezierPath()
-        let center = NSPoint(x: circle.midX, y: circle.midY)
-        let radius: CGFloat = 2.3
-
-        switch kind {
-        case .close:
-            symbol.move(to: NSPoint(x: center.x - radius, y: center.y - radius))
-            symbol.line(to: NSPoint(x: center.x + radius, y: center.y + radius))
-            symbol.move(to: NSPoint(x: center.x + radius, y: center.y - radius))
-            symbol.line(to: NSPoint(x: center.x - radius, y: center.y + radius))
-        case .miniaturize:
-            symbol.move(to: NSPoint(x: center.x - radius, y: center.y))
-            symbol.line(to: NSPoint(x: center.x + radius, y: center.y))
-        case .zoom:
-            symbol.move(to: NSPoint(x: center.x - radius, y: center.y))
-            symbol.line(to: NSPoint(x: center.x + radius, y: center.y))
-            symbol.move(to: NSPoint(x: center.x, y: center.y - radius))
-            symbol.line(to: NSPoint(x: center.x, y: center.y + radius))
-        }
-
-        NSColor.black.withAlphaComponent(0.58).setStroke()
-        symbol.lineWidth = 1
-        symbol.lineCapStyle = .round
-        symbol.stroke()
-    }
-}
-
 private struct SidebarResizeHandle: View {
     let dragChanged: (CGFloat) -> Void
     let dragEnded: () -> Void
@@ -894,17 +537,11 @@ private struct SidebarResizeHandle: View {
     }
 }
 
-/// Commands scoped to the repository selected by the tab directly above.
-/// Keeping this out of the window toolbar makes the hierarchy explicit:
-/// app navigation first, then actions for that navigation target.
-struct RepoCommandBar: View {
+/// Commands scoped to the repository selected by the tab below them, in the
+/// window's own toolbar — the place macOS puts the actions for whatever the
+/// window is currently showing.
+struct RepoCommandCluster: View {
     @ObservedObject var repo: RepoState
-    /// Live width of the commit panel in the split below. The command
-    /// capsule centres over the graph pane — everything left of that panel —
-    /// and the search capsule centres over the panel itself, so both track
-    /// the divider drag and the window resize.
-    var trailingWidth: CGFloat = 300
-    @FocusState private var searchFocused: Bool
     @Environment(\.uiZoom) private var zoom
     @AppStorage("pullMode") private var pullModeRaw = RepoState.PullMode.ff.rawValue
     @State private var showingPullOptions = false
@@ -914,43 +551,21 @@ struct RepoCommandBar: View {
     }
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            commandRow(.regular)
-            commandRow(.compact)
-        }
-        .padding(.horizontal, 10 * zoom)
-        .frame(height: 46 * zoom)
-        .background(.bar)
-        .animation(.easeOut(duration: 0.15), value: repo.isBusy)
-    }
-
-    private func commandRow(_ metrics: RepoCommandMetrics) -> some View {
         HStack(spacing: 0) {
-            // This flexible region spans exactly the graph pane below (the
-            // trailing region is pinned to the commit panel's width), so
-            // centring in it is centring over the graph — wherever the
-            // divider is dragged. The busy spinner hangs at its leading
-            // edge, out of the capsule's way.
-            ZStack {
-                HStack(spacing: 0) {
-                    if repo.isBusy {
-                        ProgressView()
-                            .controlSize(.small)
-                            .frame(width: 18 * zoom, height: 28 * zoom)
-                            .transition(.opacity)
-                    }
-                    Spacer(minLength: 0)
-                }
-
-                commandCluster(metrics)
+            // Leading, outside the capsule: a running command shouldn't
+            // shift the buttons it was started from.
+            if repo.isBusy {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 18 * zoom, height: 28 * zoom)
+                    .transition(.opacity)
             }
-            .frame(maxWidth: .infinity)
-
-            searchCapsule(metrics)
-                // Centred within the commit panel's width; the max() keeps
-                // the capsule whole if the panel is dragged narrower than it.
-                .frame(width: max(trailingWidth, metrics.searchWidth * zoom + 16))
+            ViewThatFits(in: .horizontal) {
+                commandCluster(.regular)
+                commandCluster(.compact)
+            }
         }
+        .animation(.easeOut(duration: 0.15), value: repo.isBusy)
     }
 
     private func commandCluster(_ metrics: RepoCommandMetrics) -> some View {
@@ -1054,54 +669,118 @@ struct RepoCommandBar: View {
                 }
                 .keyboardShortcut("r")
             }
+            // No capsule of its own: the toolbar it sits in is already a
+            // surface, and glass on glass read as two stacked layers. Each
+            // button carries its own hover fill instead, which is what a
+            // Mac toolbar's own items do.
             .padding(.horizontal, metrics.surfacePadding * zoom)
             .frame(height: 34 * zoom)
-            .repoCommandSurface()
+    }
+}
+
+/// The commit search field, kept at the toolbar's trailing end — the corner
+/// every Mac app searches from, and the side the commit list it filters is
+/// on.
+/// One search field for the whole window, whatever the selected tab happens
+/// to search — commits inside a repository, folders on the catalog screen.
+/// Same corner, same size, same ⌘F: the screens used to put their fields in
+/// two different rows at two different heights.
+struct ToolbarSearchField: View {
+    @Binding var text: String
+    let placeholder: String
+    /// Shown instead when the window is too narrow for the full one.
+    let compactPlaceholder: String
+    let help: String
+    let clearLabel: String
+
+    @FocusState private var focused: Bool
+    @Environment(\.uiZoom) private var zoom
+
+    private static let width: CGFloat = 180
+    private static let compactWidth: CGFloat = 120
+    /// A toolbar field, not a command bar's: sized against the system's own
+    /// toolbar controls rather than against the button row it used to share
+    /// a row with.
+    private static let height: CGFloat = 26
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            capsule(width: Self.width, placeholder: placeholder)
+            capsule(width: Self.compactWidth, placeholder: compactPlaceholder)
+        }
     }
 
-    private func searchCapsule(_ metrics: RepoCommandMetrics) -> some View {
-            HStack(spacing: 5 * zoom) {
-                Image(systemName: "magnifyingglass")
-                    .zoomFont(11)
-                    .foregroundStyle(.secondary)
+    private func capsule(width: CGFloat, placeholder: String) -> some View {
+        HStack(spacing: 5 * zoom) {
+            Image(systemName: "magnifyingglass")
+                .zoomFont(11)
+                .foregroundStyle(focused ? Color.accentColor : .secondary)
 
-                TextField(metrics.searchPlaceholder, text: $repo.searchText)
-                    .textFieldStyle(.plain)
-                    .zoomFont(12)
-                    .focused($searchFocused)
-                    .onExitCommand {
-                        repo.searchText = ""
-                        searchFocused = false
-                    }
-
-                if !repo.searchText.isEmpty {
-                    Button {
-                        repo.searchText = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .zoomFont(11)
-                    }
-                    .buttonStyle(.pressEffect)
-                    .foregroundStyle(.secondary)
-                    .accessibilityLabel("Clear commit search")
+            TextField(placeholder, text: $text)
+                .textFieldStyle(.plain)
+                .zoomFont(12)
+                .focused($focused)
+                // Esc clears first and only gives up focus once it's empty,
+                // so one key both undoes the search and leaves the field.
+                .onExitCommand {
+                    if text.isEmpty { focused = false } else { text = "" }
                 }
 
-                // Hidden ⌘F target that focuses the field.
-                Button("") { searchFocused = true }
-                    .keyboardShortcut("f")
-                    .frame(width: 0)
-                    .opacity(0)
+            if !text.isEmpty {
+                Button { text = "" } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .zoomFont(11)
+                }
+                .buttonStyle(.pressEffect)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel(clearLabel)
             }
-            .padding(.horizontal, 8 * zoom)
-            .frame(width: metrics.searchWidth * zoom, height: 34 * zoom)
-            .repoCommandSurface()
-            .help("Search commits by message, author, or sha (⌘F, esc to clear)")
+
+            // Hidden ⌘F target that focuses the field.
+            Button("") { focused = true }
+                .keyboardShortcut("f")
+                .frame(width: 0)
+                .opacity(0)
+        }
+        .padding(.horizontal, 8 * zoom)
+        .frame(width: width * zoom, height: Self.height * zoom)
+        .repoCommandSurface()
+        .help(help)
+    }
+}
+
+/// The commit search, bound to the repository the selected tab holds.
+struct RepoSearchField: View {
+    @ObservedObject var repo: RepoState
+
+    var body: some View {
+        ToolbarSearchField(
+            text: $repo.searchText,
+            placeholder: "Search commits",
+            compactPlaceholder: "Search",
+            help: "Search commits by message, author, or sha (⌘F, esc to clear)",
+            clearLabel: "Clear commit search"
+        )
+    }
+}
+
+/// The catalog search, in the same slot the commit search uses — the screen
+/// changes under the toolbar, the field doesn't move.
+struct CatalogSearchField: View {
+    @EnvironmentObject var appState: AppState
+
+    var body: some View {
+        ToolbarSearchField(
+            text: $appState.catalogFilter,
+            placeholder: "Search repositories",
+            compactPlaceholder: "Search",
+            help: "Filter by repository, owner, or branch (⌘F, esc to clear)",
+            clearLabel: "Clear repository search"
+        )
     }
 }
 
 private struct RepoCommandMetrics {
-    let searchWidth: CGFloat
-    let searchPlaceholder: String
     let buttonWidth: CGFloat
     let pullOptionsWidth: CGFloat
     let iconSize: CGFloat
@@ -1111,8 +790,6 @@ private struct RepoCommandMetrics {
     let dividerPadding: CGFloat
 
     static let regular = RepoCommandMetrics(
-        searchWidth: 180,
-        searchPlaceholder: "Search commits",
         buttonWidth: 28,
         pullOptionsWidth: 20,
         iconSize: 13,
@@ -1123,11 +800,9 @@ private struct RepoCommandMetrics {
     )
 
     // Fits the 660 pt detail floor even at the largest UI zoom. It preserves
-    // every command and the search field; only horizontal breathing room
-    // tightens, so resizing never changes what the user can do.
+    // every command; only horizontal breathing room tightens, so resizing
+    // never changes what the user can do.
     static let compact = RepoCommandMetrics(
-        searchWidth: 120,
-        searchPlaceholder: "Search",
         buttonWidth: 24,
         pullOptionsWidth: 18,
         iconSize: 12,
@@ -1147,15 +822,25 @@ private struct RepoCommandButton: View {
     let action: () -> Void
 
     @Environment(\.uiZoom) private var zoom
+    @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .zoomFont(iconSize, weight: .medium)
                 .frame(width: width * zoom, height: 28 * zoom)
+                // Each button answers the pointer on its own now that the
+                // cluster has no capsule behind it — the same fill, at the
+                // same corner, that the tabs and the + light up with.
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(hovering ? Color.primary.opacity(0.08) : .clear)
+                        .animation(.easeOut(duration: 0.12), value: hovering)
+                )
                 .contentShape(Rectangle())
         }
         .buttonStyle(.pressEffect)
+        .onHover { hovering = $0 }
         .accessibilityLabel(title)
         .help(help)
     }

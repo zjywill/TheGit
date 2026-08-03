@@ -20,8 +20,9 @@ struct RepositoriesView: View {
     @Environment(\.uiZoom) private var zoom
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    @State private var filter = ""
-    @FocusState private var filterFocused: Bool
+    /// Typed in the toolbar's search field, which is a level above this
+    /// view — see `AppState.catalogFilter`.
+    private var filter: String { appState.catalogFilter }
     /// Section being renamed in place, and the text it's being renamed to.
     @State private var renaming: String?
     @State private var draftName = ""
@@ -30,6 +31,13 @@ struct RepositoriesView: View {
     /// Folded-away projects and sections, by id — persisted, because a fold is
     /// a statement about how you want the list to look, not a scroll position.
     @AppStorage("TheGit.catalogCollapsed") private var collapsedRaw = ""
+
+    /// The widest this list is allowed to get, whatever the window does.
+    /// A row is a name at one end and an owner and a branch at the other,
+    /// and on a full-screen window those ends were a foot apart — the eye
+    /// loses which owner belongs to which repo. Zoomed with everything else,
+    /// so the cap tracks the text it's measured against.
+    private static let contentWidth: CGFloat = 1000
 
     private var collapsed: Set<String> {
         Set(collapsedRaw.split(separator: "\n").map(String.init))
@@ -62,6 +70,10 @@ struct RepositoriesView: View {
                     }
                     .padding(.horizontal, 12 * zoom)
                     .padding(.vertical, 8 * zoom)
+                    // Capped and centred; the header above is capped to the
+                    // same width, so both columns start and end together.
+                    .frame(maxWidth: Self.contentWidth * zoom)
+                    .frame(maxWidth: .infinity)
                 }
             }
         }
@@ -118,7 +130,6 @@ struct RepositoriesView: View {
                         )
                 }
                 Spacer(minLength: 12 * zoom)
-                filterField.frame(maxWidth: 260 * zoom)
             }
             HStack(spacing: 8 * zoom) {
                 if let notice = appState.scanResult {
@@ -129,6 +140,12 @@ struct RepositoriesView: View {
         }
         .padding(.horizontal, 16 * zoom)
         .padding(.vertical, 10 * zoom)
+        // Same cap as the list, so the search field stays over the rows it
+        // filters instead of drifting off to the window's far edge. The
+        // divider under this still runs the full width — it's the screen's
+        // rule, not the column's.
+        .frame(maxWidth: Self.contentWidth * zoom)
+        .frame(maxWidth: .infinity)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: appState.scanResult)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: appState.missingClones.count)
     }
@@ -198,41 +215,6 @@ struct RepositoriesView: View {
         let tail = open > 0 ? " · \(open) open" : ""
         guard folders != projects else { return head + tail }
         return head + " · \(folders) folders" + tail
-    }
-
-    private var filterField: some View {
-        HStack(spacing: 6 * zoom) {
-            Image(systemName: "magnifyingglass")
-                .zoomFont(11)
-                .foregroundStyle(filterFocused ? Color.accentColor : .secondary)
-            TextField("Search repositories", text: $filter)
-                .textFieldStyle(.plain)
-                .zoomFont(12)
-                .focused($filterFocused)
-                // Esc clears first and only gives up focus once it's empty,
-                // so one key both undoes the search and leaves the field.
-                .onExitCommand {
-                    if filter.isEmpty { filterFocused = false } else { filter = "" }
-                }
-            if !filter.isEmpty {
-                Button { filter = "" } label: {
-                    Image(systemName: "xmark.circle.fill").zoomFont(11)
-                }
-                .buttonStyle(.pressEffect)
-                .foregroundStyle(.secondary)
-                .help("Clear search")
-            }
-        }
-        .padding(.horizontal, 8 * zoom)
-        .frame(height: 24 * zoom)
-        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.06)))
-        .overlay(
-            RoundedRectangle(cornerRadius: 6).stroke(
-                filterFocused ? Color.accentColor.opacity(0.7) : Color.primary.opacity(0.1),
-                lineWidth: 1
-            )
-        )
-        .animation(.easeOut(duration: 0.12), value: filterFocused)
     }
 
     // MARK: - List

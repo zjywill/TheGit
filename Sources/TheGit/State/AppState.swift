@@ -454,6 +454,12 @@ final class AppState: ObservableObject {
     /// list draws no section chrome at all while it is.
     @Published private(set) var catalogSections: [RepoCatalog.Section] = []
 
+    /// What's typed in the catalog's search field. It lives here rather than
+    /// in the view because the field itself is in the window toolbar — the
+    /// same corner the commit search sits in — and the list it filters is
+    /// two levels below that.
+    @Published var catalogFilter = ""
+
     /// A scan in flight, so the screen can say so rather than look empty for
     /// two seconds while a home directory is walked.
     @Published private(set) var scanning = false
