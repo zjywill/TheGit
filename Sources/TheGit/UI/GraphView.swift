@@ -12,6 +12,9 @@ struct GraphView: View {
 
     private static let leadingInset: CGFloat = 8
 
+    /// The pane's current width, for the row-tint gate below.
+    @State private var paneWidth: CGFloat = 0
+
     var body: some View {
         let allRows = repo.snapshot.graphRows
         let query = repo.searchText.trimmingCharacters(in: .whitespaces)
@@ -48,6 +51,19 @@ struct GraphView: View {
 
         let changeCount = repo.snapshot.staged.count + repo.snapshot.unstaged.count
             + repo.snapshot.conflicted.count
+
+        // The subtle per-row branch tint only works while the message
+        // column has text in it. In a narrow pane the fixed columns
+        // (badges, lanes, author, hash) squeeze the messages out, and
+        // the tint turns into bare colour slabs — adjacent same-lane
+        // rows fuse into one block that reads as the conflict banner's
+        // orange leaking down the graph. Gate it on the room the
+        // messages actually get; the constant is the author + hash
+        // columns plus paddings, and the threshold is roughly where
+        // subjects stop being legible words.
+        let messageRoom = paneWidth - Self.leadingInset - badgeWidth - graphWidth
+            - 170 * zoom
+        let tintRows = paneWidth <= 0 || messageRoom > 120 * zoom
 
         // Where the relative age changes between rows (GitKraken's pills).
         let ageBreaks = AgeBreaks.compute(rows: rows)
@@ -112,7 +128,8 @@ struct GraphView: View {
                                 repo: repo,
                                 scrollX: scrollX,
                                 fadeLeading: fadeLeading,
-                                fadeTrailing: faded
+                                fadeTrailing: faded,
+                                tinted: tintRows
                             )
                         } else {
                             GraphRowView(
@@ -123,7 +140,8 @@ struct GraphView: View {
                                 fadeLeading: fadeLeading,
                                 searchMode: searching,
                                 repo: repo,
-                                scrollX: scrollX
+                                scrollX: scrollX,
+                                tinted: tintRows
                             )
                             // Infinite scroll: reaching the last row loads 500 more.
                             .onAppear { repo.loadMoreIfNeeded(row) }
@@ -166,6 +184,9 @@ struct GraphView: View {
             if let top = rows.first?.id { proxy.scrollTo(top, anchor: .top) }
         }
         .background(Color(nsColor: .textBackgroundColor))
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
+            paneWidth = $0
+        }
         .overlay(alignment: .topLeading) {
             // Only over the lane column: scrolling elsewhere is unaffected.
             if maxScroll > 0 {
@@ -279,6 +300,8 @@ struct StashGraphRow: View {
     var scrollX: CGFloat = 0
     var fadeLeading = false
     var fadeTrailing = false
+    /// Off in narrow panes — see the gate in GraphView.
+    var tinted = true
     @Environment(\.uiZoom) private var zoom
 
     /// The snapshot's stash for this row. Rebuilt from the row itself when
@@ -342,7 +365,7 @@ struct StashGraphRow: View {
         .background(
             repo.selectedStashRef == stash.ref
                 ? Color.accentColor.opacity(0.22)
-                : LaneCanvas.color(row.columnColor).opacity(0.055)
+                : tinted ? LaneCanvas.color(row.columnColor).opacity(0.055) : .clear
         )
         .contentShape(Rectangle())
         .onTapGesture { repo.selectedStashRef = stash.ref }
@@ -369,6 +392,8 @@ struct GraphRowView: View {
     var searchMode: Bool = false
     @ObservedObject var repo: RepoState
     var scrollX: CGFloat = 0
+    /// Off in narrow panes — see the gate in GraphView.
+    var tinted = true
     @ObservedObject private var avatars = AvatarStore.shared
     @Environment(\.uiZoom) private var zoom
 
@@ -477,7 +502,7 @@ struct GraphRowView: View {
             repo.selectedCommit == row.commit.hash
                 ? Color.accentColor.opacity(0.22)
                 // Subtle branch-color tint per row, GitKraken-style.
-                : LaneCanvas.color(row.columnColor).opacity(0.055)
+                : tinted ? LaneCanvas.color(row.columnColor).opacity(0.055) : .clear
         )
         .contentShape(Rectangle())
         .onTapGesture { repo.selectedCommit = row.commit.hash }

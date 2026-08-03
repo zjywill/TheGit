@@ -504,8 +504,14 @@ struct ConflictRow: View {
             Spacer()
 
             Menu {
-                Button("Accept Ours (current branch)") { repo.acceptOurs(file) }
-                Button("Accept Theirs (incoming)") { repo.acceptTheirs(file) }
+                Button("Open Merge Editor") { repo.openMergeEditor(file) }
+                Divider()
+                Button("Accept Ours (\(repo.conflictSideDescription(.ours)))") {
+                    repo.acceptOurs(file)
+                }
+                Button("Accept Theirs (\(repo.conflictSideDescription(.theirs)))") {
+                    repo.acceptTheirs(file)
+                }
                 Divider()
                 Button("Mark Resolved (keep file as-is)") { repo.markResolved(file) }
             } label: {
@@ -520,11 +526,17 @@ struct ConflictRow: View {
         .padding(.horizontal, FileListMetrics.bleed * zoom)
         .frame(height: FileListMetrics.row * zoom)
         .contentShape(Rectangle())
-        .onTapGesture { repo.selectFile(file) }
+        .onTapGesture { repo.openMergeEditor(file) }
         .contextTarget("conflict:" + file.id, repo)
         .contextMenu {
-            Button("Accept Ours (current branch)") { repo.acceptOurs(file) }
-            Button("Accept Theirs (incoming)") { repo.acceptTheirs(file) }
+            Button("Open Merge Editor") { repo.openMergeEditor(file) }
+            Divider()
+            Button("Accept Ours (\(repo.conflictSideDescription(.ours)))") {
+                repo.acceptOurs(file)
+            }
+            Button("Accept Theirs (\(repo.conflictSideDescription(.theirs)))") {
+                repo.acceptTheirs(file)
+            }
             Divider()
             Button("Mark Resolved (keep file as-is)") { repo.markResolved(file) }
         }
