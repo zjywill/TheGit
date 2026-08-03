@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// GitKraken-style unified diff for one working-tree file, shown in place
@@ -13,6 +14,8 @@ struct FileDiffView: View {
                 // The diff of an LFS file is three lines of pointer text —
                 // an oid tells nobody anything. Show what the object is.
                 LFSPointerSummary(pointer: pointer, repo: repo)
+            } else if let image = repo.imageDiff {
+                ImageDiffView(diff: image)
             } else if repo.diffLines.isEmpty {
                 Text("No textual changes to show")
                     .zoomFont(12)
@@ -110,6 +113,149 @@ struct FileDiffView: View {
         }
         .padding(.horizontal, 12)
         .frame(height: 34)
+    }
+}
+
+/// Raster image comparison shared by working-tree, commit, history and
+/// pull-request diffs. The source dimensions are shown alongside the
+/// encoded file size so a visually identical density change is still clear.
+struct ImageDiffView: View {
+    let diff: ImageDiff
+
+    var body: some View {
+        GeometryReader { geometry in
+            let sideBySide = diff.old != nil && diff.new != nil
+                && geometry.size.width >= 760
+            ScrollView(.vertical) {
+                Group {
+                    if sideBySide {
+                        HStack(alignment: .top, spacing: 12) {
+                            if let old = diff.old {
+                                ImageDiffPane(title: "Before", version: old)
+                            }
+                            if let new = diff.new {
+                                ImageDiffPane(title: "After", version: new)
+                            }
+                        }
+                    } else {
+                        VStack(spacing: 12) {
+                            if let old = diff.old {
+                                ImageDiffPane(title: "Before", version: old)
+                            }
+                            if let new = diff.new {
+                                ImageDiffPane(title: "After", version: new)
+                            }
+                        }
+                        .frame(maxWidth: diff.old == nil || diff.new == nil ? 760 : .infinity)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .top)
+                .padding(12)
+            }
+        }
+    }
+}
+
+private struct ImageDiffPane: View {
+    let title: String
+    let version: ImageDiffVersion
+
+    private var metadata: String {
+        var parts = [version.formattedDimensions, version.formattedByteCount]
+        if version.frameCount > 1 {
+            parts.append("\(version.frameCount) frames")
+        }
+        return parts.joined(separator: "  |  ")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(title)
+                    .zoomFont(11, weight: .semibold)
+                Spacer(minLength: 12)
+                Text(metadata)
+                    .zoomFont(10, design: .monospaced)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+
+            ZStack {
+                TransparencyGrid()
+                if let image = NSImage(data: version.data) {
+                    GeometryReader { geometry in
+                        let fitted = fittedSize(in: geometry.size)
+                        Image(nsImage: image)
+                            .resizable()
+                            .interpolation(fitted.scale > 1 ? .none : .high)
+                            .frame(width: fitted.size.width, height: fitted.size.height)
+                            .position(
+                                x: geometry.size.width / 2,
+                                y: geometry.size.height / 2
+                            )
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 340)
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .overlay {
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(Color.primary.opacity(0.1), lineWidth: 1)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(title) image, \(metadata)")
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func fittedSize(in bounds: CGSize) -> (size: CGSize, scale: CGFloat) {
+        let source = CGSize(
+            width: CGFloat(version.pixelWidth),
+            height: CGFloat(version.pixelHeight)
+        )
+        guard source.width > 0, source.height > 0,
+              bounds.width > 0, bounds.height > 0
+        else { return (.zero, 1) }
+        let fit = min(bounds.width / source.width, bounds.height / source.height)
+        // Small UI assets need enough enlargement to inspect, but very
+        // small icons should not turn into a wall of pixels.
+        let scale = min(fit, 4)
+        return (
+            CGSize(width: source.width * scale, height: source.height * scale),
+            scale
+        )
+    }
+}
+
+private struct TransparencyGrid: View {
+    var body: some View {
+        Canvas { context, size in
+            let tile: CGFloat = 10
+            context.fill(
+                Path(CGRect(origin: .zero, size: size)),
+                with: .color(Color(nsColor: .windowBackgroundColor))
+            )
+            var row = 0
+            var y: CGFloat = 0
+            while y < size.height {
+                var column = 0
+                var x: CGFloat = 0
+                while x < size.width {
+                    if (row + column).isMultiple(of: 2) {
+                        context.fill(
+                            Path(CGRect(x: x, y: y, width: tile, height: tile)),
+                            with: .color(Color.primary.opacity(0.045))
+                        )
+                    }
+                    column += 1
+                    x += tile
+                }
+                row += 1
+                y += tile
+            }
+        }
     }
 }
 

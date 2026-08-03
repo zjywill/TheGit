@@ -11,6 +11,15 @@ struct GitError: LocalizedError {
 actor GitClient {
     let repoPath: String
 
+    private nonisolated static let environment = [
+        "GIT_EDITOR": "true",
+        "GIT_PAGER": "cat",
+        "GIT_TERMINAL_PROMPT": "0",
+        // A background status must not briefly hold index.lock while a
+        // user-triggered mutation is starting.
+        "GIT_OPTIONAL_LOCKS": "0",
+    ]
+
     init(repoPath: String) {
         self.repoPath = repoPath
     }
@@ -26,19 +35,23 @@ actor GitClient {
                 ["git", "-C", repoPath] + args,
                 // Never let git open an editor or prompt on the terminal —
                 // continue/amend flows must complete non-interactively.
-                env: [
-                    "GIT_EDITOR": "true",
-                    "GIT_PAGER": "cat",
-                    "GIT_TERMINAL_PROMPT": "0",
-                    // A background `git status` opportunistically rewrites
-                    // the index, holding index.lock just long enough for a
-                    // user-triggered merge/stash to die on "File exists".
-                    // Optional locks off skips that rewrite; commands whose
-                    // locks are mandatory (commit, merge) are unaffected.
-                    "GIT_OPTIONAL_LOCKS": "0",
-                ],
+                env: Self.environment,
                 label: args.joined(separator: " "),
                 timeout: timeout
+            )
+        } catch let error as ShellError {
+            throw GitError(command: error.command, message: error.message)
+        }
+    }
+
+    /// Binary-preserving Git output for image blobs.
+    private func runData(_ args: [String]) async throws -> Data {
+        do {
+            return try await Shell.runData(
+                "/usr/bin/env",
+                ["git", "-C", repoPath] + args,
+                env: Self.environment,
+                label: args.joined(separator: " ")
             )
         } catch let error as ShellError {
             throw GitError(command: error.command, message: error.message)
@@ -65,11 +78,20 @@ actor GitClient {
         // --date-order interleaves parallel branches chronologically
         // (GitKraken-style) while still keeping children before parents.
         var args = ["log", "--date-order"]
+        // A freshly initialized repository has a symbolic HEAD but no
+        // commit behind it yet. Passing that unborn HEAD as a revision makes
+        // git log fail with "ambiguous argument 'HEAD'"; the named ref sets
+        // are still valid and simply produce an empty history.
+        let hasHead = (try? await run([
+            "rev-parse", "--verify", "--quiet", "HEAD",
+        ])) != nil
         if let solo {
-            args += [solo, "HEAD"]
+            args.append(solo)
+            if hasHead { args.append("HEAD") }
         } else {
             for pattern in hiddenPatterns { args.append("--exclude=\(pattern)") }
-            args += ["--branches", "--remotes", "--tags", "HEAD"]
+            args += ["--branches", "--remotes", "--tags"]
+            if hasHead { args.append("HEAD") }
             args += extraRevs
         }
         args += ["--format=\(Self.logFormat)", "-n", String(limit)]
@@ -188,13 +210,32 @@ actor GitClient {
 
     /// Files touched by a commit, with their status letters.
     func commitFiles(_ hash: String) async throws -> [FileChange] {
-        let out = try await run(["show", "--name-status", "--format=", hash])
-        return out.split(separator: "\n").compactMap { line in
-            let fields = line.split(separator: "\t", omittingEmptySubsequences: false)
-            guard fields.count >= 2, let status = fields[0].first else { return nil }
-            // Renames/copies: "R100\told\tnew" — show the new path.
-            return FileChange(path: String(fields.last!), status: status, area: .unstaged)
+        let out = try await run([
+            "show", "--name-status", "--format=", "--find-renames", "-z", hash,
+        ])
+        var fields = out.components(separatedBy: "\0")
+        while fields.last?.isEmpty == true { fields.removeLast() }
+        var files: [FileChange] = []
+        var index = 0
+        while index + 1 < fields.count {
+            let code = fields[index]
+            guard let status = code.first else { index += 1; continue }
+            if status == "R" || status == "C", index + 2 < fields.count {
+                files.append(FileChange(
+                    path: fields[index + 2],
+                    status: status,
+                    area: .unstaged,
+                    oldPath: fields[index + 1]
+                ))
+                index += 3
+            } else {
+                files.append(FileChange(
+                    path: fields[index + 1], status: status, area: .unstaged
+                ))
+                index += 2
+            }
         }
+        return files
     }
 
     /// One file's diff within a commit (works for root commits too).
@@ -207,6 +248,55 @@ actor GitClient {
         if staged { args.append("--cached") }
         args += ["--", path]
         return try await run(args)
+    }
+
+    /// Image versions for a working-tree row. Unstaged compares index to
+    /// disk; staged compares HEAD to index.
+    func workingTreeImageDiff(_ file: FileChange) async throws -> ImageDiff? {
+        guard ImageDiff.supports(path: file.path), file.status != "U" else { return nil }
+        let oldPath = file.oldPath ?? file.path
+        let oldData: Data?
+        let newData: Data?
+
+        if file.area == .staged {
+            oldData = file.status == "A" || file.status == "?"
+                ? nil
+                : try await blob(revision: "HEAD", path: oldPath)
+            newData = file.status == "D"
+                ? nil
+                : try await blob(revision: "", path: file.path)
+        } else {
+            oldData = file.status == "?" || file.status == "A"
+                ? nil
+                : try await blob(revision: "", path: oldPath)
+            newData = file.status == "D"
+                ? nil
+                : try Data(
+                    contentsOf: URL(fileURLWithPath: repoPath)
+                        .appendingPathComponent(file.path),
+                    options: .mappedIfSafe
+                )
+        }
+        return ImageDiff(oldData: oldData, newData: newData)
+    }
+
+    /// Image versions for a file shown from one historical commit.
+    func commitImageDiff(_ hash: String, file: FileChange) async throws -> ImageDiff? {
+        guard ImageDiff.supports(path: file.path) else { return nil }
+        let parent = try? await run(["rev-parse", "--verify", "\(hash)^1"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let oldData: Data?
+        if file.status == "A" || file.status == "?" {
+            oldData = nil
+        } else if let parent {
+            oldData = try await blob(revision: parent, path: file.oldPath ?? file.path)
+        } else {
+            oldData = nil
+        }
+        let newData = file.status == "D"
+            ? nil
+            : try await blob(revision: hash, path: file.path)
+        return ImageDiff(oldData: oldData, newData: newData)
     }
 
     /// The change a commit would record, for the AI message generator:
@@ -348,6 +438,27 @@ actor GitClient {
         )
     }
 
+    /// Image versions for a review file, using the same merge base as the
+    /// three-dot textual diff.
+    func reviewFileImageDiff(range: String, file: ReviewFile) async throws -> ImageDiff? {
+        guard ImageDiff.supports(path: file.path) else { return nil }
+        let refs = range.components(separatedBy: "...")
+        guard refs.count == 2 else { return nil }
+        let base = try await run(["merge-base", refs[0], refs[1]])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let oldData = file.status == "A"
+            ? nil
+            : try await blob(revision: base, path: file.oldPath ?? file.path)
+        let newData = file.status == "D"
+            ? nil
+            : try await blob(revision: refs[1], path: file.path)
+        return ImageDiff(oldData: oldData, newData: newData)
+    }
+
+    private func blob(revision: String, path: String) async throws -> Data {
+        try await runData(["show", "\(revision):\(path)"])
+    }
+
     // MARK: - Conflict resolution
 
     /// Take one side of a conflicted file wholesale, then mark it resolved.
@@ -367,7 +478,12 @@ actor GitClient {
     // MARK: - Mutations
 
     func stage(_ path: String) async throws {
-        try await run(["add", "--", path])
+        try await stage([path])
+    }
+
+    func stage(_ paths: [String]) async throws {
+        guard !paths.isEmpty else { return }
+        try await run(["add", "--"] + paths)
     }
 
     func stageAll() async throws {
@@ -375,11 +491,25 @@ actor GitClient {
     }
 
     func unstage(_ path: String) async throws {
-        try await run(["reset", "-q", "HEAD", "--", path])
+        try await unstage([path])
+    }
+
+    func unstage(_ paths: [String]) async throws {
+        guard !paths.isEmpty else { return }
+        try await run(["reset", "-q", "HEAD", "--"] + paths)
     }
 
     func unstageAll() async throws {
         try await run(["reset", "-q", "HEAD"])
+    }
+
+    /// Take a path out of the index but leave it on disk — what git calls
+    /// `rm --cached`, and what the UI calls "Stop tracking". `--force`
+    /// covers the file that was staged and then edited again: its index
+    /// content matches neither HEAD nor the working tree, and git would
+    /// rather refuse than pick a side. Nothing is deleted either way.
+    func untrack(_ path: String) async throws {
+        try await run(["rm", "--cached", "--force", "--", path])
     }
 
     func commit(message: String) async throws {
@@ -950,6 +1080,20 @@ actor GitClient {
         let out = try await run(["branch", "--merged", base, "--format=%(refname:short)"])
         return Set(out.split(separator: "\n").map {
             String($0).trimmingCharacters(in: .whitespaces)
+        })
+    }
+
+    /// Remote-tracking refs already contained by `base`. Keep the full
+    /// `origin/name` spelling so a same-named local branch cannot collide
+    /// with it in the cleanup scan.
+    func mergedRemoteBranches(remote: String, into base: String) async throws -> Set<String> {
+        let out = try await run([
+            "for-each-ref", "--merged=\(base)", "--format=%(refname:short)",
+            "refs/remotes/\(remote)",
+        ])
+        return Set(out.split(separator: "\n").compactMap {
+            let name = String($0).trimmingCharacters(in: .whitespaces)
+            return name.hasSuffix("/HEAD") ? nil : name
         })
     }
 

@@ -69,9 +69,95 @@ final class MergeConflictTests: XCTestCase {
         XCTAssertNil(ConflictDocument.parse("<<<<<<< HEAD\nours\n=======\n"))
     }
 
+    func testMarkerSyntaxAndTruncatedDiff3TextArePreservedExactly() throws {
+        let text = """
+            <<<<<<<<< HEAD
+            ours
+            =========
+            theirs
+            >>>>>>>>> topic
+            <<<<<<<not a marker
+            <<<<<<< HEAD
+            dangling ours
+            ||||||| merged common ancestors
+            dangling base
+            """ + "\n"
+        let doc = try XCTUnwrap(ConflictDocument.parse(text))
+        XCTAssertEqual(doc.conflicts.count, 1)
+        XCTAssertEqual(doc.conflicts[0].markerSize, 9)
+        XCTAssertEqual(
+            doc.segments.last,
+            .shared([
+                "<<<<<<<not a marker",
+                "<<<<<<< HEAD",
+                "dangling ours",
+                "||||||| merged common ancestors",
+                "dangling base",
+            ])
+        )
+    }
+
     func testMissingTrailingNewlineIsPreserved() throws {
         let doc = try XCTUnwrap(ConflictDocument.parse(String(simple.dropLast())))
         XCTAssertFalse(doc.endsWithNewline)
+    }
+
+    @MainActor
+    func testCRLFIsParsedAndWrittenWithoutLineEndingChurn() throws {
+        let text = "top\r\n<<<<<<< HEAD\r\nours\r\n=======\r\ntheirs\r\n>>>>>>> topic\r\nbottom\r\n"
+        let doc = try XCTUnwrap(ConflictDocument.parse(text))
+        XCTAssertEqual(doc.lineEnding, "\r\n")
+        let session = MergeEditorSession(
+            file: file(),
+            document: doc,
+            encoding: .utf8,
+            originalData: Data(text.utf8)
+        )
+        session.setSide(0, side: .ours, on: true)
+        XCTAssertEqual(session.resolvedContent(), "top\r\nours\r\nbottom\r\n")
+
+        session.reset()
+        session.beginEditing()
+        XCTAssertEqual(session.draft, text)
+        XCTAssertTrue(session.draftHasMarkers)
+    }
+
+    @MainActor
+    func testEncodedContentPreservesByteOrderMarksAndEndianness() throws {
+        let doc = try XCTUnwrap(ConflictDocument.parse(simple))
+
+        let utf8BOM = Data([0xEF, 0xBB, 0xBF])
+        let utf8 = MergeEditorSession(
+            file: file(),
+            document: doc,
+            encoding: .utf8,
+            originalData: utf8BOM + Data(simple.utf8)
+        )
+        utf8.setSide(0, side: .ours, on: true)
+        XCTAssertEqual(
+            utf8.encodedContent(utf8.resolvedContent()),
+            utf8BOM + Data("top\nours line\nbottom\n".utf8)
+        )
+
+        let utf16BEBOM = Data([0xFE, 0xFF])
+        let utf16BEBody = try XCTUnwrap(
+            simple.data(using: .utf16BigEndian)
+        )
+        let utf16 = MergeEditorSession(
+            file: file(),
+            document: doc,
+            encoding: .utf16,
+            originalData: utf16BEBOM + utf16BEBody
+        )
+        utf16.setSide(0, side: .theirs, on: true)
+        let utf16ExpectedBody = try XCTUnwrap(
+            "top\ntheirs line\nbottom\n".data(using: .utf16BigEndian)
+        )
+        let utf16Expected = utf16BEBOM + utf16ExpectedBody
+        XCTAssertEqual(
+            utf16.encodedContent(utf16.resolvedContent()),
+            utf16Expected
+        )
     }
 
     /// One side empty: the incoming branch added lines the current one

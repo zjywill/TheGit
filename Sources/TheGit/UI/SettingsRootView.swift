@@ -68,25 +68,16 @@ struct SettingsRootView: View {
     /// to as well.
     private static let titleBarHeight: CGFloat = 52
 
-    /// How far the sidebar capsule floats off the window's edges, and how
-    /// round it is. Both fixed rather than zoomed: this is window chrome,
-    /// sized against the traffic lights, which don't zoom either.
-    private static let capsuleInset: CGFloat = 8
-    /// Concentric with the window: Tahoe rounds window corners to ~26pt, so
-    /// a panel floating 8pt inside them wants 26 − 8 — a shared centre, not
-    /// a shared radius, is what stops the two curves from clashing.
-    private static let capsuleRadius: CGFloat = 18
-
     var body: some View {
         HStack(spacing: 0) {
             sidebar
             detail
         }
-        // The sidebar is a capsule floating clear of the window's edges with
-        // the traffic lights sitting on it — the shape macOS 26 gives every
-        // stock sidebar. Two halves of it: the window drops its title bar
-        // (SettingsWindowChrome), and the content stops reserving the safe
-        // area that title bar used to occupy.
+        // The macOS 27 shape, matching the repository window: the sidebar
+        // is one flat surface flush with the window's leading, top, and
+        // bottom edges, with the traffic lights in its top band. The window
+        // drops its title bar (SettingsWindowChrome) and the content stops
+        // reserving the safe area that title bar used to occupy.
         .ignoresSafeArea(.container, edges: .top)
         .background(SettingsWindowChrome())
     }
@@ -118,23 +109,16 @@ struct SettingsRootView: View {
         // The capsule's glass is behind the list; the list's own backdrop
         // would sit between the two and flatten it.
         .scrollContentBackground(.hidden)
-        // Room for the traffic lights, which now sit on this capsule. An
-        // inset rather than padding, so rows scroll under it.
+        // Room for the traffic lights, which sit in the sidebar's top band.
+        // An inset rather than padding, so rows scroll under it.
         .safeAreaInset(edge: .top, spacing: 0) {
-            Color.clear.frame(height: Self.titleBarHeight - Self.capsuleInset)
+            Color.clear.frame(height: Self.titleBarHeight)
         }
         .frame(width: 168 * zoom)
-        // Glass, clipped to the capsule and outlined the way the stock one
-        // is — the outline is what reads as "a panel on the window" rather
-        // than "a column of it".
-        .background(SidebarMaterial())
-        .clipShape(RoundedRectangle(cornerRadius: Self.capsuleRadius))
-        .overlay(
-            RoundedRectangle(cornerRadius: Self.capsuleRadius)
-                .stroke(Color.primary.opacity(0.10))
-        )
-        .padding(.leading, Self.capsuleInset)
-        .padding(.vertical, Self.capsuleInset)
+        // The same glass recipe as the repository sidebar (Xcode-matched
+        // 247 in light mode), flush to the window's edges — no capsule, no
+        // clip, no border.
+        .background(SidebarGlass())
     }
 
     private var detail: some View {
@@ -252,25 +236,6 @@ private struct SettingsWindowChrome: NSViewRepresentable {
             observers.forEach(NotificationCenter.default.removeObserver)
         }
     }
-}
-
-/// `NSVisualEffectView` in sidebar material — SwiftUI's `.regularMaterial`
-/// blends within the window, which over an opaque window background is just
-/// a flat grey.
-private struct SidebarMaterial: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        view.material = .sidebar
-        view.blendingMode = .behindWindow
-        // Pinned active rather than following the window: on this window the
-        // follow behavior didn't reliably come back from an app switch — the
-        // glass stayed flat until relaunch. A capsule that doesn't dim with
-        // deactivation is the smaller wrongness.
-        view.state = .active
-        return view
-    }
-
-    func updateNSView(_ view: NSVisualEffectView, context: Context) {}
 }
 
 /// One sidebar row: icon and title, and nothing else. No background, no

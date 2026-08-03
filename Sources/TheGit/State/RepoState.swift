@@ -66,6 +66,35 @@ enum BranchPrompt: Identifiable {
     }
 }
 
+/// Instructions for taking a freshly initialized repository through the one
+/// Git operation TheGit cannot represent yet: creating its first commit.
+///
+/// The app only presents and copies these commands. Running them stays in
+/// Terminal, so staging every file and choosing the first message remain an
+/// explicit user action.
+struct InitialCommitGuide: Equatable {
+    let path: String
+
+    var repositoryName: String {
+        (path as NSString).lastPathComponent
+    }
+
+    var commands: String {
+        """
+        cd \(Self.shellQuoted(path))
+        git add .
+        git status
+        git commit --allow-empty -m 'Initial commit'
+        """
+    }
+
+    /// Single-quoted for the user's shell. A repository path can contain an
+    /// apostrophe, so interpolation inside double quotes is not sufficient.
+    private static func shellQuoted(_ text: String) -> String {
+        "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+}
+
 /// A branch delete waiting on confirmation. `includeRemote` is the
 /// one-step "delete it everywhere" variant.
 struct PendingBranchDelete: Identifiable, Hashable {
@@ -183,6 +212,11 @@ final class RepoState: ObservableObject, Identifiable {
         case stash = "Stash"
     }
 
+    enum FileSelectionDirection {
+        case previous
+        case next
+    }
+
     @Published var snapshot = RepoSnapshot() {
         didSet { scheduleSnapshotSave() }
     }
@@ -219,6 +253,10 @@ final class RepoState: ObservableObject, Identifiable {
     /// and the refresh loop and the file watcher can raise the same failure
     /// again a second later, which stacks dialogs on top of each other.
     @Published var errorNotice: ErrorNotice?
+    /// A fresh repository is valid, but it has no HEAD for the graph to
+    /// display. Present the terminal-only recovery once when its tab opens.
+    @Published var initialCommitGuide: InitialCommitGuide?
+    private var didPresentInitialCommitGuide = false
 
     /// The string way in, for the failures we word ourselves. Reads back the
     /// verbatim text, so `errorMessage == nil` still means "nothing failed".
@@ -314,8 +352,14 @@ final class RepoState: ObservableObject, Identifiable {
     @Published var promptText = ""
     @Published var branchToDelete: PendingBranchDelete?
     @Published var commitToHardReset: Commit?
+    /// Working-tree rows selected for a batch Stage/Unstage. This is kept
+    /// separate from `selectedFile`, which is the one file whose diff is
+    /// open, because a multi-selection still needs one primary preview.
+    @Published private(set) var selectedWorkingTreeFileIDs: Set<FileChange.ID> = []
+    private var workingTreeSelectionAnchorID: FileChange.ID?
     @Published var selectedFile: FileChange?
     @Published var diffLines: [DiffLine] = []
+    @Published var imageDiff: ImageDiff?
     /// Set when the open diff is an LFS pointer diff: the view shows what
     /// the object is instead of three lines of oid text.
     @Published var lfsPointer: LFSPointerDiff?
@@ -332,6 +376,7 @@ final class RepoState: ObservableObject, Identifiable {
     private var pendingMergeDiscardAction: (() -> Void)?
     private var markerSaveOverwritesExternalChanges = false
     private var externalChangeAllowsMarkers = false
+    private var fileDiffTask: Task<Void, Never>?
     /// Graph visibility filters (GitKraken Solo / Hide). Session-only.
     @Published var soloRev: String?
     @Published var hiddenRefs: Set<String> = []
@@ -376,6 +421,12 @@ final class RepoState: ObservableObject, Identifiable {
     @Published var commitFiles: [FileChange] = []
     @Published var fileToDelete: FileChange?
     @Published var fileToDiscard: FileChange?
+    /// An Ignore picked on a file git already tracks, waiting on the
+    /// confirmation dialog — see `confirmIgnore`.
+    @Published var pendingIgnore: PendingIgnore?
+    /// "Stop tracking", waiting on its confirmation — see
+    /// `confirmStopTracking`.
+    @Published var fileToUntrack: FileChange?
     @Published var showAddRemote = false
     @Published var newRemoteName = "origin"
     @Published var newRemoteURL = ""
@@ -429,6 +480,7 @@ final class RepoState: ObservableObject, Identifiable {
     @Published private(set) var prDiffState: ReviewDiffState = .loading
     @Published private(set) var prSelectedFile: ReviewFile?
     @Published private(set) var prDiffLines: [DiffLine] = []
+    @Published private(set) var prImageDiff: ImageDiff?
     /// Files the reviewer has ticked off, kept per request so switching
     /// between two of them doesn't lose either one's progress. Session-only:
     /// a tick is a reading aid, not a verdict worth restoring next launch.
@@ -924,6 +976,8 @@ final class RepoState: ObservableObject, Identifiable {
         pendingRefresh?.cancel()
         pendingRefresh = nil
         watcher = nil
+        initialCommitGuide = nil
+        didPresentInitialCommitGuide = false
     }
 
     /// What ⌘R and the toolbar's Refresh do: everything the tab shows, git
@@ -1035,14 +1089,9 @@ final class RepoState: ObservableObject, Identifiable {
             updateLineage()
             revealCurrentBranch()
             syncMergeDraft()
-            // Close the diff if its file no longer has changes — but only
-            // for working-tree diffs. A commit's diff (diffCommit set) is
-            // historical and must survive background refreshes.
-            if diffCommit == nil, let file = selectedFile {
-                let all = snap.staged + snap.unstaged + snap.conflicted
-                if !all.contains(where: { $0.id == file.id }) { closeDiff() }
-            }
+            reconcileWorkingTreeFileSelection(with: snap)
             closeMergeEditorIfStale(snap)
+            updateInitialCommitGuide(for: snap)
         } catch {
             report(error)
         }
@@ -1067,6 +1116,26 @@ final class RepoState: ObservableObject, Identifiable {
         } else {
             clearMergeEditor()
         }
+    }
+
+    /// A zero-ref repository gets guidance, not a low-level Git failure.
+    /// Background refreshes must not reopen the alert after it is dismissed;
+    /// gaining a first commit clears the state and arms it for a future
+    /// genuinely empty repository.
+    private func updateInitialCommitGuide(for snapshot: RepoSnapshot) {
+        let hasNoCommits = snapshot.commits.isEmpty
+            && snapshot.localBranches.isEmpty
+            && snapshot.remoteBranches.isEmpty
+            && snapshot.tags.isEmpty
+            && snapshot.stashes.isEmpty
+        guard hasNoCommits else {
+            initialCommitGuide = nil
+            didPresentInitialCommitGuide = false
+            return
+        }
+        guard !didPresentInitialCommitGuide else { return }
+        didPresentInitialCommitGuide = true
+        initialCommitGuide = InitialCommitGuide(path: path)
     }
 
     /// GitKraken lands you on git's own prepared message mid-merge instead
@@ -1131,10 +1200,7 @@ final class RepoState: ObservableObject, Identifiable {
                 updateLineage()
                 revealCurrentBranch()
             }
-            if diffCommit == nil, let file = selectedFile {
-                let all = snap.staged + snap.unstaged + snap.conflicted
-                if !all.contains(where: { $0.id == file.id }) { closeDiff() }
-            }
+            reconcileWorkingTreeFileSelection(with: snap)
             closeMergeEditorIfStale(snap)
         } catch {
             report(error)
@@ -1270,6 +1336,18 @@ final class RepoState: ObservableObject, Identifiable {
 
     func stage(_ file: FileChange) { performIndexOnly { try await $0.stage(file.path) } }
     func unstage(_ file: FileChange) { performIndexOnly { try await $0.unstage(file.path) } }
+    func stage(_ files: [FileChange]) {
+        let paths = files.map(\.path)
+        guard !paths.isEmpty else { return }
+        closeDiff()
+        performIndexOnly { try await $0.stage(paths) }
+    }
+    func unstage(_ files: [FileChange]) {
+        let paths = files.map(\.path)
+        guard !paths.isEmpty else { return }
+        closeDiff()
+        performIndexOnly { try await $0.unstage(paths) }
+    }
     func stageAll() { performIndexOnly { try await $0.stageAll() } }
     func unstageAll() { performIndexOnly { try await $0.unstageAll() } }
 
@@ -2100,6 +2178,7 @@ final class RepoState: ObservableObject, Identifiable {
         prFiles = []
         prSelectedFile = nil
         prDiffLines = []
+        prImageDiff = nil
         prDiffState = .loading
         prRange = nil
         prViewedFiles = viewedByRequest[pr.number] ?? []
@@ -2116,6 +2195,7 @@ final class RepoState: ObservableObject, Identifiable {
         prFiles = []
         prSelectedFile = nil
         prDiffLines = []
+        prImageDiff = nil
         prRange = nil
     }
 
@@ -2194,10 +2274,25 @@ final class RepoState: ObservableObject, Identifiable {
         guard let range = prRange else { return }
         prSelectedFile = file
         prDiffLines = []
+        prImageDiff = nil
         prFileDiffTask?.cancel()
         let number = prToView?.number
         prFileDiffTask = Task {
             do {
+                do {
+                    if let image = try await git.reviewFileImageDiff(range: range, file: file) {
+                        guard !Task.isCancelled, prToView?.number == number,
+                              prSelectedFile?.path == file.path
+                        else { return }
+                        prImageDiff = image
+                        return
+                    }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    // An image-looking path with an unavailable or invalid
+                    // blob still gets Git's ordinary binary/text fallback.
+                }
                 let text = try await git.reviewFileDiff(range: range, file: file)
                 guard !Task.isCancelled, prToView?.number == number,
                       prSelectedFile?.path == file.path
@@ -2538,6 +2633,7 @@ final class RepoState: ObservableObject, Identifiable {
         cleanupError = nil
         defer { scanningCleanup = false }
         do {
+            await pruneCleanupRemoteTracking()
             cleanupCandidates = try await findCleanupCandidates()
         } catch {
             cleanupCandidates = []
@@ -2560,6 +2656,22 @@ final class RepoState: ObservableObject, Identifiable {
         cleanupSelection = selected ? Set(cleanupCandidates.map(\.id)) : []
     }
 
+    /// A tracking ref can outlive the branch on the server indefinitely.
+    /// Prune the default remote before scanning so a vanished remote branch
+    /// becomes `upstreamGone` and is not offered as though it still exists.
+    /// Cleanup remains useful offline: a failed fetch leaves the last known
+    /// refs in place and the normal best-effort signals still run.
+    private func pruneCleanupRemoteTracking() async {
+        let remote = snapshot.defaultRemote
+        guard snapshot.remoteNames.contains(remote) else { return }
+        do {
+            try await git.fetchRemote(remote)
+            await refresh(quiet: true)
+        } catch {
+            // Offline and unauthenticated scans still use local Git evidence.
+        }
+    }
+
     /// Batch deletes always ask, even when every row is safe. One click for
     /// twenty rows is exactly the case where the user hasn't read them one
     /// by one, so the dialog is where the stakes get stated.
@@ -2570,11 +2682,20 @@ final class RepoState: ObservableObject, Identifiable {
 
     /// Four signals, strongest first: the forge says the PR was merged;
     /// git says the tip is an ancestor; the squash probe says the work is
-    /// already upstream; the upstream branch is gone. Anything else is
-    /// left alone — a branch we can't explain is not a candidate.
+    /// already upstream; the upstream branch is gone. Remote deletion cannot
+    /// be undone, so a same-named merged PR only labels a remote candidate
+    /// after Git has proved its current tip is already in the remote base.
+    /// Anything else is left alone — a branch we can't explain is not a
+    /// candidate.
     private func findCleanupCandidates() async throws -> [CleanupCandidate] {
-        let base = await git.defaultBranch(remote: snapshot.defaultRemote)
+        let remote = snapshot.defaultRemote
+        let base = await git.defaultBranch(remote: remote)
+        let remoteBaseName = "\(remote)/\(base)"
+        let remoteBase = snapshot.remoteBranches.contains { $0.name == remoteBaseName }
+            ? remoteBaseName : base
         let merged = (try? await git.mergedBranches(into: base)) ?? []
+        let mergedRemote =
+            (try? await git.mergedRemoteBranches(remote: remote, into: remoteBase)) ?? []
         // Best effort: the whole scan still works offline or without a CLI.
         var mergedPRs: [String: Int] = [:]
         if let forge {
@@ -2586,6 +2707,10 @@ final class RepoState: ObservableObject, Identifiable {
 
         let candidates = snapshot.localBranches.filter {
             $0.name != base && !$0.isCurrent && !checkedOut.contains($0.name)
+        }
+        let remoteCandidates = snapshot.remoteBranches.filter {
+            guard case .remote(let name) = $0.kind else { return false }
+            return name == remote && $0.shortName != base
         }
         var worktreeBranches: [String: Worktree] = [:]
         for worktree in snapshot.worktrees
@@ -2615,6 +2740,32 @@ final class RepoState: ObservableObject, Identifiable {
             reasons[name] = .squashMerged(into: base)
         }
 
+        var remoteReasons: [String: CleanupCandidate.Reason] = [:]
+        var remoteNeedProbe: [String] = []
+        for branch in remoteCandidates {
+            if mergedRemote.contains(branch.name) {
+                if let number = mergedPRs[branch.shortName] {
+                    remoteReasons[branch.name] = .mergedPullRequest(
+                        number: number, prefix: forge?.numberPrefix ?? "#"
+                    )
+                } else {
+                    remoteReasons[branch.name] = .merged(into: remoteBase)
+                }
+            } else {
+                remoteNeedProbe.append(branch.name)
+            }
+        }
+        for name in await squashMerged(remoteNeedProbe, into: remoteBase) {
+            let shortName = String(name.dropFirst(remote.count + 1))
+            if let number = mergedPRs[shortName] {
+                remoteReasons[name] = .mergedPullRequest(
+                    number: number, prefix: forge?.numberPrefix ?? "#"
+                )
+            } else {
+                remoteReasons[name] = .squashMerged(into: remoteBase)
+            }
+        }
+
         var found: [CleanupCandidate] = []
         for branch in candidates {
             guard let reason = reasons[branch.name]
@@ -2631,6 +2782,15 @@ final class RepoState: ObservableObject, Identifiable {
                     (try? await git.countCommits("\(base)..\(branch.name)")) ?? 0
             }
             found.append(candidate)
+        }
+        for branch in remoteCandidates {
+            guard case .remote(let remoteName) = branch.kind,
+                  let reason = remoteReasons[branch.name]
+            else { continue }
+            found.append(CleanupCandidate(
+                target: .remoteBranch(remote: remoteName, name: branch.shortName),
+                reason: reason
+            ))
         }
 
         // The main worktree is never a candidate: git can't remove it, and
@@ -2708,13 +2868,15 @@ final class RepoState: ObservableObject, Identifiable {
                 if case .worktree(_, false) = $0.target { return true }
                 return false
             }
-            let branches = candidates.filter { !$0.isWorktree }
+            let remoteBranches = candidates.filter(\.isRemoteBranch)
+            let localBranches = candidates.filter(\.isLocalBranch)
 
             var cleaned: Set<String> = []
             var undone: [UndoableDelete] = []
             var failures: [(name: String, message: String)] = []
             var prunedStale = false
             var touchedWorktrees = false
+            var touchedRemotes: Set<String> = []
 
             if !stale.isEmpty {
                 do {
@@ -2738,7 +2900,23 @@ final class RepoState: ObservableObject, Identifiable {
                     failures.append((candidate.name, error.localizedDescription))
                 }
             }
-            for candidate in branches {
+            for candidate in remoteBranches {
+                guard case .remoteBranch(let remote, let name) = candidate.target else { continue }
+                do {
+                    try await git.deleteRemoteBranch(remote: remote, branch: name)
+                    touchedRemotes.insert(remote)
+                    cleaned.insert(candidate.id)
+                } catch {
+                    failures.append((candidate.name, error.localizedDescription))
+                }
+            }
+            // `push --delete` normally updates this ref itself. The fetch is
+            // still worthwhile after a batch: it prunes any other branch
+            // deleted on the server since the scan.
+            for remote in touchedRemotes {
+                try? await git.fetchRemote(remote)
+            }
+            for candidate in localBranches {
                 guard case .branch(let name, let tip) = candidate.target else { continue }
                 do {
                     try await git.deleteLocalBranch(name)
@@ -2804,10 +2982,25 @@ final class RepoState: ObservableObject, Identifiable {
         perform { try await $0.stashFile(file.path) }
     }
 
+    /// An Ignore chosen on a tracked file. Held until the user confirms,
+    /// because the pattern alone would do nothing: git ignores only what
+    /// isn't in the index, so the file has to leave the index too.
+    struct PendingIgnore: Identifiable {
+        let file: FileChange
+        let pattern: String
+        let local: Bool
+
+        var id: String { file.id + pattern + (local ? "+local" : "") }
+        /// Where the pattern is written, for the dialog's wording.
+        var ignoreFile: String { local ? ".git/info/exclude" : ".gitignore" }
+    }
+
     /// Append a pattern to the repo's root `.gitignore` — or, when `local`
     /// is set, to `.git/info/exclude`, which ignores the file for this
-    /// clone only and never shows up in a commit.
-    func ignore(pattern: String, local: Bool = false) {
+    /// clone only and never shows up in a commit. `untrack` drops one path
+    /// from the index afterwards, which is what makes the pattern bite on a
+    /// file git is already tracking.
+    func ignore(pattern: String, local: Bool = false, untrack: String? = nil) {
         Task {
             do {
                 let url: URL
@@ -2826,11 +3019,37 @@ final class RepoState: ObservableObject, Identifiable {
                 if let updated = GitIgnore.append(pattern, to: content) {
                     try updated.write(to: url, atomically: true, encoding: .utf8)
                 }
+                // The pattern goes down first: with the file out of the
+                // index and nothing ignoring it yet, a refresh landing in
+                // between would show it as a brand new untracked file.
+                if let untrack {
+                    try await git.untrack(untrack)
+                }
             } catch {
                 report(error)
             }
             await refresh(quiet: true)
         }
+    }
+
+    /// Confirmed from the ignore dialog: write the pattern, then take the
+    /// file out of the index so the pattern actually applies to it. Only
+    /// the file that was right-clicked is untracked — other tracked files
+    /// matching the same pattern keep their history in the index.
+    func confirmIgnore() {
+        guard let pending = pendingIgnore else { return }
+        pendingIgnore = nil
+        ignore(pattern: pending.pattern, local: pending.local, untrack: pending.file.path)
+    }
+
+    /// Confirmed from the stop-tracking dialog: the same index removal as
+    /// the ignore path, without writing any pattern. For the file that
+    /// belongs on disk but not in the repo and is already covered by an
+    /// ignore rule somewhere — or that the user would rather ignore by hand.
+    func confirmStopTracking() {
+        guard let file = fileToUntrack else { return }
+        fileToUntrack = nil
+        performIndexOnly { try await $0.untrack(file.path) }
     }
 
     func openFile(_ file: FileChange) {
@@ -2918,18 +3137,40 @@ final class RepoState: ObservableObject, Identifiable {
         issueToView = nil
         prToView = nil
         clearMergeEditor()
+        selectedWorkingTreeFileIDs = []
+        workingTreeSelectionAnchorID = nil
         selectedFile = file
         diffCommit = hash
         diffLines = []
+        imageDiff = nil
         lfsPointer = nil
-        Task {
+        fileDiffTask?.cancel()
+        fileDiffTask = Task {
             do {
+                do {
+                    if let image = try await git.commitImageDiff(hash, file: file) {
+                        guard !Task.isCancelled, selectedFile?.id == file.id,
+                              diffCommit == hash
+                        else { return }
+                        imageDiff = image
+                        parsedDiff = ParsedDiff()
+                        return
+                    }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    // Fall through to the established textual diff.
+                }
                 let text = try await git.commitFileDiff(hash, path: file.path)
-                lfsPointer = LFSParsers.pointerDiff(text)
                 let parsed = DiffParser.parse(text)
+                guard !Task.isCancelled, selectedFile?.id == file.id,
+                      diffCommit == hash
+                else { return }
+                lfsPointer = LFSParsers.pointerDiff(text)
                 parsedDiff = parsed
                 diffLines = parsed.lines
             } catch {
+                guard !Task.isCancelled else { return }
                 report(error)
             }
         }
@@ -3051,24 +3292,210 @@ final class RepoState: ObservableObject, Identifiable {
         issueToView = nil
         prToView = nil
         clearMergeEditor()
-        selectedFile = FileChange(path: filePath, status: "M", area: .unstaged)
+        selectedWorkingTreeFileIDs = []
+        workingTreeSelectionAnchorID = nil
+        let file = FileChange(path: filePath, status: "M", area: .unstaged)
+        selectedFile = file
         diffCommit = commit.hash
         diffLines = []
+        imageDiff = nil
         lfsPointer = nil
-        Task {
+        fileDiffTask?.cancel()
+        fileDiffTask = Task {
             do {
+                do {
+                    if let image = try await git.commitImageDiff(commit.hash, file: file) {
+                        guard !Task.isCancelled, selectedFile?.id == file.id,
+                              diffCommit == commit.hash
+                        else { return }
+                        imageDiff = image
+                        parsedDiff = ParsedDiff()
+                        return
+                    }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    // Fall through to the established textual diff.
+                }
                 let text = try await git.commitFileDiff(commit.hash, path: filePath)
-                lfsPointer = LFSParsers.pointerDiff(text)
                 let parsed = DiffParser.parse(text)
+                guard !Task.isCancelled, selectedFile?.id == file.id,
+                      diffCommit == commit.hash
+                else { return }
+                lfsPointer = LFSParsers.pointerDiff(text)
                 parsedDiff = parsed
                 diffLines = parsed.lines
             } catch {
+                guard !Task.isCancelled else { return }
                 report(error)
             }
         }
     }
 
     // MARK: - Diff view
+
+    func selectedWorkingTreeFiles(in files: [FileChange]) -> [FileChange] {
+        files.filter { selectedWorkingTreeFileIDs.contains($0.id) }
+    }
+
+    /// Apply Finder-style selection semantics inside one visual file
+    /// section. A selection never spans staged and unstaged lists because
+    /// their available batch action is different.
+    @discardableResult
+    func selectFile(
+        _ file: FileChange,
+        in files: [FileChange],
+        extending: Bool = false,
+        toggling: Bool = false
+    ) -> FileChange? {
+        var result: FileChange?
+        requestLeavingMergeEditor { [weak self] in
+            result = self?.selectFileImmediately(
+                file,
+                in: files,
+                extending: extending,
+                toggling: toggling
+            )
+        }
+        return result
+    }
+
+    private func selectFileImmediately(
+        _ file: FileChange,
+        in files: [FileChange],
+        extending: Bool,
+        toggling: Bool
+    ) -> FileChange? {
+        guard let clickedIndex = files.firstIndex(where: { $0.id == file.id }) else {
+            return nil
+        }
+
+        let sectionIDs = Set(files.map(\.id))
+        let selectionIsInSection = selectedWorkingTreeFileIDs.isSubset(of: sectionIDs)
+
+        if extending {
+            let anchorIndex: Int
+            if selectionIsInSection,
+               let anchor = workingTreeSelectionAnchorID,
+               let index = files.firstIndex(where: { $0.id == anchor }) {
+                anchorIndex = index
+            } else if let selectedFile,
+                      let index = files.firstIndex(where: { $0.id == selectedFile.id }) {
+                anchorIndex = index
+                workingTreeSelectionAnchorID = selectedFile.id
+            } else {
+                anchorIndex = clickedIndex
+                workingTreeSelectionAnchorID = file.id
+            }
+
+            let bounds = min(anchorIndex, clickedIndex)...max(anchorIndex, clickedIndex)
+            let rangeIDs = Set(bounds.map { files[$0].id })
+            selectedWorkingTreeFileIDs = toggling && selectionIsInSection
+                ? selectedWorkingTreeFileIDs.union(rangeIDs)
+                : rangeIDs
+            loadWorkingTreeDiff(file)
+            return file
+        }
+
+        if toggling && selectionIsInSection {
+            workingTreeSelectionAnchorID = file.id
+            if selectedWorkingTreeFileIDs.contains(file.id) {
+                selectedWorkingTreeFileIDs.remove(file.id)
+                guard !selectedWorkingTreeFileIDs.isEmpty else {
+                    closeDiff()
+                    return nil
+                }
+                if selectedFile?.id == file.id {
+                    let replacement = files.first {
+                        selectedWorkingTreeFileIDs.contains($0.id)
+                    }
+                    if let replacement { loadWorkingTreeDiff(replacement) }
+                    return replacement
+                }
+                return selectedFile
+            }
+
+            selectedWorkingTreeFileIDs.insert(file.id)
+            loadWorkingTreeDiff(file)
+            return file
+        }
+
+        selectedWorkingTreeFileIDs = [file.id]
+        workingTreeSelectionAnchorID = file.id
+        loadWorkingTreeDiff(file)
+        return file
+    }
+
+    @discardableResult
+    func selectAllFiles(in files: [FileChange]) -> FileChange? {
+        var result: FileChange?
+        requestLeavingMergeEditor { [weak self] in
+            result = self?.selectAllFilesImmediately(in: files)
+        }
+        return result
+    }
+
+    private func selectAllFilesImmediately(in files: [FileChange]) -> FileChange? {
+        guard let first = files.first else { return nil }
+        let sectionIDs = Set(files.map(\.id))
+        selectedWorkingTreeFileIDs = sectionIDs
+
+        if let selectedFile, diffCommit == nil, sectionIDs.contains(selectedFile.id) {
+            if workingTreeSelectionAnchorID == nil {
+                workingTreeSelectionAnchorID = selectedFile.id
+            }
+            return selectedFile
+        }
+
+        workingTreeSelectionAnchorID = first.id
+        loadWorkingTreeDiff(first)
+        return first
+    }
+
+    func clearFileSelection(in files: [FileChange]) {
+        let sectionIDs = Set(files.map(\.id))
+        selectedWorkingTreeFileIDs.subtract(sectionIDs)
+        if let anchor = workingTreeSelectionAnchorID, sectionIDs.contains(anchor) {
+            workingTreeSelectionAnchorID = nil
+        }
+        if let selectedFile, diffCommit == nil, sectionIDs.contains(selectedFile.id) {
+            closeDiff()
+        }
+    }
+
+    /// Move within the file list that owns the current working-tree
+    /// selection. Staged, unstaged and conflicted rows are separate visual
+    /// sections, so an arrow key never crosses a section boundary.
+    @discardableResult
+    func moveFileSelection(
+        _ direction: FileSelectionDirection,
+        extendingSelection: Bool = false
+    ) -> FileChange? {
+        guard diffCommit == nil, let selectedFile else { return nil }
+
+        let files: [FileChange]
+        if selectedFile.area == .staged {
+            files = snapshot.staged
+        } else if snapshot.conflicted.contains(where: { $0.id == selectedFile.id }) {
+            files = snapshot.conflicted
+        } else {
+            files = snapshot.unstaged
+        }
+
+        guard let currentIndex = files.firstIndex(where: { $0.id == selectedFile.id }) else {
+            return nil
+        }
+        let offset: Int
+        switch direction {
+        case .previous: offset = -1
+        case .next: offset = 1
+        }
+        let nextIndex = currentIndex + offset
+        guard files.indices.contains(nextIndex) else { return selectedFile }
+
+        let nextFile = files[nextIndex]
+        return selectFile(nextFile, in: files, extending: extendingSelection)
+    }
 
     func selectFile(_ file: FileChange) {
         requestLeavingMergeEditor { [weak self] in
@@ -3077,27 +3504,56 @@ final class RepoState: ObservableObject, Identifiable {
     }
 
     private func selectFileImmediately(_ file: FileChange) {
+        selectedWorkingTreeFileIDs = [file.id]
+        workingTreeSelectionAnchorID = file.id
+        loadWorkingTreeDiff(file)
+    }
+
+    private func loadWorkingTreeDiff(_ file: FileChange) {
         issueToView = nil
         prToView = nil
         clearMergeEditor()
         selectedFile = file
         diffCommit = nil
         diffLines = []
+        imageDiff = nil
         lfsPointer = nil
-        Task {
+        fileDiffTask?.cancel()
+        fileDiffTask = Task {
             do {
+                do {
+                    if let image = try await git.workingTreeImageDiff(file) {
+                        guard !Task.isCancelled, selectedFile?.id == file.id,
+                              diffCommit == nil
+                        else { return }
+                        imageDiff = image
+                        parsedDiff = ParsedDiff()
+                        return
+                    }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    // Fall through to text when the image path is stale or
+                    // the contents are not actually a supported raster.
+                }
                 let parsed: ParsedDiff
+                var pointer: LFSPointerDiff?
                 if file.status == "?" {
                     let content = (try? String(contentsOfFile: path + "/" + file.path, encoding: .utf8)) ?? ""
                     parsed = DiffParser.synthesizeAdded(content)
                 } else {
                     let text = try await git.diff(path: file.path, staged: file.area == .staged)
-                    lfsPointer = LFSParsers.pointerDiff(text)
+                    pointer = LFSParsers.pointerDiff(text)
                     parsed = DiffParser.parse(text)
                 }
+                guard !Task.isCancelled, selectedFile?.id == file.id,
+                      diffCommit == nil
+                else { return }
+                lfsPointer = pointer
                 parsedDiff = parsed
                 diffLines = parsed.lines
             } catch {
+                guard !Task.isCancelled else { return }
                 report(error)
             }
         }
@@ -3133,9 +3589,14 @@ final class RepoState: ObservableObject, Identifiable {
     }
 
     private func clearDiffAndMergeEditor() {
+        fileDiffTask?.cancel()
+        fileDiffTask = nil
+        selectedWorkingTreeFileIDs = []
+        workingTreeSelectionAnchorID = nil
         selectedFile = nil
         diffCommit = nil
         diffLines = []
+        imageDiff = nil
         lfsPointer = nil
         showRawPointer = false
         // Same overlay slot (see viewIssue): whatever clears the diff
@@ -3159,7 +3620,8 @@ final class RepoState: ObservableObject, Identifiable {
         issueToView = nil
         prToView = nil
         let fullPath = path + "/" + file.path
-        guard let source = readMergeEditorSource(at: fullPath),
+        guard !isSymbolicLink(at: fullPath),
+              let source = readMergeEditorSource(at: fullPath),
               let document = ConflictDocument.parse(source.text)
         else {
             selectFileImmediately(file)
@@ -3214,15 +3676,19 @@ final class RepoState: ObservableObject, Identifiable {
         let fullPath = path + "/" + session.file.path
         let repoRelative = session.file.path
         let encoding = session.encoding
-        guard let output = content.data(using: encoding, allowLossyConversion: false) else {
+        guard let output = session.encodedContent(content) else {
             errorMessage = "The resolution cannot be saved using \(String.localizedName(of: encoding))."
             return
         }
 
+        session.isSaving = true
         Task {
-            session.isSaving = true
             defer { session.isSaving = false }
             do {
+                guard !isSymbolicLink(at: fullPath) else {
+                    errorMessage = "\(session.file.fileName) became a symbolic link. Reload it instead of overwriting the link."
+                    return
+                }
                 let current = try Data(contentsOf: URL(fileURLWithPath: fullPath))
                 guard current == session.originalData || overwriteExternalChanges else {
                     externalChangeAllowsMarkers = allowMarkers
@@ -3369,11 +3835,63 @@ final class RepoState: ObservableObject, Identifiable {
         return nil
     }
 
+    private func isSymbolicLink(at path: String) -> Bool {
+        (try? FileManager.default.destinationOfSymbolicLink(atPath: path)) != nil
+    }
+
+    /// Keep selection ids aligned with status records after Git changes a
+    /// row's area or removes it. If the primary row disappeared but other
+    /// selected rows remain, preview the first survivor instead of dropping
+    /// the whole batch selection.
+    private func reconcileWorkingTreeFileSelection(with snapshot: RepoSnapshot) {
+        guard diffCommit == nil else { return }
+        let all = snapshot.staged + snapshot.unstaged + snapshot.conflicted
+        let validIDs = Set(all.map(\.id))
+        let reconciled = selectedWorkingTreeFileIDs.intersection(validIDs)
+        if reconciled != selectedWorkingTreeFileIDs {
+            selectedWorkingTreeFileIDs = reconciled
+        }
+        if let anchor = workingTreeSelectionAnchorID, !validIDs.contains(anchor) {
+            workingTreeSelectionAnchorID = nil
+        }
+
+        guard let selectedFile else { return }
+        guard !validIDs.contains(selectedFile.id) else {
+            if selectedWorkingTreeFileIDs.isEmpty {
+                selectedWorkingTreeFileIDs = [selectedFile.id]
+            }
+            return
+        }
+
+        if let replacement = all.first(where: {
+            selectedWorkingTreeFileIDs.contains($0.id)
+        }) {
+            loadWorkingTreeDiff(replacement)
+        } else {
+            closeDiff()
+        }
+    }
+
     // MARK: - Conflict resolution
 
     // All three only write the index and the file on disk. The merge or
     // rebase itself is still in progress either way, so `operationState`
     // cannot have changed — only `status` has.
+    func conflictSideDescription(_ side: ConflictSide) -> String {
+        switch snapshot.operation {
+        case .merge:
+            return side == .ours ? "current branch" : "incoming branch"
+        case .rebase:
+            return side == .ours ? "rebase destination" : "commit being replayed"
+        case .cherryPick:
+            return side == .ours ? "current branch" : "cherry-picked commit"
+        case .revert:
+            return side == .ours ? "current branch" : "revert result"
+        case nil:
+            return side == .ours ? "current version" : "incoming version"
+        }
+    }
+
     func acceptOurs(_ file: FileChange) {
         requestLeavingMergeEditor { [weak self] in
             guard let self else { return }

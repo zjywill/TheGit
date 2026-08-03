@@ -7,6 +7,10 @@ struct CleanupCandidate: Identifiable, Hashable {
         /// `tip` is kept so a delete can be undone: `git branch <name> <tip>`
         /// puts it back byte for byte.
         case branch(name: String, tip: String)
+        /// Remote deletion is intentionally not undoable here. Re-pushing a
+        /// saved tip would recreate shared server state without knowing
+        /// whether somebody else changed the branch after the scan.
+        case remoteBranch(remote: String, name: String)
         case worktree(path: String, prunable: Bool)
     }
 
@@ -31,6 +35,7 @@ struct CleanupCandidate: Identifiable, Hashable {
     var id: String {
         switch target {
         case .branch(let name, _): return "branch:" + name
+        case .remoteBranch(let remote, let name): return "remote:\(remote)/\(name)"
         case .worktree(let path, _): return "worktree:" + path
         }
     }
@@ -38,12 +43,23 @@ struct CleanupCandidate: Identifiable, Hashable {
     var name: String {
         switch target {
         case .branch(let name, _): return name
+        case .remoteBranch(let remote, let name): return "\(remote)/\(name)"
         case .worktree(let path, _): return (path as NSString).lastPathComponent
         }
     }
 
     var isWorktree: Bool {
         if case .worktree = target { return true }
+        return false
+    }
+
+    var isLocalBranch: Bool {
+        if case .branch = target { return true }
+        return false
+    }
+
+    var isRemoteBranch: Bool {
+        if case .remoteBranch = target { return true }
         return false
     }
 
@@ -58,16 +74,19 @@ struct CleanupCandidate: Identifiable, Hashable {
         }
     }
 
-    /// Safe means: the work provably lives somewhere else, and nothing on
-    /// disk gets deleted. Safe cleans one click; everything else asks first.
+    /// Safe means: the work provably lives somewhere else, no folder is
+    /// deleted, and no shared remote state changes. Safe cleans one click;
+    /// everything else asks first.
     var isSafe: Bool {
         if case .worktree(_, let prunable) = target { return prunable }
+        if isRemoteBranch { return false }
         return strandedCommits == 0
     }
 
-    /// What the user stands to lose — shown in orange on the row itself,
-    /// so the risk is visible before the click, not after.
+    /// What the action changes — shown in orange on the row itself, so the
+    /// consequence is visible before the click, not after.
     var riskText: String? {
+        if isRemoteBranch { return "deletes the remote branch" }
         if case .worktree(_, let prunable) = target {
             if prunable { return nil }
             guard dirtyEntries > 0 else { return "deletes the folder on disk" }

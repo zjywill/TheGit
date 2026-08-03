@@ -203,13 +203,15 @@ struct MergeEditorView: View {
                 HStack(spacing: 0) {
                     SideHeader(
                         session: session, side: .ours,
-                        badge: "A", label: oursLabel
+                        badge: "A", label: oursLabel,
+                        sideDescription: repo.conflictSideDescription(.ours)
                     )
                     .frame(width: paneWidth)
                     Divider()
                     SideHeader(
                         session: session, side: .theirs,
-                        badge: "B", label: theirsLabel
+                        badge: "B", label: theirsLabel,
+                        sideDescription: repo.conflictSideDescription(.theirs)
                     )
                     .frame(width: paneWidth)
                 }
@@ -351,11 +353,11 @@ private struct SideHeader: View {
     let side: ConflictSide
     let badge: String
     let label: String
+    let sideDescription: String
 
     var body: some View {
         let tint = MergeTint.of(side)
         let selected = session.wholeSideState(side) == .all
-        let sideName = side == .ours ? "current branch" : "incoming branch"
         HStack(spacing: 6) {
             TriStateCheckbox(
                 state: session.wholeSideState(side),
@@ -381,7 +383,7 @@ private struct SideHeader: View {
                     Text(label)
                         .zoomFont(11, weight: .semibold, design: .monospaced)
                         .fixedSize(horizontal: true, vertical: false)
-                    Text(sideName)
+                    Text(sideDescription)
                         .zoomFont(10)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: true, vertical: false)

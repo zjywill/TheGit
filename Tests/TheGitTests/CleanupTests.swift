@@ -171,4 +171,17 @@ final class CleanupTests: XCTestCase {
         )
         XCTAssertEqual(gitlab.reasonText, "!42 merged")
     }
+
+    func testRemoteBranchAlwaysAsksAndCannotBeUndoneLocally() {
+        let candidate = CleanupCandidate(
+            target: .remoteBranch(remote: "origin", name: "feature/x"),
+            reason: .squashMerged(into: "origin/main")
+        )
+        XCTAssertEqual(candidate.id, "remote:origin/feature/x")
+        XCTAssertEqual(candidate.name, "origin/feature/x")
+        XCTAssertTrue(candidate.isRemoteBranch)
+        XCTAssertFalse(candidate.isLocalBranch)
+        XCTAssertFalse(candidate.isSafe)
+        XCTAssertEqual(candidate.riskText, "deletes the remote branch")
+    }
 }

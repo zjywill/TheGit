@@ -78,6 +78,11 @@ struct CleanupView: View {
                     + (candidate.dirtyEntries == 1 ? "change" : "changes")
                     + " that exist nowhere else. This can't be undone."
             }
+            if case .remoteBranch(let remote, let name) = candidate.target {
+                return "Deletes \(remote)/\(name) from the remote repository. "
+                    + "Its merged work remains in the default branch, but this deletion "
+                    + "can't be undone from TheGit."
+            }
             return "\(candidate.strandedCommits) commit"
                 + (candidate.strandedCommits == 1 ? "" : "s")
                 + " exist only on this branch and will be lost. You can undo this from the sheet."
@@ -92,17 +97,25 @@ struct CleanupView: View {
     /// the same three facts the rows do: what is going, what is lost, and
     /// what touches the disk.
     private func batchMessage(_ candidates: [CleanupCandidate]) -> String {
-        let branches = candidates.filter { !$0.isWorktree }
+        let localBranches = candidates.filter(\.isLocalBranch)
+        let remoteBranches = candidates.filter(\.isRemoteBranch)
         let folders = candidates.filter {
             if case .worktree(_, false) = $0.target { return true }
             return false
         }
-        let worktrees = candidates.count - branches.count
-        let stranded = branches.reduce(0) { $0 + $1.strandedCommits }
+        let worktrees = candidates.count - localBranches.count - remoteBranches.count
+        let stranded = localBranches.reduce(0) { $0 + $1.strandedCommits }
 
         var inventory: [String] = []
-        if !branches.isEmpty {
-            inventory.append("\(branches.count) branch\(branches.count == 1 ? "" : "es")")
+        if !localBranches.isEmpty {
+            inventory.append(
+                "\(localBranches.count) local branch\(localBranches.count == 1 ? "" : "es")"
+            )
+        }
+        if !remoteBranches.isEmpty {
+            inventory.append(
+                "\(remoteBranches.count) remote branch\(remoteBranches.count == 1 ? "" : "es")"
+            )
         }
         if worktrees > 0 {
             inventory.append("\(worktrees) worktree\(worktrees == 1 ? "" : "s")")
@@ -126,8 +139,11 @@ struct CleanupView: View {
                     + " that can't be undone."
             parts.append(line)
         }
-        if !branches.isEmpty {
-            parts.append("Deleted branches can be restored with Undo.")
+        if !remoteBranches.isEmpty {
+            parts.append("Remote branch deletions can't be undone from TheGit.")
+        }
+        if !localBranches.isEmpty {
+            parts.append("Deleted local branches can be restored with Undo.")
         }
         return parts.joined(separator: " ")
     }
@@ -274,7 +290,7 @@ struct CleanupView: View {
                 .foregroundStyle(.green)
             Text("Nothing to clean")
                 .zoomFont(12, weight: .medium)
-            Text("Every local branch is either active or unmerged.")
+            Text("No merged branches or stale worktrees were found.")
                 .zoomFont(11)
                 .foregroundStyle(.secondary)
         }
@@ -360,7 +376,9 @@ struct CleanupRow: View {
             // the whole row: the checkbox and the Clean button keep theirs,
             // and no tap has to be resolved between two handlers.
             HStack(spacing: 8) {
-                Image(systemName: candidate.isWorktree ? "folder" : "arrow.triangle.branch")
+                Image(systemName: candidate.isWorktree
+                      ? "folder"
+                      : (candidate.isRemoteBranch ? "network" : "arrow.triangle.branch"))
                     .zoomFont(11)
                     .foregroundStyle(candidate.isSafe ? Color.secondary : .orange)
                     .frame(width: 14)

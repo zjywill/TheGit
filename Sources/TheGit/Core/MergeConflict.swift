@@ -7,9 +7,9 @@ import Foundation
 // are exactly the blocks `git merge` reported, orange-for-orange with
 // what a terminal user sees.
 
-/// Which side of a conflict a line belongs to. `ours` is the branch that
-/// was checked out (HEAD, the `<<<<<<<` half), `theirs` the one being
-/// merged, rebased or cherry-picked in (the `>>>>>>>` half).
+/// Which side of a conflict a line belongs to. These are Git's stage-2
+/// (`<<<<<<<`) and stage-3 (`>>>>>>>`) sides; their human meaning depends
+/// on the operation, especially during a rebase.
 enum ConflictSide {
     case ours, theirs
 }
@@ -32,6 +32,11 @@ struct ConflictBlock: Identifiable, Equatable {
     var base: [String] = []
     var oursLabel = ""
     var theirsLabel = ""
+    var markerSize = 7
+    var oursMarker = "<<<<<<<"
+    var baseMarker: String?
+    var separatorMarker = "======="
+    var theirsMarker = ">>>>>>>"
 }
 
 /// A conflict-markered file in file order: runs of shared text
@@ -45,57 +50,89 @@ struct ConflictDocument: Equatable {
     var segments: [Segment] = []
     var conflicts: [ConflictBlock] = []
     var endsWithNewline = true
+    var lineEnding = "\n"
 
     /// nil when the text has no complete conflict block — deleted-by-them
     /// and binary conflicts carry no markers, and those fall back to the
     /// plain diff view.
     static func parse(_ text: String) -> ConflictDocument? {
-        var lines = text.components(separatedBy: "\n")
+        var lines = text.split(
+            omittingEmptySubsequences: false,
+            whereSeparator: \.isNewline
+        ).map(String.init)
         var doc = ConflictDocument()
-        if lines.last == "" {
+        doc.lineEnding = firstLineEnding(in: text)
+        doc.endsWithNewline = text.last?.isNewline == true
+        if doc.endsWithNewline, lines.last == "" {
             lines.removeLast()
-        } else {
-            doc.endsWithNewline = false
         }
 
         enum Mode { case shared, ours, base, theirs }
         var mode = Mode.shared
         var run: [String] = []
         var block = ConflictBlock(id: 0)
+        var rawBlock: [String] = []
 
         for line in lines {
             switch mode {
             case .shared:
-                if line.hasPrefix("<<<<<<<") {
+                if let marker = marker(line, character: "<") {
                     block = ConflictBlock(id: doc.conflicts.count)
-                    block.oursLabel = String(line.dropFirst(7)).trimmingCharacters(in: .whitespaces)
+                    block.markerSize = marker.length
+                    block.oursLabel = marker.label
+                    block.oursMarker = line
+                    rawBlock = [line]
                     mode = .ours
                 } else {
                     run.append(line)
                 }
             case .ours:
-                if line.hasPrefix("|||||||") {
+                rawBlock.append(line)
+                if marker(
+                    line,
+                    character: "|",
+                    length: block.markerSize
+                ) != nil {
+                    block.baseMarker = line
                     mode = .base
-                } else if line == "=======" {
+                } else if marker(
+                    line,
+                    character: "=",
+                    length: block.markerSize
+                ) != nil {
+                    block.separatorMarker = line
                     mode = .theirs
                 } else {
                     block.ours.append(line)
                 }
             case .base:
-                if line == "=======" {
+                rawBlock.append(line)
+                if marker(
+                    line,
+                    character: "=",
+                    length: block.markerSize
+                ) != nil {
+                    block.separatorMarker = line
                     mode = .theirs
                 } else {
                     block.base.append(line)
                 }
             case .theirs:
-                if line.hasPrefix(">>>>>>>") {
-                    block.theirsLabel = String(line.dropFirst(7)).trimmingCharacters(in: .whitespaces)
+                rawBlock.append(line)
+                if let marker = marker(
+                    line,
+                    character: ">",
+                    length: block.markerSize
+                ) {
+                    block.theirsLabel = marker.label
+                    block.theirsMarker = line
                     if !run.isEmpty {
                         doc.segments.append(.shared(run))
                         run = []
                     }
                     doc.segments.append(.conflict(doc.conflicts.count))
                     doc.conflicts.append(block)
+                    rawBlock = []
                     mode = .shared
                 } else {
                     block.theirs.append(line)
@@ -107,13 +144,39 @@ struct ConflictDocument: Equatable {
         // that were never git's) isn't a conflict — put its lines back
         // as ordinary text so nothing silently disappears on save.
         if mode != .shared {
-            run.append(contentsOf: ["<<<<<<< " + block.oursLabel] + block.ours)
-            if !block.base.isEmpty { run.append(contentsOf: ["|||||||"] + block.base) }
-            if mode == .theirs { run.append(contentsOf: ["======="] + block.theirs) }
+            run.append(contentsOf: rawBlock)
         }
         if !run.isEmpty { doc.segments.append(.shared(run)) }
 
         return doc.conflicts.isEmpty ? nil : doc
+    }
+
+    private static func firstLineEnding(in text: String) -> String {
+        for character in text where character.isNewline {
+            return String(character)
+        }
+        return "\n"
+    }
+
+    private static func marker(
+        _ line: String,
+        character: Character,
+        length: Int? = nil
+    ) -> (length: Int, label: String)? {
+        let count = line.prefix { $0 == character }.count
+        guard count >= 7, length == nil || count == length else { return nil }
+        let remainder = line.dropFirst(count)
+        if character == "=" {
+            guard remainder.allSatisfy(\.isWhitespace) else { return nil }
+        } else {
+            guard remainder.isEmpty || remainder.first?.isWhitespace == true else {
+                return nil
+            }
+        }
+        return (
+            count,
+            String(remainder).trimmingCharacters(in: .whitespaces)
+        )
     }
 }
 
@@ -151,6 +214,7 @@ final class MergeEditorSession: ObservableObject {
     let document: ConflictDocument
     let encoding: String.Encoding
     let alignedRows: [MergeAlignedRow]
+    private let byteOrderMark: Data
     /// Exact bytes this editor parsed. Save compares the working tree
     /// against them before writing so another editor cannot be silently
     /// overwritten. Updated after our own successful write, even if
@@ -178,7 +242,9 @@ final class MergeEditorSession: ObservableObject {
     ) {
         self.file = file
         self.document = document
-        self.encoding = encoding
+        let bom = Self.byteOrderMark(in: originalData)
+        self.byteOrderMark = bom
+        self.encoding = Self.roundTripEncoding(encoding, byteOrderMark: bom)
         self.originalData = originalData
         self.choices = Array(repeating: nil, count: document.conflicts.count)
         self.alignedRows = Self.aligned(document)
@@ -371,7 +437,20 @@ final class MergeEditorSession: ObservableObject {
                 for ref in choices[index] ?? [] { lines.append(text(of: ref)) }
             }
         }
-        return Self.join(lines, endingWithNewline: document.endsWithNewline)
+        return join(lines, endingWithNewline: document.endsWithNewline)
+    }
+
+    func encodedContent(_ content: String) -> Data? {
+        guard var data = content.data(
+            using: encoding,
+            allowLossyConversion: false
+        ) else { return nil }
+        if !byteOrderMark.isEmpty, !data.starts(with: byteOrderMark) {
+            var marked = byteOrderMark
+            marked.append(data)
+            data = marked
+        }
+        return data
     }
 
     // MARK: - Hand editing
@@ -389,7 +468,10 @@ final class MergeEditorSession: ObservableObject {
     /// source files can legitimately contain marker-looking literals.
     var draftHasMarkers: Bool {
         guard let draft else { return false }
-        return draft.components(separatedBy: "\n").contains(where: Self.isConflictMarkerLine)
+        return draft.split(
+            omittingEmptySubsequences: false,
+            whereSeparator: \.isNewline
+        ).map(String.init).contains(where: Self.isConflictMarkerLine)
     }
 
     var canSave: Bool { isEditing || allResolved }
@@ -417,24 +499,52 @@ final class MergeEditorSession: ObservableObject {
                     for ref in picked { lines.append(text(of: ref)) }
                 } else {
                     let block = document.conflicts[index]
-                    lines.append("<<<<<<< " + block.oursLabel)
+                    lines.append(block.oursMarker)
                     lines.append(contentsOf: block.ours)
-                    if !block.base.isEmpty {
-                        lines.append("|||||||")
+                    if let baseMarker = block.baseMarker {
+                        lines.append(baseMarker)
                         lines.append(contentsOf: block.base)
                     }
-                    lines.append("=======")
+                    lines.append(block.separatorMarker)
                     lines.append(contentsOf: block.theirs)
-                    lines.append(">>>>>>> " + block.theirsLabel)
+                    lines.append(block.theirsMarker)
                 }
             }
         }
-        return Self.join(lines, endingWithNewline: document.endsWithNewline)
+        return join(lines, endingWithNewline: document.endsWithNewline)
     }
 
-    private static func join(_ lines: [String], endingWithNewline: Bool) -> String {
+    private func join(_ lines: [String], endingWithNewline: Bool) -> String {
         guard !lines.isEmpty else { return "" }
-        return lines.joined(separator: "\n") + (endingWithNewline ? "\n" : "")
+        return lines.joined(separator: document.lineEnding)
+            + (endingWithNewline ? document.lineEnding : "")
+    }
+
+    private static func byteOrderMark(in data: Data) -> Data {
+        let markers: [[UInt8]] = [
+            [0x00, 0x00, 0xFE, 0xFF],
+            [0xFF, 0xFE, 0x00, 0x00],
+            [0xEF, 0xBB, 0xBF],
+            [0xFE, 0xFF],
+            [0xFF, 0xFE],
+        ]
+        for marker in markers where data.starts(with: marker) {
+            return Data(marker)
+        }
+        return Data()
+    }
+
+    private static func roundTripEncoding(
+        _ detected: String.Encoding,
+        byteOrderMark: Data
+    ) -> String.Encoding {
+        switch Array(byteOrderMark) {
+        case [0x00, 0x00, 0xFE, 0xFF]: return .utf32BigEndian
+        case [0xFF, 0xFE, 0x00, 0x00]: return .utf32LittleEndian
+        case [0xFE, 0xFF]: return .utf16BigEndian
+        case [0xFF, 0xFE]: return .utf16LittleEndian
+        default: return detected
+        }
     }
 
     private static func isConflictMarkerLine(_ line: String) -> Bool {

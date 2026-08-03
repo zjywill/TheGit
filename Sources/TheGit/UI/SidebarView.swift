@@ -1081,9 +1081,13 @@ struct SectionHeader: View {
         // which is the list's own inset: the gutters have no rows of their
         // own to hide, but a strip of background that stops short of the
         // panel edge reads as a floating card rather than as a header.
+        // The same sidebar material as the capsule, NOT an opaque window
+        // color: behind-window sampling makes the two indistinguishable, so
+        // the pinned header only exists while rows scroll under it. The
+        // opaque fill this replaces happened to match the material in dark
+        // mode and striped the whole panel white in light mode.
         .background {
-            Rectangle()
-                .fill(Color(nsColor: .windowBackgroundColor))
+            SidebarGlass()
                 .padding(.horizontal, -10)
         }
     }

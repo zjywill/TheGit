@@ -109,6 +109,85 @@ final class MergeEditorStateTests: XCTestCase {
         XCTAssertEqual(repo.selectedFile?.id, next.id)
     }
 
+    func testBatchSelectionWaitsForExplicitDiscard() throws {
+        let fileURL = root.appendingPathComponent("conflict.txt")
+        let repo = RepoState(path: root.path)
+        let session = try openSession(in: repo, at: fileURL)
+        session.setSide(0, side: .ours, on: true)
+        let files = [
+            FileChange(path: "one.txt", status: "?", area: .unstaged),
+            FileChange(path: "two.txt", status: "?", area: .unstaged),
+        ]
+
+        XCTAssertNil(repo.selectFile(files[1], in: files))
+        XCTAssertTrue(repo.mergeSession === session)
+        XCTAssertTrue(repo.selectedWorkingTreeFileIDs.isEmpty)
+        XCTAssertNotNil(repo.mergeDiscardPrompt)
+
+        repo.confirmPendingMergeDiscard()
+        XCTAssertNil(repo.mergeSession)
+        XCTAssertEqual(repo.selectedFile?.id, files[1].id)
+        XCTAssertEqual(repo.selectedWorkingTreeFileIDs, [files[1].id])
+    }
+
+    func testSymlinkConflictFallsBackWithoutReplacingTheLink() throws {
+        let targetURL = root.appendingPathComponent("target.txt")
+        let fileURL = root.appendingPathComponent("conflict.txt")
+        try write(conflictText, to: targetURL)
+        try FileManager.default.createSymbolicLink(
+            at: fileURL,
+            withDestinationURL: targetURL
+        )
+        let repo = RepoState(path: root.path)
+        var snapshot = repo.snapshot
+        snapshot.conflicted = [file()]
+        repo.snapshot = snapshot
+
+        repo.openMergeEditor(file())
+
+        XCTAssertNil(repo.mergeSession)
+        XCTAssertEqual(repo.selectedFile?.id, file().id)
+        XCTAssertNoThrow(
+            try FileManager.default.destinationOfSymbolicLink(atPath: fileURL.path)
+        )
+    }
+
+    func testSaveRefusesAFileReplacedByASymbolicLink() async throws {
+        let targetURL = root.appendingPathComponent("target.txt")
+        let fileURL = root.appendingPathComponent("conflict.txt")
+        let repo = RepoState(path: root.path)
+        let session = try openSession(in: repo, at: fileURL)
+        session.setSide(0, side: .ours, on: true)
+
+        try FileManager.default.removeItem(at: fileURL)
+        try write(conflictText, to: targetURL)
+        try FileManager.default.createSymbolicLink(
+            at: fileURL,
+            withDestinationURL: targetURL
+        )
+
+        repo.saveMergeResolution()
+        try await waitUntil("symbolic-link refusal") {
+            repo.errorMessage?.contains("symbolic link") == true
+        }
+
+        XCTAssertTrue(repo.mergeSession === session)
+        XCTAssertEqual(read(targetURL), conflictText)
+        XCTAssertNoThrow(
+            try FileManager.default.destinationOfSymbolicLink(atPath: fileURL.path)
+        )
+    }
+
+    func testRebaseUsesOperationSpecificSideDescriptions() {
+        let repo = RepoState(path: root.path)
+        var snapshot = repo.snapshot
+        snapshot.operation = .rebase
+        repo.snapshot = snapshot
+
+        XCTAssertEqual(repo.conflictSideDescription(.ours), "rebase destination")
+        XCTAssertEqual(repo.conflictSideDescription(.theirs), "commit being replayed")
+    }
+
     func testStageFailureKeepsSessionAndWrittenDraft() async throws {
         let fileURL = root.appendingPathComponent("conflict.txt")
         let repo = RepoState(path: root.path)

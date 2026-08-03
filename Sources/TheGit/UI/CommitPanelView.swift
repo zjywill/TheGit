@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Right panel: unstaged / staged files + commit message + commit button.
@@ -48,9 +49,11 @@ struct CommitPanelView: View {
                 files: repo.snapshot.unstaged,
                 actionIcon: "plus.circle",
                 actionHelp: "Stage file",
+                actionTitle: "Stage",
                 bulkTitle: "Stage All",
                 emptyText: "No unstaged changes — working tree is clean",
                 action: { repo.stage($0) },
+                batchAction: { repo.stage($0) },
                 bulkAction: { repo.stageAll() },
                 repo: repo
             )
@@ -60,9 +63,11 @@ struct CommitPanelView: View {
                 files: repo.snapshot.staged,
                 actionIcon: "minus.circle",
                 actionHelp: "Unstage file",
+                actionTitle: "Unstage",
                 bulkTitle: "Unstage All",
                 emptyText: "No staged changes — stage files to commit them",
                 action: { repo.unstage($0) },
+                batchAction: { repo.unstage($0) },
                 bulkAction: { repo.unstageAll() },
                 repo: repo
             )
@@ -214,6 +219,46 @@ struct CommitPanelView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("The file will be removed from disk. Uncommitted changes in it are lost.")
+        }
+        .alert(
+            "Stop tracking \(repo.pendingIgnore?.file.fileName ?? "")?",
+            isPresented: Binding(
+                get: { repo.pendingIgnore != nil },
+                set: { if !$0 { repo.pendingIgnore = nil } }
+            ),
+            presenting: repo.pendingIgnore
+        ) { _ in
+            Button("Ignore and Stop Tracking") { repo.confirmIgnore() }
+            Button("Cancel", role: .cancel) {}
+        } message: { pending in
+            // Spell out the index part: the file staying on disk while the
+            // next commit records it as deleted is the surprising half.
+            Text("""
+                \(pending.pattern) goes into \(pending.ignoreFile). \
+                Git only ignores files it isn't already tracking, so \
+                \(pending.file.fileName) is removed from the index — it stays \
+                on disk, and the next commit records it as deleted for \
+                everyone else.
+                """)
+        }
+        .alert(
+            "Stop tracking \(repo.fileToUntrack?.fileName ?? "")?",
+            isPresented: Binding(
+                get: { repo.fileToUntrack != nil },
+                set: { if !$0 { repo.fileToUntrack = nil } }
+            )
+        ) {
+            Button("Stop Tracking") { repo.confirmStopTracking() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            // No pattern is written here, so say what that leaves behind:
+            // without an ignore rule the file comes straight back as
+            // untracked, which looks like the action did nothing.
+            Text("""
+                The file is removed from the index and stays on disk. The next \
+                commit records it as deleted for everyone else, and unless an \
+                ignore rule covers it, it reappears here as an untracked file.
+                """)
         }
     }
 
@@ -461,8 +506,12 @@ struct ConflictRow: View {
             Menu {
                 Button("Open Merge Editor") { repo.openMergeEditor(file) }
                 Divider()
-                Button("Accept Ours (current branch)") { repo.acceptOurs(file) }
-                Button("Accept Theirs (incoming)") { repo.acceptTheirs(file) }
+                Button("Accept Ours (\(repo.conflictSideDescription(.ours)))") {
+                    repo.acceptOurs(file)
+                }
+                Button("Accept Theirs (\(repo.conflictSideDescription(.theirs)))") {
+                    repo.acceptTheirs(file)
+                }
                 Divider()
                 Button("Mark Resolved (keep file as-is)") { repo.markResolved(file) }
             } label: {
@@ -482,8 +531,12 @@ struct ConflictRow: View {
         .contextMenu {
             Button("Open Merge Editor") { repo.openMergeEditor(file) }
             Divider()
-            Button("Accept Ours (current branch)") { repo.acceptOurs(file) }
-            Button("Accept Theirs (incoming)") { repo.acceptTheirs(file) }
+            Button("Accept Ours (\(repo.conflictSideDescription(.ours)))") {
+                repo.acceptOurs(file)
+            }
+            Button("Accept Theirs (\(repo.conflictSideDescription(.theirs)))") {
+                repo.acceptTheirs(file)
+            }
             Divider()
             Button("Mark Resolved (keep file as-is)") { repo.markResolved(file) }
         }
@@ -495,12 +548,24 @@ struct FileSection: View {
     let files: [FileChange]
     let actionIcon: String
     let actionHelp: String
+    let actionTitle: String
     let bulkTitle: String
     let emptyText: String
     let action: (FileChange) -> Void
+    let batchAction: ([FileChange]) -> Void
     let bulkAction: () -> Void
     @ObservedObject var repo: RepoState
     @Environment(\.uiZoom) private var zoom
+    @FocusState private var focusedFileID: FileChange.ID?
+    /// The viewport, and how far the rows are scrolled inside it. Read off
+    /// the geometry rather than from onScrollGeometryChange, which macOS 14
+    /// doesn't have — same trick as the tab strip in TheGitApp.
+    @State private var viewportHeight: CGFloat = 0
+    @State private var scrollOffset: CGFloat = 0
+
+    private static let scrollSpace = "fileListViewport"
+    /// The LazyVStack's own top padding, part of a row's offset.
+    private static let listPadding: CGFloat = 2
 
     /// What the rows genuinely need, so the list never claims more. When
     /// two long lists both want more than the panel has, the VStack splits
@@ -510,18 +575,92 @@ struct FileSection: View {
         return (rows * FileListMetrics.row + (rows - 1) * FileListMetrics.spacing) * zoom + 4
     }
 
+    private var selectedFiles: [FileChange] {
+        repo.selectedWorkingTreeFiles(in: files)
+    }
+
+    private var allSelected: Bool {
+        !files.isEmpty && selectedFiles.count == files.count
+    }
+
+    private var selectAllIcon: String {
+        if allSelected { return "checkmark.square.fill" }
+        return selectedFiles.isEmpty ? "square" : "minus.square.fill"
+    }
+
+    private var batchActionLabel: String {
+        let count = selectedFiles.count
+        if count == 0 || count == files.count { return bulkTitle }
+        return "\(actionTitle) \(count)"
+    }
+
+    /// Scroll a keyboard-picked row into view, and only when it isn't
+    /// already there — arrowing through the visible middle of the list
+    /// must not move the list under the cursor.
+    ///
+    /// The anchor is the point: `scrollTo(id)` on its own asks for "the
+    /// smallest scroll that reveals this row", which a LazyVStack can't
+    /// answer for a row it hasn't built yet — and the row one step past
+    /// the edge, the one arrow keys always land on next, is exactly that
+    /// row. With an anchor the target is positioned from the layout
+    /// instead, so it works whether or not the row exists yet. Rows are a
+    /// fixed height, so where one sits is arithmetic.
+    private func reveal(_ id: FileChange.ID?, _ proxy: ScrollViewProxy) {
+        guard let id, let index = files.firstIndex(where: { $0.id == id }) else { return }
+        guard viewportHeight > 0 else {
+            proxy.scrollTo(id)
+            return
+        }
+        let step = (FileListMetrics.row + FileListMetrics.spacing) * zoom
+        let top = Self.listPadding + CGFloat(index) * step
+        let bottom = top + FileListMetrics.row * zoom
+        if top < scrollOffset - 0.5 {
+            proxy.scrollTo(id, anchor: .top)
+        } else if bottom > scrollOffset + viewportHeight + 0.5 {
+            proxy.scrollTo(id, anchor: .bottom)
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 8) {
                 Text("\(title) (\(files.count))")
                     .zoomFont(11, weight: .semibold)
                     .tracking(0.3)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
                     .contentTransition(.numericText(value: Double(files.count)))
                     .animation(.easeOut(duration: 0.2), value: files.count)
                 Spacer()
                 if !files.isEmpty {
-                    Button(bulkTitle) { bulkAction() }
+                    Button {
+                        if allSelected {
+                            repo.clearFileSelection(in: files)
+                            focusedFileID = nil
+                        } else {
+                            focusedFileID = repo.selectAllFiles(in: files)?.id
+                        }
+                    } label: {
+                        Image(systemName: selectAllIcon)
+                            .zoomFont(12)
+                            .frame(width: 18 * zoom, height: 18 * zoom)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.pressEffect)
+                    .foregroundStyle(
+                        selectedFiles.isEmpty ? Color.secondary : Color.accentColor
+                    )
+                    .help(allSelected ? "Clear selection" : "Select all \(title.lowercased())")
+                    .accessibilityLabel(allSelected ? "Clear selection" : "Select all")
+
+                    Button(batchActionLabel) {
+                        let selection = selectedFiles
+                        if selection.isEmpty {
+                            bulkAction()
+                        } else {
+                            batchAction(selection)
+                        }
+                    }
                         .buttonStyle(.pressEffect)
                         .zoomFont(11)
                         .foregroundStyle(Color.accentColor)
@@ -542,23 +681,86 @@ struct FileSection: View {
                     .padding(.horizontal, 12)
                     .padding(.bottom, 10)
             } else {
-                ScrollView {
-                    LazyVStack(spacing: FileListMetrics.spacing * zoom) {
-                        ForEach(files) { file in
-                            FileRow(
-                                file: file,
-                                actionIcon: actionIcon,
-                                actionHelp: actionHelp,
-                                isSelected: repo.selectedFile?.id == file.id,
-                                action: { action(file) },
-                                select: { repo.selectFile(file) }
-                            )
-                            .contextTarget("file:" + file.id, repo)
-                            .contextMenu { FileMenu(file: file, repo: repo) }
-                            .padding(.horizontal, (FileListMetrics.inset - FileListMetrics.bleed) * zoom)
+                let selection = selectedFiles
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: FileListMetrics.spacing * zoom) {
+                            ForEach(files) { file in
+                                let fileIsSelected = repo.selectedWorkingTreeFileIDs.contains(file.id)
+                                FileRow(
+                                    file: file,
+                                    actionIcon: actionIcon,
+                                    actionHelp: selection.count > 1 && fileIsSelected
+                                        ? "\(actionTitle) \(selection.count) selected files"
+                                        : actionHelp,
+                                    isSelected: fileIsSelected,
+                                    isFocused: focusedFileID == file.id,
+                                    action: {
+                                        if selection.count > 1 && fileIsSelected {
+                                            batchAction(selection)
+                                        } else {
+                                            action(file)
+                                        }
+                                    },
+                                    select: {
+                                        let modifiers = NSEvent.modifierFlags
+                                        focusedFileID = repo.selectFile(
+                                            file,
+                                            in: files,
+                                            extending: modifiers.contains(.shift),
+                                            toggling: modifiers.contains(.command)
+                                        )?.id
+                                    }
+                                )
+                                .id(file.id)
+                                .focusable()
+                                .focused($focusedFileID, equals: file.id)
+                                .focusEffectDisabled()
+                                .onMoveCommand { direction in
+                                    let movement: RepoState.FileSelectionDirection?
+                                    switch direction {
+                                    case .up: movement = .previous
+                                    case .down: movement = .next
+                                    default: movement = nil
+                                    }
+                                    guard let movement,
+                                          let selected = repo.moveFileSelection(
+                                            movement,
+                                            extendingSelection: NSEvent.modifierFlags.contains(.shift)
+                                          )
+                                    else { return }
+                                    focusedFileID = selected.id
+                                    // Not only through the onChange below:
+                                    // focus can't land on a row the lazy
+                                    // stack hasn't built, and that is the
+                                    // one case that needs the scroll most.
+                                    reveal(selected.id, proxy)
+                                }
+                                .onCommand(#selector(NSResponder.selectAll(_:))) {
+                                    focusedFileID = repo.selectAllFiles(in: files)?.id
+                                }
+                                .contextTarget("file:" + file.id, repo)
+                                .contextMenu {
+                                    FileMenu(file: file, sectionFiles: files, repo: repo)
+                                }
+                                .padding(
+                                    .horizontal,
+                                    (FileListMetrics.inset - FileListMetrics.bleed) * zoom
+                                )
+                            }
                         }
+                        .padding(.vertical, Self.listPadding)
+                        .onGeometryChange(for: CGFloat.self) { geometry in
+                            geometry.frame(in: .named(Self.scrollSpace)).minY
+                        } action: { scrollOffset = -$0 }
                     }
-                    .padding(.vertical, 2)
+                    .coordinateSpace(name: Self.scrollSpace)
+                    .onGeometryChange(for: CGFloat.self) { geometry in
+                        geometry.size.height
+                    } action: { viewportHeight = $0 }
+                    .onChange(of: focusedFileID) { _, id in
+                        reveal(id, proxy)
+                    }
                 }
                 .frame(maxHeight: contentHeight)
             }
@@ -570,32 +772,58 @@ struct FileSection: View {
 /// unstaged variants differ only in the first block.
 struct FileMenu: View {
     let file: FileChange
+    let sectionFiles: [FileChange]
     @ObservedObject var repo: RepoState
+
+    private var selectedFiles: [FileChange] {
+        guard repo.selectedWorkingTreeFileIDs.contains(file.id) else { return [] }
+        return repo.selectedWorkingTreeFiles(in: sectionFiles)
+    }
+
+    private func actionLabel(_ verb: String) -> String {
+        guard selectedFiles.count > 1 else { return verb }
+        return selectedFiles.count == sectionFiles.count
+            ? "\(verb) All"
+            : "\(verb) \(selectedFiles.count) Selected"
+    }
 
     var body: some View {
         if file.area == .staged {
-            Button("Unstage") { repo.unstage(file) }
+            Button(actionLabel("Unstage")) {
+                if selectedFiles.count > 1 {
+                    repo.unstage(selectedFiles)
+                } else {
+                    repo.unstage(file)
+                }
+            }
             Button("Unstage and delete file…") { repo.fileToDelete = file }
         } else {
-            Button("Stage") { repo.stage(file) }
+            Button(actionLabel("Stage")) {
+                if selectedFiles.count > 1 {
+                    repo.stage(selectedFiles)
+                } else {
+                    repo.stage(file)
+                }
+            }
             if file.status != "?" {
                 // Untracked files have nothing to restore — Delete covers them.
                 Button("Discard changes…", role: .destructive) { repo.fileToDiscard = file }
             }
         }
-        // Untracked only: git ignores nothing that is already in the index,
-        // so offering it on a tracked file would be a menu item that does
-        // nothing. Those files need "Stop tracking" instead.
-        if file.status == "?" {
-            Menu("Ignore") {
-                IgnoreButtons(file: file, repo: repo, local: false)
-                Divider()
-                // .git/info/exclude — same effect, but private to this
-                // clone: nothing to commit, nothing pushed to the team.
-                Menu("Ignore for me only") {
-                    IgnoreButtons(file: file, repo: repo, local: true)
-                }
+        Menu("Ignore") {
+            IgnoreButtons(file: file, repo: repo, local: false)
+            Divider()
+            // .git/info/exclude — same effect, but private to this
+            // clone: nothing to commit, nothing pushed to the team.
+            Menu("Ignore for me only") {
+                IgnoreButtons(file: file, repo: repo, local: true)
             }
+        }
+        // The index half of Ignore on its own, for a file that is already
+        // covered by an ignore rule — or that the user wants to word the
+        // rule for by hand. Untracked files are not in the index to leave.
+        if file.status != "?" {
+            Button("Stop tracking…") { repo.fileToUntrack = file }
         }
         // Only with git-lfs installed, and only for a file it isn't
         // already storing — "Track" on an LFS file would be a no-op.
@@ -650,20 +878,34 @@ struct IgnoreButtons: View {
     let local: Bool
 
     private var ext: String { (file.fileName as NSString).pathExtension }
+    /// git ignores nothing that is already in the index, so ignoring a
+    /// tracked file also has to drop it from the index — a change worth a
+    /// confirmation, and worth an ellipsis on the menu item.
+    private var tracked: Bool { file.status != "?" }
 
     var body: some View {
-        Button("Ignore \"\(file.fileName)\"") {
-            repo.ignore(pattern: GitIgnore.filePattern(file.path), local: local)
+        Button(title("Ignore \"\(file.fileName)\"")) {
+            apply(GitIgnore.filePattern(file.path))
         }
         if !ext.isEmpty {
-            Button("Ignore all \"*.\(ext)\" files") {
-                repo.ignore(pattern: GitIgnore.extensionPattern(ext), local: local)
+            Button(title("Ignore all \"*.\(ext)\" files")) {
+                apply(GitIgnore.extensionPattern(ext))
             }
         }
         if !file.directory.isEmpty {
-            Button("Ignore everything in \"\(file.directory)\"") {
-                repo.ignore(pattern: GitIgnore.directoryPattern(file.directory), local: local)
+            Button(title("Ignore everything in \"\(file.directory)\"")) {
+                apply(GitIgnore.directoryPattern(file.directory))
             }
+        }
+    }
+
+    private func title(_ text: String) -> String { tracked ? text + "…" : text }
+
+    private func apply(_ pattern: String) {
+        if tracked {
+            repo.pendingIgnore = .init(file: file, pattern: pattern, local: local)
+        } else {
+            repo.ignore(pattern: pattern, local: local)
         }
     }
 }
@@ -695,6 +937,7 @@ struct FileRow: View {
     let actionIcon: String
     let actionHelp: String
     let isSelected: Bool
+    let isFocused: Bool
     let action: () -> Void
     let select: () -> Void
     @State private var hovering = false
@@ -748,9 +991,16 @@ struct FileRow: View {
             RoundedRectangle(cornerRadius: 5)
                 .fill(rowFill)
         )
+        .overlay {
+            if isFocused {
+                RoundedRectangle(cornerRadius: 5)
+                    .strokeBorder(Color.accentColor.opacity(0.7), lineWidth: 1)
+            }
+        }
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
         // Single click opens the diff — a many-times-a-day action, instant.
         .onTapGesture { select() }
     }

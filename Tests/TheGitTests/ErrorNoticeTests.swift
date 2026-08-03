@@ -109,6 +109,22 @@ final class ErrorNoticeTests: XCTestCase {
         XCTAssertEqual(notice.detail.count, 400)
     }
 
+    /// The copied recovery commands survive repository paths that need real
+    /// shell quoting, and never hide the fact that every file is staged.
+    func testInitialCommitGuideProducesTerminalCommands() {
+        let guide = InitialCommitGuide(path: "/tmp/Don't Stop")
+        XCTAssertEqual(guide.repositoryName, "Don't Stop")
+        XCTAssertEqual(
+            guide.commands,
+            """
+            cd '/tmp/Don'\\''t Stop'
+            git add .
+            git status
+            git commit --allow-empty -m 'Initial commit'
+            """
+        )
+    }
+
     /// The string way in stays a drop-in for the old `errorMessage`: assigning
     /// raises a notice, and reading back still answers "did anything fail".
     @MainActor

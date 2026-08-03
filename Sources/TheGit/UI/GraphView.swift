@@ -99,6 +99,14 @@ struct GraphView: View {
                                 fadeLeading: fadeLeading,
                                 fadeTrailing: fadeTrailing
                             )
+                                // Keyed on the repo: the graph subtree is
+                                // deliberately NOT rebuilt per tab (see
+                                // RepoView), so without this the +N badge
+                                // treats another repo's count as a change of
+                                // this one and rolls its numericText on every
+                                // tab switch. Same repo, same view — staging
+                                // still animates.
+                                .id(repo.id)
                                 .contentShape(Rectangle())
                                 // Clicking WIP returns the right panel to the commit box.
                                 .onTapGesture { repo.selectedCommit = nil }

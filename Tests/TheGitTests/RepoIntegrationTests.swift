@@ -94,6 +94,46 @@ final class RepoIntegrationTests: XCTestCase {
         repo.snapshot.unstaged.filter { $0.status == "?" }.map(\.path)
     }
 
+    // MARK: - Fresh repository
+
+    /// An unborn HEAD is valid Git state. The tab loads its files, offers
+    /// terminal instructions once, and does not create a commit itself.
+    func testFreshRepositoryOffersTerminalInstructionsInsteadOfAnError() async throws {
+        let path = root.appendingPathComponent("fresh").path
+        try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
+        try await git(path, ["init", "-q", "-b", "main", "."])
+        try write("hello\n", to: path + "/README.md")
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+
+        XCTAssertNil(repo.errorNotice)
+        XCTAssertTrue(repo.snapshot.commits.isEmpty)
+        XCTAssertEqual(untrackedPaths(repo), ["README.md"])
+        let guide = try XCTUnwrap(repo.initialCommitGuide)
+        XCTAssertEqual(guide.path, path)
+        XCTAssertTrue(guide.commands.contains("git commit --allow-empty"))
+        let headBeforeDismiss = try? await git(path, ["rev-parse", "--verify", "HEAD"])
+        XCTAssertNil(headBeforeDismiss)
+
+        // A watcher or explicit refresh must not reopen the prompt after the
+        // user has dismissed it.
+        repo.initialCommitGuide = nil
+        await repo.refresh(quiet: true)
+        XCTAssertNil(repo.initialCommitGuide)
+        let headAfterRefresh = try? await git(path, ["rev-parse", "--verify", "HEAD"])
+        XCTAssertNil(headAfterRefresh)
+
+        // Once the user follows the terminal instructions, the next refresh
+        // becomes an ordinary repository load and leaves no prompt behind.
+        try await git(path, ["add", "."])
+        try await git(path, ["commit", "--allow-empty", "-m", "Initial commit"])
+        await repo.refresh(quiet: true)
+        XCTAssertNil(repo.initialCommitGuide)
+        XCTAssertNil(repo.errorNotice)
+        XCTAssertEqual(repo.snapshot.commits.map(\.subject), ["Initial commit"])
+    }
+
     // MARK: - Ignore
 
     /// The whole menu action: write the pattern, and the file is gone from
@@ -185,6 +225,112 @@ final class RepoIntegrationTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: path + "/.gitignore"))
         XCTAssertTrue(untrackedPaths(repo).isEmpty)
         XCTAssertNil(repo.errorMessage)
+    }
+
+    /// Ignoring a file git already tracks: the pattern alone changes
+    /// nothing, so the confirmed action also drops it from the index. The
+    /// working copy stays, and git stops reporting the edit.
+    func testIgnoreTrackedFileDropsItFromTheIndex() async throws {
+        let path = try await makeRepo("ignore-tracked")
+        try write("v1\n", to: path + "/config.local")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "add config"])
+        try write("v2\n", to: path + "/config.local")
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        XCTAssertEqual(repo.snapshot.unstaged.map(\.path), ["config.local"])
+
+        repo.pendingIgnore = .init(
+            file: FileChange(path: "config.local", status: "M", area: .unstaged),
+            pattern: GitIgnore.filePattern("config.local"),
+            local: false
+        )
+        repo.confirmIgnore()
+        try await waitUntil("the index removal") { self.repoTracks(path, "config.local") == false }
+        await repo.refresh()
+
+        XCTAssertEqual(read(path + "/.gitignore"), "/config.local\n")
+        // Still on disk, and no longer reported as modified or untracked.
+        XCTAssertEqual(read(path + "/config.local"), "v2\n")
+        XCTAssertEqual(untrackedPaths(repo), [".gitignore"])
+        // The removal is staged, so the next commit records the deletion.
+        XCTAssertEqual(repo.snapshot.staged.map(\.path), ["config.local"])
+        XCTAssertEqual(repo.snapshot.staged.first?.status, "D")
+        XCTAssertNil(repo.errorMessage)
+    }
+
+    /// A file staged and then edited again is the case `git rm --cached`
+    /// refuses without --force — the menu has to get through it anyway.
+    func testIgnoreTrackedFileWithStagedAndUnstagedEdits() async throws {
+        let path = try await makeRepo("ignore-tracked-dirty")
+        try write("v1\n", to: path + "/notes.txt")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "add notes"])
+        try write("v2\n", to: path + "/notes.txt")
+        try await git(path, ["add", "notes.txt"])
+        try write("v3\n", to: path + "/notes.txt")
+        let repo = RepoState(path: path)
+        await repo.refresh()
+
+        repo.pendingIgnore = .init(
+            file: FileChange(path: "notes.txt", status: "M", area: .unstaged),
+            pattern: GitIgnore.filePattern("notes.txt"),
+            local: true
+        )
+        repo.confirmIgnore()
+        try await waitUntil("the index removal") { self.repoTracks(path, "notes.txt") == false }
+        await repo.refresh()
+
+        XCTAssertTrue(read(path + "/.git/info/exclude").contains("/notes.txt"))
+        XCTAssertEqual(read(path + "/notes.txt"), "v3\n")
+        XCTAssertTrue(untrackedPaths(repo).isEmpty)
+        XCTAssertNil(repo.errorMessage)
+    }
+
+    /// "Stop tracking" on its own: out of the index, still on disk, and —
+    /// with nothing ignoring it — back in the list as untracked.
+    func testStopTrackingLeavesTheFileOnDiskAndUntracked() async throws {
+        let path = try await makeRepo("stop-tracking")
+        try write("v1\n", to: path + "/local.env")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "add env"])
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        XCTAssertTrue(untrackedPaths(repo).isEmpty)
+
+        repo.fileToUntrack = FileChange(path: "local.env", status: "M", area: .unstaged)
+        repo.confirmStopTracking()
+        try await waitUntil("the index removal") { self.repoTracks(path, "local.env") == false }
+        await repo.refresh()
+
+        XCTAssertEqual(read(path + "/local.env"), "v1\n")
+        XCTAssertEqual(untrackedPaths(repo), ["local.env"])
+        XCTAssertEqual(repo.snapshot.staged.map(\.path), ["local.env"])
+        XCTAssertEqual(repo.snapshot.staged.first?.status, "D")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path + "/.gitignore"))
+        XCTAssertNil(repo.errorMessage)
+    }
+
+    /// Is the path in the index right now? Asked with a plain `git
+    /// ls-files`, so the test checks git's opinion and not ours.
+    private func repoTracks(_ path: String, _ file: String) -> Bool {
+        let listed = try? runSync(path, ["ls-files", "--", file])
+        return (listed ?? "").contains(file)
+    }
+
+    /// `waitUntil`'s condition is synchronous, so the check inside it can't
+    /// await Shell.run.
+    private func runSync(_ dir: String, _ args: [String]) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["git", "-C", dir] + args
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return String(data: data, encoding: .utf8) ?? ""
     }
 
     /// The exclude path comes from git, so it is right even where `.git`
@@ -1111,6 +1257,34 @@ final class RepoIntegrationTests: XCTestCase {
         XCTAssertNil(repo.errorMessage)
     }
 
+    func testBatchStageAndUnstageOperateOnOnlyTheSelectedFiles() async throws {
+        let path = try await makeRepo("stage-batch")
+        try write("one\n", to: path + "/one.txt")
+        try write("two\n", to: path + "/two.txt")
+        try write("three\n", to: path + "/three.txt")
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        let selected = repo.snapshot.unstaged.filter {
+            $0.path == "one.txt" || $0.path == "two.txt"
+        }
+        XCTAssertEqual(selected.count, 2)
+
+        repo.stage(selected)
+        XCTAssertTrue(repo.selectedWorkingTreeFileIDs.isEmpty)
+        try await waitUntil("only the selected files to be staged") {
+            repo.snapshot.staged.map(\.path).sorted() == ["one.txt", "two.txt"]
+                && untrackedPaths(repo) == ["three.txt"]
+        }
+
+        repo.unstage(repo.snapshot.staged)
+        try await waitUntil("the selected staged files to return") {
+            repo.snapshot.staged.isEmpty
+                && untrackedPaths(repo).sorted() == ["one.txt", "three.txt", "two.txt"]
+        }
+        XCTAssertNil(repo.errorMessage)
+    }
+
     /// What actually makes staging cheap, stated as behaviour: it re-reads
     /// `git status` and nothing else, so a commit made behind the app's back
     /// is still not in the log afterwards. The file watcher's full refresh
@@ -1158,6 +1332,132 @@ final class RepoIntegrationTests: XCTestCase {
             .split(separator: "\n")
             .map { String($0).trimmingCharacters(in: .whitespaces) }
             .sorted()
+    }
+
+    /// A real squash has no ancestry link back to its source branch. The
+    /// cleanup probe must recognize the equivalent patch, then stop
+    /// recognizing it if the source branch gains more work afterwards.
+    func testSquashMergeProbeMatchesOnlyTheMergedBranchTip() async throws {
+        let path = try await makeRepo("clean-squash-probe")
+        try await git(path, ["checkout", "-q", "-b", "feature/squashed"])
+        try write("squashed\n", to: path + "/squashed.txt")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "squashed work"])
+        try await git(path, ["checkout", "-q", "main"])
+        try await git(path, ["merge", "-q", "--squash", "feature/squashed"])
+        try await git(path, ["commit", "-qm", "land squashed work"])
+
+        let client = GitClient(repoPath: path)
+        let merged = await client.isSquashMerged(
+            branch: "feature/squashed", into: "main"
+        )
+        XCTAssertTrue(merged)
+
+        try await git(path, ["checkout", "-q", "feature/squashed"])
+        try write("later\n", to: path + "/later.txt")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "work after merge"])
+        try await git(path, ["checkout", "-q", "main"])
+        let mergedAfterMoreWork = await client.isSquashMerged(
+            branch: "feature/squashed", into: "main"
+        )
+        XCTAssertFalse(mergedAfterMoreWork)
+    }
+
+    /// A squash-merged branch can be gone locally while its server ref
+    /// remains. It still belongs in Cleanup, and cleaning it removes both
+    /// the server branch and its local remote-tracking ref.
+    func testCleanupDeletesSquashMergedRemoteBranchWithoutALocalBranch() async throws {
+        let origin = root.appendingPathComponent("clean-remote-origin.git").path
+        try await Shell.run("/usr/bin/env", [
+            "git", "init", "-q", "--bare", "-b", "main", origin,
+        ])
+        let path = try await makeRepo("clean-remote-squash")
+        try await git(path, ["remote", "add", "origin", origin])
+        try await git(path, ["push", "-q", "-u", "origin", "main"])
+
+        try await git(path, ["checkout", "-q", "-b", "feature/remote-only"])
+        try write("remote\n", to: path + "/remote.txt")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "remote work"])
+        try await git(path, ["push", "-q", "-u", "origin", "feature/remote-only"])
+        try await git(path, ["checkout", "-q", "main"])
+        try await git(path, ["merge", "-q", "--squash", "feature/remote-only"])
+        try await git(path, ["commit", "-qm", "land remote work"])
+        try await git(path, ["push", "-q", "origin", "main"])
+        try await git(path, ["branch", "-D", "feature/remote-only"])
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        await repo.scanCleanup()
+        let candidate = try XCTUnwrap(
+            repo.cleanupCandidates.first { $0.name == "origin/feature/remote-only" }
+        )
+        XCTAssertTrue(candidate.isRemoteBranch)
+        XCTAssertEqual(candidate.reason, .squashMerged(into: "origin/main"))
+
+        repo.clean(candidate)
+        try await waitUntil("the remote branch cleanup to finish") { !repo.cleaning }
+        let remoteRefs = try await git(origin, ["branch", "--format=%(refname:short)"])
+        XCTAssertEqual(
+            remoteRefs.split(whereSeparator: \.isNewline).map(String.init), ["main"]
+        )
+        let tracking = try await git(path, [
+            "for-each-ref", "--format=%(refname:short)",
+            "refs/remotes/origin/feature/remote-only",
+        ])
+        XCTAssertTrue(tracking.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        XCTAssertTrue(repo.cleanupUndo.isEmpty, "remote deletion must not claim local Undo")
+        XCTAssertNil(repo.cleanupError)
+    }
+
+    /// Cleanup refreshes the default remote before classifying branches.
+    /// Otherwise a branch deleted on the server still looks alive through
+    /// its stale tracking ref and `upstreamGone` never gets a chance to run.
+    func testCleanupPrunesStaleRemoteTrackingRefsBeforeScanning() async throws {
+        let origin = root.appendingPathComponent("clean-prune-origin.git").path
+        try await Shell.run("/usr/bin/env", [
+            "git", "init", "-q", "--bare", "-b", "main", origin,
+        ])
+        let path = try await makeRepo("clean-prune")
+        try await git(path, ["remote", "add", "origin", origin])
+        try await git(path, ["push", "-q", "-u", "origin", "main"])
+
+        try await git(path, ["checkout", "-q", "-b", "feature/gone"])
+        try write("unmerged\n", to: path + "/unmerged.txt")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "unmerged work"])
+        try await git(path, ["push", "-q", "-u", "origin", "feature/gone"])
+        try await git(path, ["checkout", "-q", "main"])
+        // Delete directly in the bare remote so the clone's tracking ref is
+        // deliberately stale until Cleanup performs its fetch --prune.
+        try await git(origin, ["branch", "-D", "feature/gone"])
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        XCTAssertNotNil(
+            repo.snapshot.remoteBranches.first { $0.name == "origin/feature/gone" }
+        )
+        XCTAssertFalse(
+            try XCTUnwrap(
+                repo.snapshot.localBranches.first { $0.name == "feature/gone" }
+            ).upstreamGone
+        )
+
+        await repo.scanCleanup()
+
+        XCTAssertNil(
+            repo.snapshot.remoteBranches.first { $0.name == "origin/feature/gone" }
+        )
+        let branch = try XCTUnwrap(
+            repo.snapshot.localBranches.first { $0.name == "feature/gone" }
+        )
+        XCTAssertTrue(branch.upstreamGone)
+        let candidate = try XCTUnwrap(
+            repo.cleanupCandidates.first { $0.name == "feature/gone" }
+        )
+        XCTAssertEqual(candidate.reason, .upstreamGone("origin/feature/gone"))
+        XCTAssertEqual(candidate.strandedCommits, 1)
     }
 
     /// Select all then delete is the whole list in one click: every candidate
