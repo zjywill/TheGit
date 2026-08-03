@@ -94,6 +94,36 @@ final class RepoIntegrationTests: XCTestCase {
         repo.snapshot.unstaged.filter { $0.status == "?" }.map(\.path)
     }
 
+    // MARK: - Path encoding
+
+    /// Status is a machine-data boundary: filenames must survive Git's
+    /// default core.quotePath setting as real paths, not displayed octal
+    /// escapes that also fail when passed back to `git add`.
+    func testStatusPreservesUnicodePathsThroughStagingAndRenames() async throws {
+        let path = try await makeRepo("unicode-status")
+        let oldName = "旧 名称.txt"
+        let newName = "新 名称.txt"
+        let untrackedName = "蜗居修仙.md"
+
+        try write("tracked\n", to: path + "/" + oldName)
+        try await git(path, ["add", "--", oldName])
+        try await git(path, ["commit", "-qm", "add unicode path"])
+        try await git(path, ["mv", "--", oldName, newName])
+        try write("untracked\n", to: path + "/" + untrackedName)
+
+        let client = GitClient(repoPath: path)
+        var status = try await client.status()
+        XCTAssertEqual(status.unstaged.map(\.path), [untrackedName])
+        let rename = try XCTUnwrap(status.staged.first { $0.path == newName })
+        XCTAssertEqual(rename.status, "R")
+        XCTAssertEqual(rename.oldPath, oldName)
+
+        try await client.stage(untrackedName)
+        status = try await client.status()
+        XCTAssertTrue(status.unstaged.isEmpty)
+        XCTAssertEqual(status.staged.map(\.path).sorted(), [newName, untrackedName].sorted())
+    }
+
     // MARK: - Fresh repository
 
     /// An unborn HEAD is valid Git state. The tab loads its files, offers

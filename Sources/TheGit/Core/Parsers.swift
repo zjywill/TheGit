@@ -231,7 +231,17 @@ enum GitParsers {
         var behind = 0
         var upstream: String?
 
-        for line in output.split(separator: "\n") {
+        // `git status -z` terminates every record with NUL and leaves paths
+        // verbatim. Keep newline parsing as a fallback for captured output
+        // and older callers, but the live GitClient always uses NUL records.
+        let nulTerminated = output.contains("\0")
+        let records = nulTerminated
+            ? nulFields(output)
+            : output.split(separator: "\n").map(String.init)
+        var recordIndex = 0
+        while recordIndex < records.count {
+            let line = records[recordIndex]
+            recordIndex += 1
             if line.hasPrefix("# branch.head ") {
                 let name = String(line.dropFirst("# branch.head ".count))
                 branch = name == "(detached)" ? nil : name
@@ -261,9 +271,14 @@ enum GitParsers {
                 let xy = fields[1]
                 var path = String(fields[pathIndex])
                 var oldPath: String?
-                if renamed, let tab = path.firstIndex(of: "\t") {
-                    oldPath = String(path[path.index(after: tab)...])
-                    path = String(path[..<tab]) // new path for renames
+                if renamed {
+                    if nulTerminated, recordIndex < records.count {
+                        oldPath = records[recordIndex]
+                        recordIndex += 1
+                    } else if let tab = path.firstIndex(of: "\t") {
+                        oldPath = String(path[path.index(after: tab)...])
+                        path = String(path[..<tab]) // new path for renames
+                    }
                 }
                 let x = xy.first ?? "."
                 let y = xy.count > 1 ? Array(xy)[1] : "."

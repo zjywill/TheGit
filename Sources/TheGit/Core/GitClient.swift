@@ -170,7 +170,9 @@ actor GitClient {
     }
 
     func status() async throws -> GitParsers.StatusResult {
-        let out = try await run(["status", "--porcelain=v2", "--branch"])
+        // `-z` is the machine-readable path format: Git returns names as
+        // raw UTF-8 instead of C-quoting non-ASCII bytes via core.quotePath.
+        let out = try await run(["status", "--porcelain=v2", "--branch", "-z"])
         return GitParsers.parseStatus(out)
     }
 
