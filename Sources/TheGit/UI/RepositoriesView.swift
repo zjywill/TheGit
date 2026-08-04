@@ -390,6 +390,13 @@ enum CatalogMetrics {
     /// is generous — but bounded, or one repo's branch pushes every path on
     /// the screen out of alignment.
     static let branch: CGFloat = 190
+    /// The path column. A column of its own rather than whatever the name
+    /// leaves over: the name is the flexible one, and with nothing reserved
+    /// here it took the whole row and squeezed the path down to an ellipsis —
+    /// the one field that says *which copy* this is, missing from every row.
+    /// Truncated from the head, so what survives is the end of the path,
+    /// which is where two clones of one repository differ.
+    static let path: CGFloat = 200
     /// Row highlight corner, and the card corner around a section band. 6 is
     /// the app's row radius everywhere else.
     static let corner: CGFloat = 6
@@ -686,12 +693,12 @@ private struct CatalogRow: View {
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
                 .truncationMode(.head)
-                .frame(maxWidth: .infinity, alignment: .trailing)
+                .frame(width: CatalogMetrics.path * zoom, alignment: .trailing)
         } else {
             Text("\(project.clones.count) folders")
                 .zoomFont(10)
                 .foregroundStyle(.tertiary)
-                .frame(maxWidth: .infinity, alignment: .trailing)
+                .frame(width: CatalogMetrics.path * zoom, alignment: .trailing)
         }
     }
 

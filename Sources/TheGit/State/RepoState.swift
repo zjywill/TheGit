@@ -561,6 +561,10 @@ final class RepoState: ObservableObject, Identifiable {
 
     nonisolated var id: String { path }
     var displayName: String { (path as NSString).lastPathComponent }
+    /// The folder, said in full. Two clones of one repository have the same
+    /// `displayName` and can sit on different branches, so anywhere a name
+    /// alone could be either of them, this is what tells them apart.
+    var displayPath: String { (path as NSString).abbreviatingWithTildeInPath }
 
     init(path: String) {
         self.path = path

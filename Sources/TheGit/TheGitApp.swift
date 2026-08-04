@@ -1034,6 +1034,11 @@ struct RepoTab: View {
             if isDragging { transaction.animation = nil }
         }
         .contentShape(Rectangle())
+        // A tab is a folder name, and a folder name is not an identity: two
+        // clones of one repository make two tabs that read the same and sit
+        // on different branches. The pointer is already here — say which one
+        // this is, and what it's standing on.
+        .help(helpText)
         // Tab switching is a many-times-a-day action: no animation, instant.
         .onTapGesture { appState.activeRepoID = repo.id }
         // 3pt of slack so a click that shifts by a pixel still selects the
@@ -1073,6 +1078,14 @@ struct RepoTab: View {
             hovering = $0
             AppState.pointerOverTopControl = $0
         }
+    }
+
+    /// Path first: it's the answer to "which copy is this", and the branch
+    /// under it is the other half of the same question. Detached HEAD has no
+    /// branch to name, so the line is simply left off rather than made up.
+    private var helpText: String {
+        guard let branch = repo.snapshot.currentBranch else { return repo.displayPath }
+        return repo.displayPath + "\n" + branch
     }
 }
 
