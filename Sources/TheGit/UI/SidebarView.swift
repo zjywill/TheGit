@@ -396,8 +396,19 @@ struct SidebarView: View {
     private var matchedIssues: [Issue] {
         matching(repo.issues ?? []) { "#\($0.number) \($0.title) \($0.author)" }
     }
+    /// Never the checkout this tab already is. `git worktree list` always
+    /// includes the directory it ran in, so a repo with no linked worktrees
+    /// at all still listed one row — itself, under whatever branch is
+    /// checked out — which reads as "HEAD lives in a worktree" when it is
+    /// simply this window. Nothing it offers is real either: "Open as Tab"
+    /// reopens the tab you are on, and `git worktree remove` refuses the
+    /// main working tree. The other entries stay, including the main one
+    /// when you're standing in a linked worktree — that's the way back.
     private var matchedWorktrees: [Worktree] {
-        matching(repo.snapshot.worktrees) { "\($0.displayName) \($0.branch ?? "") \($0.path)" }
+        let others = repo.snapshot.worktrees.filter {
+            AppState.canonical(path: $0.path) != repo.path
+        }
+        return matching(others) { "\($0.displayName) \($0.branch ?? "") \($0.path)" }
     }
     private var matchedTags: [Tag] { matching(repo.snapshot.tags) { $0.name } }
     private var matchedStashes: [Stash] { matching(repo.snapshot.stashes) { "\($0.ref) \($0.message)" } }
@@ -601,7 +612,7 @@ struct SidebarView: View {
     @ViewBuilder
     private var worktreeSection: some View {
         let worktrees = matchedWorktrees
-        if !filtering || !worktrees.isEmpty {
+        if !worktrees.isEmpty {
             Section {
                 // Folded ⇒ iterate nothing; the header still counts the real
                 // list. A filter overrides the fold, here and below.
