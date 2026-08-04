@@ -551,26 +551,10 @@ struct RepoCommandCluster: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            // Leading, outside the capsule: a running command shouldn't
-            // shift the buttons it was started from, so the slot is held
-            // open whether or not anything is running and only the spinner
-            // inside it fades in.
-            Color.clear
-                .frame(width: 18 * zoom, height: 28 * zoom)
-                .overlay {
-                    if repo.isBusy {
-                        ProgressView()
-                            .controlSize(.small)
-                            .transition(.opacity)
-                    }
-                }
-            ViewThatFits(in: .horizontal) {
-                commandCluster(.regular)
-                commandCluster(.compact)
-            }
+        ViewThatFits(in: .horizontal) {
+            commandCluster(.regular)
+            commandCluster(.compact)
         }
-        .animation(.easeOut(duration: 0.15), value: repo.isBusy)
     }
 
     private func commandCluster(_ metrics: RepoCommandMetrics) -> some View {
@@ -677,8 +661,9 @@ struct RepoCommandCluster: View {
             // No capsule of its own: the toolbar it sits in is already a
             // surface, and glass on glass read as two stacked layers. Each
             // button carries its own hover fill instead, which is what a
-            // Mac toolbar's own items do.
-            .padding(.horizontal, metrics.surfacePadding * zoom)
+            // Mac toolbar's own items do. No horizontal padding either —
+            // that was the capsule's inset, and without it the first button
+            // starts where the home screens' rows do.
             .frame(height: 34 * zoom)
     }
 }
@@ -820,6 +805,28 @@ private struct ClickAwayCatcher: NSViewRepresentable {
     }
 }
 
+/// The running-command spinner, past the search field at the toolbar's
+/// trailing edge — clear of the buttons, so starting a command never shifts
+/// the control it was started from. The slot is held open whether or not
+/// anything is running and only the spinner inside it fades in.
+struct RepoBusySpinner: View {
+    @ObservedObject var repo: RepoState
+    @Environment(\.uiZoom) private var zoom
+
+    var body: some View {
+        Color.clear
+            .frame(width: 18 * zoom, height: 28 * zoom)
+            .overlay {
+                if repo.isBusy {
+                    ProgressView()
+                        .controlSize(.small)
+                        .transition(.opacity)
+                }
+            }
+            .animation(.easeOut(duration: 0.15), value: repo.isBusy)
+    }
+}
+
 /// The commit search, bound to the repository the selected tab holds.
 struct RepoSearchField: View {
     @ObservedObject var repo: RepoState
@@ -857,7 +864,6 @@ private struct RepoCommandMetrics {
     let iconSize: CGFloat
     let commandSpacing: CGFloat
     let pullSpacing: CGFloat
-    let surfacePadding: CGFloat
     let dividerPadding: CGFloat
 
     static let regular = RepoCommandMetrics(
@@ -866,7 +872,6 @@ private struct RepoCommandMetrics {
         iconSize: 13,
         commandSpacing: 6,
         pullSpacing: 2,
-        surfacePadding: 6,
         dividerPadding: 2
     )
 
@@ -879,7 +884,6 @@ private struct RepoCommandMetrics {
         iconSize: 12,
         commandSpacing: 4,
         pullSpacing: 0,
-        surfacePadding: 4,
         dividerPadding: 0
     )
 }

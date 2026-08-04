@@ -161,18 +161,21 @@ struct RootView: View {
     @ToolbarContentBuilder
     private var toolbarCommands: some ToolbarContent {
         if let repo = appState.activeRepo {
-            bareItem(placement: .principal) {
+            bareItem(placement: .navigation) {
                 RepoCommandCluster(repo: repo)
             }
             bareItem(placement: .primaryAction) {
-                RepoSearchField(repo: repo)
+                HStack(spacing: Self.toolbarSpacing) {
+                    RepoSearchField(repo: repo)
+                    RepoBusySpinner(repo: repo)
+                }
             }
         } else if appState.showingRepositories {
             // Same two slots as a repository's: commands leading, search
             // trailing. The home screens' buttons used to sit in a group of
             // their own, which macOS drew as a capsule beside the search
             // field — a different shape in a different place on every screen.
-            bareItem(placement: .principal) {
+            bareItem(placement: .navigation) {
                 HStack(spacing: Self.toolbarSpacing) {
                     TopBarIconButton(
                         systemImage: "folder.badge.plus",
@@ -195,7 +198,7 @@ struct RootView: View {
                 CatalogSearchField()
             }
         } else {
-            bareItem(placement: .principal) {
+            bareItem(placement: .navigation) {
                 HStack(spacing: Self.toolbarSpacing) {
                     TopBarIconButton(
                         systemImage: "folder.badge.plus",
