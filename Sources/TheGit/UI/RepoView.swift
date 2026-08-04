@@ -749,8 +749,74 @@ struct ToolbarSearchField: View {
         }
         .padding(.horizontal, 8 * zoom)
         .frame(width: width * zoom, height: Self.height * zoom)
+        // A click anywhere else in the window gives the field up. AppKit keeps
+        // the field editor first responder until something else claims it, and
+        // nothing the user is likely to click next — a commit row, the graph,
+        // a toolbar button — ever does, so the caret would keep blinking in a
+        // field they visibly left.
+        .background(ClickAwayCatcher { focused = false })
         .repoCommandSurface()
         .help(help)
+    }
+}
+
+/// Drops a text field's focus when the click lands outside the view it backs,
+/// without consuming anything — the same watch-don't-intercept trick as
+/// `PressCatcher`.
+///
+/// It reads AppKit's own first responder rather than SwiftUI's `@FocusState`:
+/// a field hosted in the window's toolbar keeps a live field editor while its
+/// SwiftUI focus binding stays false, so gating on the binding would arm
+/// nothing. Resigning is likewise done in AppKit, since the binding that never
+/// went true can't be flipped back down to release the editor.
+private struct ClickAwayCatcher: NSViewRepresentable {
+    let onClickAway: () -> Void
+
+    final class Coordinator {
+        var onClickAway: (() -> Void)?
+        weak var view: NSView?
+        private var monitor: Any?
+
+        func install() {
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(
+                matching: [.leftMouseDown, .rightMouseDown]
+            ) { [weak self] event in
+                guard let self, let view = self.view, let window = view.window,
+                      event.window === window,
+                      // Only when it's *our* field being edited: the editor is
+                      // a shared, window-wide view, so match it by frame.
+                      let editor = window.firstResponder as? NSText
+                else { return event }
+                let frame = view.convert(view.bounds, to: nil)
+                guard frame.intersects(editor.convert(editor.bounds, to: nil)),
+                      !frame.contains(event.locationInWindow)
+                else { return event }
+                window.makeFirstResponder(nil)
+                self.onClickAway?()
+                return event // never consumed
+            }
+        }
+
+        deinit {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        context.coordinator.view = view
+        context.coordinator.onClickAway = onClickAway
+        context.coordinator.install()
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        context.coordinator.view = view
+        context.coordinator.onClickAway = onClickAway
+        context.coordinator.install()
     }
 }
 
