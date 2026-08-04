@@ -553,13 +553,18 @@ struct RepoCommandCluster: View {
     var body: some View {
         HStack(spacing: 0) {
             // Leading, outside the capsule: a running command shouldn't
-            // shift the buttons it was started from.
-            if repo.isBusy {
-                ProgressView()
-                    .controlSize(.small)
-                    .frame(width: 18 * zoom, height: 28 * zoom)
-                    .transition(.opacity)
-            }
+            // shift the buttons it was started from, so the slot is held
+            // open whether or not anything is running and only the spinner
+            // inside it fades in.
+            Color.clear
+                .frame(width: 18 * zoom, height: 28 * zoom)
+                .overlay {
+                    if repo.isBusy {
+                        ProgressView()
+                            .controlSize(.small)
+                            .transition(.opacity)
+                    }
+                }
             ViewThatFits(in: .horizontal) {
                 commandCluster(.regular)
                 commandCluster(.compact)
