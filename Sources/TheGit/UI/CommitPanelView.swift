@@ -322,6 +322,7 @@ struct CommitPanelView: View {
                     .buttonStyle(.plain)
                     .zoomFont(11)
                     .foregroundStyle(.secondary)
+                    .handCursor()
             } else {
                 Button {
                     if ai.didConfirmSending {
@@ -341,6 +342,7 @@ struct CommitPanelView: View {
                 }
                 .buttonStyle(.pressEffect)
                 .disabled(!canGenerate)
+                .handCursor(canGenerate)
                 .help(
                     ai.notReadyReason
                         ?? "Write the commit message from the staged diff (\(ai.modelID))"
