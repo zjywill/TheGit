@@ -55,11 +55,13 @@ extension ButtonStyle where Self == PressEffectButtonStyle {
     }
 }
 
-/// Hand cursor for a control that sits on top of a text view. The
-/// NSTextView underneath claims its whole frame as an I-beam cursor rect,
-/// so a plain overlay button reads as "type here". The macOS 15 pointer
-/// region resolves by view order and wins; on macOS 14 the I-beam stays —
-/// onHover + NSCursor.push loses the fight against the text view.
+/// Hand cursor over a control, the way a link reads on the web.
+///
+/// Only ever put this on a control that isn't sitting on top of a text
+/// view: an NSTextView claims its whole frame as an I-beam and re-asserts
+/// it on every mouse move, and nothing layered above reliably wins that.
+/// The fix there is to move the control out of the editor's frame, not to
+/// fight it from on top.
 struct HandCursorModifier: ViewModifier {
     /// Off while the control is disabled, so the hand doesn't promise a
     /// click the button won't take.

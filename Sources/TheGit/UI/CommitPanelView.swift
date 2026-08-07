@@ -98,42 +98,50 @@ struct CommitPanelView: View {
                         repo.amendChanged(amending)
                     }
 
-                TextEditor(text: $repo.commitMessage)
-                    .zoomFont(12)
-                    .scrollContentBackground(.hidden)
-                    .padding(6)
-                    .frame(height: messageHeight * zoom)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(Color(nsColor: .textBackgroundColor))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(Color.primary.opacity(0.1))
-                    )
-                    // A TextEditor has no placeholder of its own; without
-                    // one an empty box gives no hint of what belongs here
-                    // (or that a stash message is optional).
-                    .overlay(alignment: .topLeading) {
-                        if repo.commitMessage.isEmpty {
-                            Text(repo.panelMode == .commit
-                                ? "Commit message" : "Stash message (optional)")
-                                .zoomFont(12)
-                                .foregroundStyle(.tertiary)
-                                .padding(.leading, 11)
-                                .padding(.top, 6)
-                                .allowsHitTesting(false)
+                VStack(spacing: 0) {
+                    TextEditor(text: $repo.commitMessage)
+                        .zoomFont(12)
+                        .scrollContentBackground(.hidden)
+                        .padding(6)
+                        // A TextEditor has no placeholder of its own;
+                        // without one an empty box gives no hint of what
+                        // belongs here (or that a stash message is
+                        // optional).
+                        .overlay(alignment: .topLeading) {
+                            if repo.commitMessage.isEmpty {
+                                Text(repo.panelMode == .commit
+                                    ? "Commit message" : "Stash message (optional)")
+                                    .zoomFont(12)
+                                    .foregroundStyle(.tertiary)
+                                    .padding(.leading, 11)
+                                    .padding(.top, 6)
+                                    .allowsHitTesting(false)
+                            }
                         }
-                    }
+
                     // ✨ lives inside the box it writes into — the control
                     // next to what it affects, instead of a stray row of
-                    // chrome floating above.
-                    .overlay(alignment: .bottomTrailing) {
-                        if ai.isEnabled, repo.panelMode == .commit {
+                    // chrome floating above. It gets its own strip rather
+                    // than floating over the editor: the text view claims
+                    // its whole frame as an I-beam cursor, so a button
+                    // overlaid on it can never read as clickable.
+                    if ai.isEnabled, repo.panelMode == .commit {
+                        HStack(spacing: 0) {
+                            Spacer(minLength: 0)
                             generateControl
-                                .padding(6)
                         }
+                        .padding([.horizontal, .bottom], 6)
                     }
+                }
+                .frame(height: messageHeight * zoom)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color(nsColor: .textBackgroundColor))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.primary.opacity(0.1))
+                )
 
                 if repo.panelMode == .commit {
                     Button {
