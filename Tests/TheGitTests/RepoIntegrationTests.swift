@@ -628,6 +628,60 @@ final class RepoIntegrationTests: XCTestCase {
         XCTAssertFalse(repo.isLFSObjectMissing("art.psd"))
     }
 
+    /// Pushing an LFS repo from a double-clicked .app. git spawns
+    /// `git-lfs` itself — pre-push hook, clean/smudge filters — and finds
+    /// it on PATH, not through our own lookup, so the bundle's bare
+    /// launchd PATH used to end the push with "this repository is
+    /// configured for Git LFS but 'git-lfs' was not found on your path"
+    /// while the same push from a terminal went through.
+    func testLFSPushWorksWithTheBarePathABundleInherits() async throws {
+        try XCTSkipUnless(GitClient.hasLFS, "git-lfs is not installed")
+        let origin = root.appendingPathComponent("lfs-push-origin.git").path
+        try await Shell.run("/usr/bin/env", ["git", "init", "-q", "--bare", "-b", "main", origin])
+        let path = try await makeRepo("lfs-push")
+        try await git(path, ["lfs", "install", "--local"])
+        try await git(path, ["lfs", "track", "*.psd"])
+        try writeBinary(64_000, to: path + "/art.psd")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "add art"])
+        try await git(path, ["remote", "add", "origin", origin])
+
+        // What launchd hands a .app: no Homebrew, and git-lfs lives in it.
+        let inherited = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1)
+        defer { setenv("PATH", inherited, 1) }
+        XCTAssertNil(
+            Shell.searchDirs()
+                .first { FileManager.default.isExecutableFile(atPath: $0 + "/git-lfs") }
+                .flatMap { ["/usr/bin", "/bin", "/usr/sbin", "/sbin"].contains($0) ? $0 : nil },
+            "this test only means something while git-lfs is outside the bare PATH"
+        )
+
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        repo.push()
+        try await waitUntil("the push to set an upstream", { [weak repo] in
+            repo?.snapshot.localBranches.first(where: \.isCurrent)?.upstream == "origin/main"
+        }, refreshing: { await repo.refresh() })
+        XCTAssertNil(repo.errorMessage)
+
+        // The pointer is on the remote and its object made it into the
+        // remote's LFS store — a push that skipped the hook has neither.
+        let pointer = try await git(origin, ["show", "main:art.psd"])
+        XCTAssertTrue(pointer.hasPrefix("version https://git-lfs.github.com/spec/v1"), pointer)
+        let objects = FileManager.default
+            .enumerator(atPath: origin + "/lfs/objects")?
+            .compactMap { $0 as? String }
+            .filter { !$0.hasSuffix(".tmp") } ?? []
+        XCTAssertTrue(
+            objects.contains { FileManager.default.fileExists(atPath: origin + "/lfs/objects/" + $0)
+                && (try? FileManager.default.attributesOfItem(
+                    atPath: origin + "/lfs/objects/" + $0
+                )[.size] as? Int) == 64_000 },
+            "the 64 KB object never reached the remote store: \(objects)"
+        )
+    }
+
     /// The ls-files cache: a burst of refreshes costs one call, the answer
     /// catches up once the TTL passes, and patterns are never cached at
     /// all (they come from a file we read on every call).

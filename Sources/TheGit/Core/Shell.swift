@@ -61,11 +61,26 @@ enum Shell {
             .filter { !$0.isEmpty }
     }
 
-    /// Absolute path of an executable, or nil when it isn't installed.
-    static func which(_ binary: String) -> String? {
+    /// Everywhere a binary might be, in the order we'd rather find it:
+    /// what we inherited, then the login shell's PATH, then the usual
+    /// install prefixes. Deduplicated — the three lists overlap heavily.
+    static func searchDirs() -> [String] {
         let pathDirs = (ProcessInfo.processInfo.environment["PATH"] ?? "")
             .split(separator: ":").map(String.init)
-        for dir in pathDirs + loginDirs + extraDirs {
+        var seen = Set<String>()
+        return (pathDirs + loginDirs + extraDirs).filter { seen.insert($0).inserted }
+    }
+
+    /// The PATH every child gets. Finding the binary ourselves only covers
+    /// the first process: git runs `git-lfs` as its own filter and hook,
+    /// `gh` and `glab` shell out to git, and each of those searches PATH.
+    /// A double-clicked .app would hand them launchd's bare one and they'd
+    /// report a tool missing that the app itself just found.
+    static func childPath() -> String { searchDirs().joined(separator: ":") }
+
+    /// Absolute path of an executable, or nil when it isn't installed.
+    static func which(_ binary: String) -> String? {
+        for dir in searchDirs() {
             let candidate = dir + "/" + binary
             if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
         }
@@ -119,10 +134,9 @@ enum Shell {
                     process.executableURL = URL(fileURLWithPath: executable)
                     process.arguments = args
                     if let cwd { process.currentDirectoryURL = URL(fileURLWithPath: cwd) }
-                    if !env.isEmpty {
-                        process.environment = ProcessInfo.processInfo.environment
-                            .merging(env) { _, new in new }
-                    }
+                    process.environment = ProcessInfo.processInfo.environment
+                        .merging(["PATH": childPath()]) { _, new in new }
+                        .merging(env) { _, new in new }
                     let stdout = Pipe()
                     let stderr = Pipe()
                     process.standardOutput = stdout
