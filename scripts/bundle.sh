@@ -38,16 +38,13 @@ UNIVERSAL="${UNIVERSAL:-1}"
 DMG="${DMG:-1}"
 NOTARIZE="${NOTARIZE:-1}"
 
-# notarise(), and the NOTARY_* defaults it reads, live in one place because
-# notarise-release.sh needs the same retry rules to backfill a ticket onto a
-# release that shipped while Apple's queue was down.
-. "$(dirname "$0")/notarise-lib.sh"
+# notarise(), verify_distribution(), build_dmg() and the NOTARY_* defaults
+# live in one place because notarise-release.sh needs exactly the same rules
+# to backfill a ticket onto a release that shipped while Apple's queue was
+# down, and release.sh needs the same checks to gate the tag.
+. "$(dirname "$0")/release-lib.sh"
 
-# Matched by name rather than hash so the script keeps working when the
-# certificate is renewed — Developer ID certs expire every five years and
-# the replacement has a different hash but the same subject.
-SIGN_ID="${SIGN_ID:-$(security find-identity -v -p codesigning 2>/dev/null \
-    | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)}"
+SIGN_ID="${SIGN_ID:-$(find_sign_id)}"
 SIGN_ID="${SIGN_ID:--}"
 
 cd "$(dirname "$0")/.."
@@ -169,6 +166,10 @@ if [ "$CAN_NOTARISE" = "1" ]; then
     ditto -c -k --keepParent "$APP" "$ZIP"
     if ! notarise "$ZIP" "$APP"; then rm -f "$ZIP"; exit 1; fi
     rm -f "$ZIP"
+    # Asked here rather than assumed from a clean exit: everything above
+    # reports success on a build whose ticket never landed, and the failure
+    # only shows up on someone else's Mac.
+    verify_distribution "$APP" execute || exit 1
 fi
 
 if [ "$DMG" != "1" ]; then
@@ -180,24 +181,17 @@ if [ "$DMG" != "1" ]; then
 fi
 
 echo "==> Building DMG"
-STAGE="$DIST/dmg"
-rm -rf "$STAGE"
-mkdir -p "$STAGE"
-cp -R "$APP" "$STAGE/"
-ln -s /Applications "$STAGE/Applications"
-hdiutil create -quiet -volname "$APP_NAME" -srcfolder "$STAGE" \
-    -ov -format UDZO "$DIST/$APP_NAME-$VERSION.dmg"
-rm -rf "$STAGE"
+# Not $DMG: that name is the caller's on/off flag, checked just above.
+DMG_PATH="$DIST/$APP_NAME-$VERSION.dmg"
+build_dmg "$APP" "$DMG_PATH" "$APP_NAME" "$SIGN_ID"
 
-if [ "$SIGN_ID" != "-" ]; then
-    codesign --force --timestamp --sign "$SIGN_ID" "$DIST/$APP_NAME-$VERSION.dmg"
-fi
 if [ "$CAN_NOTARISE" = "1" ]; then
-    notarise "$DIST/$APP_NAME-$VERSION.dmg" "$DIST/$APP_NAME-$VERSION.dmg"
+    notarise "$DMG_PATH" "$DMG_PATH"
+    verify_distribution "$DMG_PATH" open || exit 1
 fi
 
 echo
 echo "Built:"
 echo "  $APP"
-echo "  $DIST/$APP_NAME-$VERSION.dmg"
+echo "  $DMG_PATH"
 lipo -archs "$APP/Contents/MacOS/$APP_NAME" | sed 's/^/  archs: /'

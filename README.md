@@ -22,12 +22,12 @@ No account, no telemetry, no sign-in wall.
 ## Get it
 
 ```bash
-brew install zjywill/tap/thegit
+brew install --cask zjywill/tap/thegit
 ```
 
 Or [**download the DMG**](https://github.com/zjywill/TheGit/releases/latest) —
-universal, 4.9 MB, no toolchain needed.
-[Install details, including the first-launch Gatekeeper prompt](#install), are below.
+universal, no toolchain needed. Signed with an Apple Developer ID and notarised
+by Apple, so it just opens. [Install details](#install) are below.
 
 ---
 
@@ -136,22 +136,26 @@ TheGit never handles those tokens itself.
 ### Homebrew (recommended)
 
 ```bash
-brew install zjywill/tap/thegit
+brew install --cask zjywill/tap/thegit
 ```
 
-The formula builds from source on your machine, which is deliberate: a build
-you produced yourself is never quarantined, so nothing has to be talked past
-Gatekeeper. A first build takes a minute or two and needs an Xcode 15+
-toolchain.
+A cask, so it installs the same signed universal `.app` the DMG carries,
+straight into `/Applications` — no Xcode toolchain, no copying it there
+yourself.
 
-Homebrew can't write to `/Applications`, so copy the bundle there yourself:
+It used to be a formula that built from source, and that had a cost worth
+naming: Homebrew's build environment can't reach the login keychain, so the
+Developer ID certificate wasn't there and the bundle came out ad-hoc signed.
+An ad-hoc bundle gets a fresh identity on every rebuild, and macOS keys
+keychain items to the identity that stored them — so every upgrade asked for
+your AI API key again. The cask ships one stable signature, and the prompt
+happens once.
+
+Coming from the old formula, once:
 
 ```bash
-cp -R "$(brew --prefix thegit)/TheGit.app" /Applications/
+brew uninstall thegit && brew install --cask zjywill/tap/thegit
 ```
-
-A **copy**, not a symlink — Spotlight indexes neither the Homebrew prefix nor
-the target of a symlink, and the app would never show up in search.
 
 ### DMG
 
@@ -159,21 +163,11 @@ Every release ships a universal `.dmg` on the
 [Releases page](https://github.com/zjywill/TheGit/releases/latest) — no
 toolchain, no Homebrew.
 
-TheGit isn't signed with an Apple Developer ID yet, so macOS blocks the first
-launch with "TheGit can't be opened". That's Gatekeeper refusing an unnotarised
-download, not a problem with the app, and it happens once:
-
-1. Open the DMG and drag TheGit to Applications.
-2. Try to open it; macOS refuses.
-3. **System Settings → Privacy & Security**, scroll down, **Open Anyway**.
-
-Or skip the dialog entirely:
-
-```bash
-xattr -dr com.apple.quarantine /Applications/TheGit.app
-```
-
-If that trade doesn't appeal, use Homebrew — building from source never hits it.
+Signed with an Apple Developer ID and notarised by Apple, with the ticket
+stapled to both the image and the app inside it. Open it, drag TheGit to
+Applications, launch it. No Gatekeeper detour, and none even on a Mac that's
+offline — the stapled ticket is what makes that true, which is why it's
+checked before a release is tagged.
 
 ### Upgrade
 
@@ -184,8 +178,7 @@ release page, and dismissing it silences that version for good.
 **Check for Updates…** in the TheGit menu asks on demand.
 
 ```bash
-brew update && brew upgrade thegit
-rm -rf /Applications/TheGit.app && cp -R "$(brew --prefix thegit)/TheGit.app" /Applications/
+brew update && brew upgrade --cask thegit
 ```
 
 Quit TheGit first — a running app keeps its old bundle. `brew update` must
@@ -200,16 +193,15 @@ Using Claude Code, Codex, or any agent with a terminal? Paste this:
 Install TheGit (https://github.com/zjywill/TheGit), a native macOS Git
 client, on this Mac via Homebrew:
 
-1. brew install zjywill/tap/thegit
-   — builds from source, needs an Xcode 15+ toolchain; if Homebrew says the
-   tap is untrusted, run: brew trust --formula zjywill/tap/thegit
-2. Copy the app where Finder and Spotlight can see it (a symlink is NOT
-   enough — Spotlight won't index it):
-   rm -rf /Applications/TheGit.app && cp -R "$(brew --prefix thegit)/TheGit.app" /Applications/
-3. Verify: brew list --versions thegit, then open /Applications/TheGit.app
+1. brew install --cask zjywill/tap/thegit
+   — a cask, so it puts the signed .app straight into /Applications; if
+   Homebrew says the tap is untrusted, run: brew trust --cask zjywill/tap/thegit
+2. Verify: brew list --cask --versions thegit, then open /Applications/TheGit.app
 
-If it's already installed, upgrade instead: quit TheGit, run
-brew update && brew upgrade thegit, then redo step 2.
+If it's already installed, upgrade instead: quit TheGit, then run
+brew update && brew upgrade --cask thegit
+If it was installed with the old build-from-source formula, migrate once:
+brew uninstall thegit && brew install --cask zjywill/tap/thegit
 ```
 
 </details>
@@ -221,19 +213,19 @@ Homebrew 6 asks you to trust third-party taps. Installing by full name records
 that trust; if a later command says the tap is being ignored:
 
 ```bash
-brew trust --formula zjywill/tap/thegit
+brew trust --cask zjywill/tap/thegit
 ```
 
 Which version you're on:
 
 ```bash
-brew list --versions thegit
+brew list --cask --versions thegit
 ```
 
 Uninstall:
 
 ```bash
-brew uninstall thegit && brew untap zjywill/tap
+brew uninstall --cask thegit && brew untap zjywill/tap
 ```
 
 That doesn't touch the copy in `/Applications` — remove it with
