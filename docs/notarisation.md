@@ -120,7 +120,7 @@ ad-hoc 包过，Apple 从没见过的 Developer ID 包也过。它和有没有�
 
 ## 这个 team 的公证有多慢
 
-2026-08-12 是 NGM7GX8DGB 第一次用公证服务。当天九次提交：
+2026-08-12 是这个 Developer ID 第一次用公证服务。当天九次提交：
 
 ```
 02:58Z  app   In Progress   （八小时后仍未回）
