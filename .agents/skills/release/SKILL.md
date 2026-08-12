@@ -22,6 +22,12 @@ One command does the whole release:
 scripts/release.sh <MAJOR.MINOR.PATCH>
 ```
 
+> **Read this before running it.** That command waits for Apple to notarise,
+> twice, and verdicts for this Developer ID currently take hours — it will
+> sit there most of a working day. Until that changes, use the two-step flow
+> under "The flow that doesn't require sitting in front of a terminal" below.
+> Don't discover this by starting the blocking one and waiting.
+
 It checks the tree, runs the tests, builds the universal DMG, signs and
 notarises it, **verifies the notarisation tickets actually landed**, tags
 `v<version>`, pushes the tag, publishes the GitHub Release with the DMG
