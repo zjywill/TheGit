@@ -12,13 +12,14 @@
 # from a local tarball that isn't byte-identical to GitHub's (same failure,
 # but it looks like a Homebrew bug).
 #
-# The DMG is ad-hoc signed, not notarised, so macOS quarantines it on
-# download and the first launch needs a trip through System Settings. The
-# release notes say so, in the download's own words. Homebrew stays the
-# recommended channel precisely because building from source sidesteps
-# that; the DMG is for people who won't install a toolchain. When a
-# Developer ID shows up, sign in bundle.sh and delete the warning below —
-# nothing else here changes.
+# The DMG goes out signed with a Developer ID and notarised, so it opens
+# without a detour through System Settings. bundle.sh does that work and
+# quietly falls back to an ad-hoc signature when the certificate or the
+# notarytool credentials are missing — fine for a local build, not for a
+# release, which is why the stapled ticket is checked below before the tag
+# is pushed. The release notes promise a clean first launch; a release that
+# shipped an ad-hoc DMG under those notes would be worse than the old
+# honest warning.
 set -euo pipefail
 
 TAP_REPO="zjywill/homebrew-tap"
@@ -73,7 +74,24 @@ echo "==> Building the DMG"
 DMG="$PWD/dist/TheGit-$VERSION.dmg"
 VERSION="$VERSION" scripts/bundle.sh >/dev/null
 [ -f "$DMG" ] || die "bundle.sh finished but $DMG isn't there"
-echo "    $(du -h "$DMG" | awk '{print $1}')  $DMG"
+# stapler validate is the one check that covers the whole chain at once: a
+# ticket is only stapled onto a DMG Apple actually notarised, which in turn
+# only happens for a Developer ID signature with the hardened runtime.
+if xcrun stapler validate "$DMG" >/dev/null 2>&1; then
+    NOTARISED=1
+    echo "    $(du -h "$DMG" | awk '{print $1}')  $DMG  (notarised)"
+elif [ "${ALLOW_UNNOTARISED:-0}" = "1" ]; then
+    # Apple's notary queue can sit on a submission for hours with no verdict
+    # and no incident on the status page. Shipping through that is a choice,
+    # not an accident, which is why it takes an explicit flag — and why the
+    # install notes below switch back to the first-launch workaround. The
+    # artefact and what the notes claim about it move together or not at all.
+    NOTARISED=0
+    echo "    $(du -h "$DMG" | awk '{print $1}')  $DMG"
+    echo "    !! NOT notarised — shipping with the Gatekeeper workaround in the notes"
+else
+    die "$DMG has no stapled notarisation ticket. Check the Developer ID certificate and the '\$NOTARY_PROFILE' notarytool profile, or re-run with ALLOW_UNNOTARISED=1 to ship it anyway."
+fi
 
 echo "==> Tagging $TAG"
 git tag -a "$TAG" -m "TheGit $VERSION"
@@ -109,9 +127,18 @@ brew install zjywill/tap/thegit
 rm -rf /Applications/TheGit.app && cp -R "$(brew --prefix thegit)/TheGit.app" /Applications/
 ```
 
-**DMG** — no toolchain needed. TheGit isn't signed with an Apple Developer
-ID yet, so macOS blocks the first launch with "TheGit can't be opened".
-It only happens once:
+NOTES
+    if [ "$NOTARISED" = "1" ]; then
+        cat <<'NOTES'
+**DMG** — no toolchain needed. Open it, drag TheGit to Applications, launch
+it. Signed with an Apple Developer ID and notarised by Apple, so there's no
+Gatekeeper detour.
+NOTES
+    else
+        cat <<'NOTES'
+**DMG** — no toolchain needed. Signed with an Apple Developer ID, but this
+build is still waiting on Apple's notary service, so macOS blocks the first
+launch with "TheGit can't be opened". It only happens once:
 
 1. Open the DMG and drag TheGit to Applications.
 2. Try to open it; macOS refuses.
@@ -123,6 +150,7 @@ Or, in Terminal, skip the dialog entirely:
 xattr -dr com.apple.quarantine /Applications/TheGit.app
 ```
 NOTES
+    fi
 } > "$WORK/notes.md"
 
 gh release create "$TAG" "$DMG" \
