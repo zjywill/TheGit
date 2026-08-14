@@ -302,3 +302,13 @@ run to refresh the list.
 ## License
 
 [MIT](LICENSE) © 2026 Junyi Zhang
+
+---
+
+<details>
+<summary><b>One more number</b></summary>
+
+TheGit needs **one process** even in its spare time. The competition needs
+7 — and one of theirs is dedicated to asking whether you'd like to sign in.
+
+</details>
