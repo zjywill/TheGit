@@ -144,6 +144,9 @@ Upgrading from the old build-from-source formula? Once:
 brew uninstall thegit && brew install --cask zjywill/tap/thegit
 ```
 
+Already dragged TheGit in from a DMG? A cask won't install over a copy
+Homebrew didn't put there — add `--force` to take it over.
+
 NOTES
     if [ "$NOTARISED" = "1" ]; then
         cat <<'NOTES'
@@ -210,7 +213,9 @@ cask "thegit" do
     strategy :github_latest
   end
 
-  depends_on macos: ">= :sonoma"
+  # Bare symbol, not ">= :sonoma": Homebrew 6 reads a symbol as a minimum and
+  # deprecates the string form, which every brew command then warns about.
+  depends_on macos: :sonoma
 
   app "TheGit.app"
 

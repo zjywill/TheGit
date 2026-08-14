@@ -112,7 +112,7 @@ scripts/release.sh X.Y.Z
 ```
 
 Safe because nothing has consumed the tag yet — brew never saw it.
-Diagnose before recovering: check remote tags and the raw formula (commands
+Diagnose before recovering: check remote tags and the raw cask (commands
 above) so you know which half is missing.
 
 **Stalled at `(END)` in the terminal.** git handed output to `less` and the
@@ -214,4 +214,7 @@ brew install --cask zjywill/tap/thegit
 ```
 
 Homebrew 6 tap trust: installing by full name records trust; if brew says
-the tap is ignored, `brew trust --cask zjywill/tap/thegit`.
+the tap is ignored, `brew trust --cask zjywill/tap/thegit`. If the install
+stops at "there is already an App at '/Applications/TheGit.app'", that is a
+copy Homebrew does not track (someone dragged it out of a DMG) — rerun with
+`--force`, which is also what a user in that state needs to be told.

@@ -157,6 +157,17 @@ Coming from the old formula, once:
 brew uninstall thegit && brew install --cask zjywill/tap/thegit
 ```
 
+Already dragged TheGit into `/Applications` from a DMG? A cask won't install
+over a copy Homebrew didn't put there — it stops with *"It seems there is
+already an App at '/Applications/TheGit.app'"*. Hand that copy over:
+
+```bash
+brew install --cask --force zjywill/tap/thegit
+```
+
+(`--adopt` is the gentler flag, but it only accepts a copy that's already the
+same version; `--force` replaces whatever is sitting there.)
+
 ### DMG
 
 Every release ships a universal `.dmg` on the
@@ -196,6 +207,8 @@ client, on this Mac via Homebrew:
 1. brew install --cask zjywill/tap/thegit
    — a cask, so it puts the signed .app straight into /Applications; if
    Homebrew says the tap is untrusted, run: brew trust --cask zjywill/tap/thegit
+   — if it stops with "there is already an App at /Applications/TheGit.app",
+   that's an older copy dragged from a DMG: rerun with --cask --force
 2. Verify: brew list --cask --versions thegit, then open /Applications/TheGit.app
 
 If it's already installed, upgrade instead: quit TheGit, then run
@@ -228,10 +241,17 @@ Uninstall:
 brew uninstall --cask thegit && brew untap zjywill/tap
 ```
 
-That doesn't touch the copy in `/Applications` — remove it with
-`rm -rf /Applications/TheGit.app`. Your settings (the `com.zjywill.TheGit`
-`defaults` domain) and the API key in the login keychain survive both an
-upgrade and an uninstall; delete them by hand for a clean slate.
+The app in `/Applications` goes with it — it's the cask's only artifact, so
+there's nothing left to `rm` by hand. Your settings survive an upgrade and an
+uninstall alike; to take those too:
+
+```bash
+brew uninstall --zap --cask thegit
+```
+
+`--zap` adds the `com.zjywill.TheGit` `defaults` domain and the saved window
+state. The API key in the login keychain outlives both — delete it in
+Keychain Access for a genuinely clean slate.
 
 </details>
 
