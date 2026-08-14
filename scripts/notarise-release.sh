@@ -38,6 +38,8 @@ set -euo pipefail
 
 REPO="zjywill/TheGit"
 APP_NAME="TheGit"
+TAP_REPO="zjywill/homebrew-tap"
+CASK="Casks/thegit.rb"
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -155,6 +157,35 @@ verify_dmg_contents "$DMG" || die "the app inside the image lost its ticket"
 echo "==> Replacing the DMG on $TAG"
 gh release upload "$TAG" "$DMG" --repo "$REPO" --clobber
 
+# The cask pins the DMG's sha256, and the file that was just uploaded is a
+# different one — same version, same binary inside, but a rebuilt image with
+# a ticket, so a different hash. Leaving the tap alone here would break
+# `brew install --cask thegit` with a checksum mismatch the moment the upload
+# lands. (This did not matter while the tap was a formula: that pinned the
+# source tarball, which replacing a DMG doesn't touch.)
+#
+# Straight after the upload, not before: for the window between the two the
+# cask points at a file that is no longer there either way, and this ordering
+# at least keeps the artefact of record ahead of the thing describing it.
+echo "==> Repointing $TAP_REPO's cask at the notarised DMG"
+SHA="$(shasum -a 256 "$DMG" | awk '{print $1}')"
+git clone -q "git@github.com:$TAP_REPO.git" "$WORK/tap"
+(
+    cd "$WORK/tap"
+    [ -f "$CASK" ] || die "$CASK not found in $TAP_REPO"
+    grep -q "  version \"$VERSION\"" "$CASK" \
+        || die "$CASK is on a different version than $VERSION — refusing to repoint it"
+    /usr/bin/sed -i '' -e "s|^  sha256 \".*\"|  sha256 \"$SHA\"|" "$CASK"
+    if [ -z "$(git status --porcelain)" ]; then
+        echo "    already pointing at this DMG"
+    else
+        git --no-pager diff --stat -- "$CASK"
+        git add "$CASK"
+        git commit -q -m "thegit $VERSION: notarised DMG"
+        git push -q origin HEAD
+    fi
+)
+
 # The workaround block is matched on the sentence release.sh writes rather
 # than on line numbers, so an edited changelog above it doesn't shift the
 # target. Nothing found means the notes were already rewritten — say so and
@@ -189,8 +220,16 @@ cat <<EOF
 $TAG is notarised — the image and the app inside it both carry a ticket.
 
   release  https://github.com/$REPO/releases/tag/$TAG
+  tap      https://github.com/$TAP_REPO/blob/main/$CASK
   dmg      $DMG
 
-Check it the way a downloader would:
-  spctl -a -vvv -t open --context context:primary-signature "$DMG"
+Check it the way a downloader would — this reads the ticket in the file
+rather than asking Apple, which is the whole point:
+
+  gh release download $TAG --repo $REPO --pattern '*.dmg' --dir /tmp/$TAG --clobber
+  xcrun stapler validate /tmp/$TAG/$APP_NAME-$VERSION.dmg
+
+And that brew still agrees with what is on the Release:
+
+  brew update && brew upgrade --cask thegit
 EOF
