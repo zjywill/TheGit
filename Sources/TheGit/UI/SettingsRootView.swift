@@ -152,6 +152,13 @@ struct SettingsRootView: View {
             // height can go well under content height.
             .frame(minWidth: 500 * zoom, minHeight: 400 * zoom)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // Every pane is a ScrollView, and a ScrollView grows itself up
+            // into the window's top safe area — here, the title-bar band
+            // this column draws the pane's name in. Its content inset hides
+            // that at rest, so the pane looks right until you scroll and the
+            // rows ride up over the title. Clipping to the box the stack
+            // already gave it is the whole fix; nothing moves.
+            .clipped()
         }
     }
 }
