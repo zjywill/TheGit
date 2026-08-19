@@ -30,6 +30,35 @@ struct Commit: Identifiable, Hashable, Codable {
     }
 }
 
+/// One line's `git blame` record — which commit (and which author) last
+/// touched a given line of a file, in the revision it was blamed against.
+/// Keyed by final line number; lines a blame couldn't attribute (a
+/// boundary commit, or uncommitted working-tree content) carry the
+/// all-zeros uncommitted hash.
+struct BlameLine: Equatable, Hashable {
+    /// 1-based line number in the blamed file's final revision.
+    let lineNumber: Int
+    /// Full commit hash attributing this line. The all-zeros hash marks
+    /// uncommitted working-tree content; boundary commits report a real
+    /// hash but carry no author fields git could name.
+    let commitHash: String
+    let author: String
+    let date: Date
+    let summary: String
+
+    /// The synthetic hash `git blame` uses for lines with no commit behind
+    /// them yet — new working-tree lines that have never been committed.
+    static let uncommittedHash = "0000000000000000000000000000000000000000"
+    var isUncommitted: Bool { commitHash == Self.uncommittedHash }
+
+    /// A boundary commit has a real hash but nothing git can name for it —
+    /// the blamed line fell off the beginning of history.
+    var isBoundary: Bool { author.isEmpty }
+    var shortHash: String { String(commitHash.prefix(7)) }
+
+    var id: Int { lineNumber }
+}
+
 enum BranchKind: Hashable, Codable {
     case local
     case remote(String) // remote name, e.g. "origin"

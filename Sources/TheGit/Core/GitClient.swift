@@ -252,6 +252,27 @@ actor GitClient {
         return try await run(args)
     }
 
+    /// `git blame` for one file, in a machine-readable form, keyed by final
+    /// line number. `revision` says which revision to blame against: nil
+    /// blames the working tree (new, never-committed lines come back with
+    /// the all-zeros uncommitted hash), "HEAD" blames the index of a clean
+    /// checkout, and a commit hash blames the file as it was at that commit
+    /// — the three match the three diff modes (unstaged / staged / commit).
+    ///
+    /// `--porcelain` gives one record per line with reliable fields;
+    /// `--line-porcelain` repeats every record's full header on each line of
+    /// a group (a comment block or repeated import), so no run-length
+    /// decoding is needed. `-w` means whitespace-only edits don't change
+    /// attribution, which is what a reader means by "who wrote this line".
+    func blame(path: String, revision: String? = nil) async throws -> [Int: BlameLine] {
+        var args = ["blame", "--line-porcelain", "-w"]
+        if let revision, !revision.isEmpty { args.append(revision) }
+        args.append("--")
+        args.append(path)
+        let out = try await run(args)
+        return GitParsers.parseBlame(out)
+    }
+
     /// Image versions for a working-tree row. Unstaged compares index to
     /// disk; staged compares HEAD to index.
     func workingTreeImageDiff(_ file: FileChange) async throws -> ImageDiff? {

@@ -312,4 +312,71 @@ enum GitParsers {
             upstream: upstream
         )
     }
+
+    // MARK: - blame
+
+    /// Parse `git blame --line-porcelain` output into per-final-line
+    /// records. Each group is: a header line (`<hash> <orig> <final> [n]`),
+    /// property `key value` lines, and one content line beginning with a
+    /// tab. Only `author`/`author-time`/`summary` are wanted; the rest
+    /// (mail, committer, timezone, filename) is skipped. A boundary commit
+    /// has a real hash but no author/summary fields, so its line renders as
+    /// unknown rather than guessed.
+    static func parseBlame(_ output: String) -> [Int: BlameLine] {
+        var result: [Int: BlameLine] = [:]
+        var lineNumber = 0
+        var hash = ""
+        var author: String?
+        var summary: String?
+        var date: Date?
+        var seenGroup = false
+
+        func flush() {
+            guard seenGroup else { return }
+            let value = BlameLine(
+                lineNumber: lineNumber,
+                commitHash: hash,
+                author: author ?? "",
+                date: date ?? Date.distantPast,
+                summary: summary ?? ""
+            )
+            result[lineNumber] = value
+            seenGroup = false
+            author = nil
+            summary = nil
+            date = nil
+        }
+
+        for raw in output.split(separator: "\n", omittingEmptySubsequences: false) {
+            if raw.hasPrefix("\t") {
+                // Content line: the group's record is complete.
+                flush()
+            } else if let idx = raw.firstIndex(of: " ") {
+                let key = String(raw[..<idx])
+                let value = String(raw[raw.index(after: idx)...])
+                // A header line is the only record whose first field is a 40-char
+                // hex hash — a property line's key is a plain word. That
+                // alone discriminates the two, so the header's own fields
+                // (which contain no spaces) don't even need inspecting.
+                let isHeader = key.count == 40 && key.allSatisfy { $0.isHexDigit }
+                if isHeader {
+                    flush()
+                    let fields = raw.split(separator: " ")
+                    lineNumber = Int(fields[2]) ?? 0
+                    hash = String(fields[0])
+                    seenGroup = true
+                } else {
+                    switch key {
+                    case "author": author = value.isEmpty ? nil : value
+                    case "summary": summary = value.isEmpty ? nil : value
+                    case "author-time": date = TimeInterval(value).map { Date(timeIntervalSince1970: $0) }
+                    default: break
+                    }
+                }
+            }
+        }
+        flush()
+        return result
+    }
 }
+

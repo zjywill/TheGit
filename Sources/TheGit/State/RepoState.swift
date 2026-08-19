@@ -365,6 +365,19 @@ final class RepoState: ObservableObject, Identifiable {
     @Published var lfsPointer: LFSPointerDiff?
     /// "Show pointer text" — the raw diff behind that summary.
     @Published var showRawPointer = false
+    /// Per-final-line `git blame` for the open diff, when it has loaded.
+    /// nil until asked for (the view's Blame toggle), then a dictionary
+    /// keyed by new-file line number. Unlike the raw diff this is a heavy
+    /// read, so it is fetched on demand rather than with every diff.
+    @Published private(set) var blameLines: [Int: BlameLine]?
+    /// Whether the diff pane is showing the blame column right now.
+    @Published var showBlame = false
+    /// The revision the current `blameLines` were blamed against, and the
+    /// file id they belong to — so a toggle that stays within one file
+    /// doesn't refetch, and a stale blame is never drawn over a file it
+    /// wasn't computed for.
+    private var blameKey: String?
+    private var blameLineFor: FileChange.ID?
     /// Raw structure of the current diff, for hunk-level staging.
     private var parsedDiff = ParsedDiff()
     /// The open merge editor, shown over the graph like a diff. One at a
@@ -3148,6 +3161,8 @@ final class RepoState: ObservableObject, Identifiable {
         diffLines = []
         imageDiff = nil
         lfsPointer = nil
+        blameLines = nil
+        showBlame = false
         fileDiffTask?.cancel()
         fileDiffTask = Task {
             do {
@@ -3304,6 +3319,8 @@ final class RepoState: ObservableObject, Identifiable {
         diffLines = []
         imageDiff = nil
         lfsPointer = nil
+        blameLines = nil
+        showBlame = false
         fileDiffTask?.cancel()
         fileDiffTask = Task {
             do {
@@ -3522,6 +3539,8 @@ final class RepoState: ObservableObject, Identifiable {
         diffLines = []
         imageDiff = nil
         lfsPointer = nil
+        blameLines = nil
+        showBlame = false
         fileDiffTask?.cancel()
         fileDiffTask = Task {
             do {
@@ -3586,6 +3605,55 @@ final class RepoState: ObservableObject, Identifiable {
         }
     }
 
+    /// Load `git blame` for the currently open diff. Called when the user
+    /// turns the Blame column on; the result is keyed by new-file line
+    /// number so `DiffLineRow` can look up a line's author without the
+    /// two datastreams being entangled.
+    ///
+    /// Which revision to blame against is decided by whose line numbers the
+    /// diff's "+" side carries: the working tree for an unstaged diff, the
+    /// index (approximated by HEAD) for a staged one, and the viewed
+    /// commit itself for a per-commit diff. Blame is best-effort — an image
+    /// or LFS pointer diff has no text to blame, and a failing or empty
+    /// blame just leaves the column blank rather than surfacing a toast.
+    func loadBlame() {
+        guard let file = selectedFile else { return }
+        if imageDiff != nil || lfsPointer != nil {
+            blameLines = [:]
+            return
+        }
+        let revision: String?
+        let lineKey: String
+        if let hash = diffCommit {
+            revision = hash
+            lineKey = "commit:\(hash)"
+        } else if file.area == .staged {
+            revision = "HEAD"
+            lineKey = "staged:HEAD"
+        } else {
+            revision = nil
+            lineKey = "worktree"
+        }
+        // Reload whenever asked, unless the same revision is already cached
+        // for this file — blame is cheap enough that a stray call only
+        // matters when it duplicates an earlier one.
+        if blameLines != nil, blameKey == lineKey, blameLineFor == file.id {
+            return
+        }
+        let path = file.path
+        let fileID = file.id
+        blameLines = [:]
+        blameKey = lineKey
+        blameLineFor = fileID
+        Task {
+            let blamed = (try? await git.blame(path: path, revision: revision)) ?? [:]
+            // Only publish if the same file is still open and the same
+            // revision is still being asked for — selection may have moved.
+            guard selectedFile?.id == fileID, blameKey == lineKey else { return }
+            blameLines = blamed
+        }
+    }
+
     func closeDiff() {
         requestLeavingMergeEditor { [weak self] in
             self?.clearDiffAndMergeEditor()
@@ -3603,6 +3671,10 @@ final class RepoState: ObservableObject, Identifiable {
         imageDiff = nil
         lfsPointer = nil
         showRawPointer = false
+        blameLines = nil
+        showBlame = false
+        blameKey = nil
+        blameLineFor = nil
         // Same overlay slot (see viewIssue): whatever clears the diff
         // clears the merge editor with it.
         clearMergeEditor()

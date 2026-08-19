@@ -27,11 +27,15 @@ struct FileDiffView: View {
                 let hunksStageable = repo.diffCommit == nil
                     && repo.selectedFile?.status != "?"
                 let staged = repo.selectedFile?.area == .staged
+                let blame = repo.showBlame
+                    ? (repo.blameLines ?? [:])
+                    : nil
                 ScrollView([.vertical]) {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(repo.diffLines) { line in
                             DiffLineRow(
                                 line: line,
+                                blame: blame,
                                 hunkAction: hunksStageable && line.hunkIndex != nil
                                     ? (title: staged ? "Unstage Hunk" : "Stage Hunk",
                                        run: { repo.stageHunk(line.hunkIndex!) })
@@ -92,6 +96,25 @@ struct FileDiffView: View {
                         }
                         repo.closeDiff()
                     }
+                    .controlSize(.regular)
+                }
+
+                // Blame only applies to a textual diff — an image or LFS
+                // pointer has no lines to attribute — so it is hidden then.
+                if repo.diffLines.isEmpty == false,
+                   repo.imageDiff == nil, repo.lfsPointer == nil {
+                    Button {
+                        repo.showBlame.toggle()
+                        if repo.showBlame { repo.loadBlame() }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "person.crop.circle")
+                            Text("Blame")
+                        }
+                    }
+                    .buttonStyle(.pressEffect)
+                    .foregroundStyle(repo.showBlame ? Color.accentColor : .primary)
+                    .help("Show which commit last touched each line")
                     .controlSize(.regular)
                 }
 
@@ -334,6 +357,11 @@ struct LFSPointerSummary: View {
 
 struct DiffLineRow: View {
     let line: DiffLine
+    /// Blame records keyed by new-file line number, when the Blame column
+    /// is on. nil keeps the row in its plain line-number layout (the
+    /// pull-request diff view never enables it).
+    var blame: [Int: BlameLine]? = nil
+
     var hunkAction: (title: String, run: () -> Void)?
 
     private var background: Color {
@@ -351,6 +379,15 @@ struct DiffLineRow: View {
         case .del: return "-"
         default: return " "
         }
+    }
+
+    /// The blamed commit for this row's new-file line, if any: only rows
+    /// that map to a line in the finished file (adds and context) have one.
+    /// Deleted lines vanish from the blamed version, so they can never be
+    /// blamed.
+    private var blamed: BlameLine? {
+        guard let blame, let newNum = line.newNum else { return nil }
+        return blame[newNum]
     }
 
     var body: some View {
@@ -377,6 +414,9 @@ struct DiffLineRow: View {
                     .padding(.trailing, 4)
                 }
             } else {
+                if blame != nil {
+                    BlameCell(blamed: blamed)
+                }
                 Text(line.oldNum.map(String.init) ?? "")
                     .foregroundStyle(.tertiary)
                     .frame(width: 42, alignment: .trailing)
@@ -395,5 +435,55 @@ struct DiffLineRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(background)
         .textSelection(.enabled)
+    }
+}
+
+/// The author column shown when Blame is on: a short author name and the
+/// abbreviated commit hash, hover to see the commit's subject. Rows whose
+/// line has no committed blame (uncommitted new lines, deleted lines, or a
+/// blame that came back empty) render as a dim dash — an absence, not a
+/// value.
+private struct BlameCell: View {
+    let blamed: BlameLine?
+
+    var body: some View {
+        Group {
+            if let blamed {
+                if blamed.isUncommitted {
+                    Text("not committed")
+                        .foregroundStyle(.tertiary)
+                        .italic()
+                } else {
+                    HStack(spacing: 4) {
+                        Text(shortAuthor(blamed.author))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Text(blamed.shortHash)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .help(blameHelp(blamed))
+                }
+            } else {
+                Text("–")
+                    .foregroundStyle(.tertiary.opacity(0.4))
+            }
+        }
+        .frame(width: 140, alignment: .leading)
+        .padding(.trailing, 8)
+    }
+
+    /// Keep the column narrow: a personal name is the last path component
+    /// of the author string, or the whole string when only one word.
+    private func shortAuthor(_ author: String) -> String {
+        let trimmed = author.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return "unknown" }
+        let parts = trimmed.split(separator: " ")
+        return String(parts.last ?? "")
+    }
+
+    private func blameHelp(_ blamed: BlameLine) -> String {
+        let date = blamed.date.formatted(date: .abbreviated, time: .omitted)
+        let subject = blamed.summary.isEmpty ? "no message" : blamed.summary
+        return "\(blamed.shortHash) · \(blamed.author) · \(date) · \(subject)"
     }
 }
