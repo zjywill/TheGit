@@ -22,11 +22,26 @@ One command does the whole release:
 scripts/release.sh <MAJOR.MINOR.PATCH>
 ```
 
-> **Read this before running it.** That command waits for Apple to notarise,
-> twice, and verdicts for this Developer ID currently take hours — it will
-> sit there most of a working day. Until that changes, use the two-step flow
-> under "The flow that doesn't require sitting in front of a terminal" below.
-> Don't discover this by starting the blocking one and waiting.
+> **Check the queue before choosing how to run it.** That command waits for
+> Apple to notarise, twice, so how long it sits depends entirely on how fast
+> verdicts are coming back right now:
+>
+> ```bash
+> xcrun notarytool history --keychain-profile thegit
+> ```
+>
+> Compare `createdDate`s: submissions minutes apart mean verdicts are landing
+> in minutes — run the one command above and be done. Submissions hours apart,
+> or anything still `In Progress` from this morning, mean the slow queue is
+> back — use the two-step flow under "The flow that doesn't require sitting in
+> front of a terminal" below.
+>
+> Prefer the one command whenever the queue allows it. The two-step flow
+> publishes an unnotarised DMG first and repoints the tap at it, then replaces
+> both once the tickets land — so for a window of several minutes, `brew
+> upgrade` hands people a build Gatekeeper rejects. That is a real cost, worth
+> paying only against an actual hours-long wait. (Measured 2026-08-19: app
+> accepted ~2 minutes after submission, image about the same.)
 
 It checks the tree, runs the tests, builds the universal DMG, signs and
 notarises it, **verifies the notarisation tickets actually landed**, tags
@@ -163,9 +178,9 @@ past it". A resubmission doesn't jump the queue, it adds one more item to a
 slow one — and the submission it walked away from gets accepted anyway with
 nobody waiting to staple it. The defaults are deliberately 2h and 1.
 
-**The flow that doesn't require sitting in front of a terminal.** Until this
-team's verdicts get faster, cut releases in two steps rather than waiting out
-`release.sh`:
+**The flow that doesn't require sitting in front of a terminal.** When the
+queue is slow — check it the way the top of this file describes — cut releases
+in two steps rather than waiting out `release.sh`:
 
 ```bash
 NOTARIZE=0 ALLOW_UNNOTARISED=1 scripts/release.sh X.Y.Z   # minutes; ships with the workaround notes
