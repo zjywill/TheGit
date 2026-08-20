@@ -358,6 +358,7 @@ struct DiffLineRow: View {
             if line.kind == .hunk {
                 Text(line.text)
                     .foregroundStyle(.blue)
+                    .textSelection(.enabled)
                     .padding(.leading, 8)
                     .padding(.vertical, 3)
                 Spacer(minLength: 8)
@@ -386,14 +387,30 @@ struct DiffLineRow: View {
                 Text(marker)
                     .foregroundStyle(line.kind == .add ? .green : line.kind == .del ? .red : .secondary)
                     .frame(width: 16)
+                // Selectable text is the single most expensive thing in
+                // this row, and it is charged per Text: measured on an
+                // 838-line diff, a row that puts `.textSelection` on the
+                // HStack — making all four Texts selectable — costs
+                // 4.3ms of main thread per scrolled frame against 1.8ms
+                // for this one, and 32ms against 16ms to lay the panel
+                // out on open. A 120Hz frame is 8.3ms, so the four-Text
+                // row spent its whole budget on gutter digits nobody
+                // selects on purpose.
+                //
+                // Narrowing it costs a drag that sweeps the gutter up
+                // with the line, which only ever pollutes the paste. It
+                // does not cost cross-line selection: the modifier was
+                // applied per row, and rows have no selectable ancestor
+                // above them, so a selection could never span two lines
+                // here in the first place.
                 Text(line.text)
                     .lineLimit(1)
+                    .textSelection(.enabled)
                 Spacer(minLength: 0)
             }
         }
         .zoomFont(11, design: .monospaced)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(background)
-        .textSelection(.enabled)
     }
 }
