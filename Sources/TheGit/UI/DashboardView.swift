@@ -473,14 +473,10 @@ struct ActivitySection: View {
             .frame(maxWidth: .infinity, alignment: .topLeading)
             .padding(inset)
             .frame(maxHeight: .infinity, alignment: .topLeading)
-            .background(
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .fill(Color.primary.opacity(0.035))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
-            )
+            // Neo-brutalist bento: flat paper, hard ink border, no round.
+            .background(Rectangle().fill(Color.Neo.paper))
+            .overlay(Rectangle().strokeBorder(Color.Neo.ink, lineWidth: 1.5))
+            .neoShadow(y: 3, x: 3)
     }
 }
 
@@ -512,18 +508,17 @@ struct OpenRepoTile: View {
             // cards to measure.
             .frame(maxWidth: .infinity, minHeight: max(height, 120 * zoom))
             .background(
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .fill(Color.primary.opacity(hovering ? 0.05 : 0))
+                Rectangle().fill(hovering ? Color.Neo.paper : Color.Neo.paper.opacity(0.6))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .strokeBorder(
-                        Color.primary.opacity(hovering ? 0.22 : 0.13),
-                        style: StrokeStyle(lineWidth: 1, dash: [4 * zoom, 3 * zoom])
-                    )
+                Rectangle().strokeBorder(
+                    Color.Neo.ink,
+                    style: StrokeStyle(lineWidth: 2, dash: [4 * zoom, 3 * zoom])
+                )
             )
+            .neoShadow(y: hovering ? 3 : 4, x: hovering ? 3 : 4)
             .animation(.easeOut(duration: 0.12), value: hovering)
-            .contentShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .contentShape(Rectangle())
         }
         .buttonStyle(.rowPressEffect)
         .onHover { hovering = $0 }
@@ -585,19 +580,14 @@ struct RepoCardView: View {
             // minHeight, not height: a card taller than whatever has been
             // measured so far still shows all of itself.
             .frame(minHeight: height, alignment: .top)
-            .background(
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .fill(Color.primary.opacity(hovering ? 0.07 : 0.035))
-            )
-            // A border here is structure, not fake elevation: these are
-            // tiled cards on a plain background, and without an edge the
-            // fill alone leaves them soft-focused against it.
-            .overlay(
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
-            )
+            // Neo-brutalist card: the border IS the elevation now, and the
+            // hard offset shadow lifts the card by being heavier than the
+            // wall behind it.
+            .background(Rectangle().fill(Color.Neo.paper))
+            .overlay(Rectangle().strokeBorder(Color.Neo.ink, lineWidth: 2))
+            .neoShadow(y: hovering ? 6 : 4, x: hovering ? 6 : 4)
             .animation(.easeOut(duration: 0.12), value: hovering)
-            .contentShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .contentShape(Rectangle())
         }
         .buttonStyle(.rowPressEffect)
         .onHover { hovering = $0 }
@@ -694,11 +684,11 @@ struct RepoCardView: View {
                 Image(systemName: "arrow.triangle.branch").zoomFont(9)
                 Text(branch).lineLimit(1)
             }
-            .zoomFont(11, weight: .medium)
-            .foregroundStyle(Color.accentColor)
+            .zoomFont(11, weight: .bold)
+            .foregroundStyle(Color.Neo.ink)
             .padding(.horizontal, 6 * zoom)
             .padding(.vertical, 1 * zoom)
-            .background(Capsule().fill(Color.accentColor.opacity(0.14)))
+            .background(Rectangle().fill(Color.Neo.accent))
         } else if let head = repo.card?.head {
             // Detached HEAD has no name but the sha, and saying so matters
             // more here than anywhere: a card is where you decide which

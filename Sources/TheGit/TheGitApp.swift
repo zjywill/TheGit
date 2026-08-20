@@ -243,6 +243,9 @@ struct RootView: View {
         // Here rather than on the banner itself: showing the banner is this
         // stack's change, so this is the transaction its transition rides on.
         .animation(.easeOut(duration: reduceMotion ? 0 : 0.2), value: updates.update)
+        // Neo-brutalist skin: sets the shared accent to butter-yellow and
+        // warms the base chrome. Composed, so it can be dropped freely.
+        .neoBrutal()
         .toolbar { toolbarCommands }
         // Inside RootView, not on the WindowGroup root: SwiftUI quietly
         // reasserts title-bar properties when the screen below changes, and
@@ -311,7 +314,10 @@ struct AppTopBar: View {
     var body: some View {
         RepoTabsBar()
             .frame(height: Self.height)
-            .background(.bar)
+            .background(Color.Neo.chrome)
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(Color.Neo.ink).frame(height: 2)
+            }
     }
 }
 
@@ -1003,8 +1009,8 @@ struct RepoTab: View {
                     RoundedRectangle(cornerRadius: 6)
                         .fill(Color(nsColor: .windowBackgroundColor))
                 }
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(isActive ? Color.primary.opacity(0.08) : hovering ? Color.primary.opacity(0.04) : .clear)
+                Rectangle()
+                    .fill(isActive ? Color.Neo.ink : hovering ? Color.Neo.ink.opacity(0.06) : .clear)
                     .animation(.easeOut(duration: 0.12), value: hovering)
             }
         )
