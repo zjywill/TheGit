@@ -91,6 +91,20 @@ enum LFSParsers {
     /// Context lines count for both sides: an LFS file whose content
     /// changed keeps `version` as context and only moves oid and size.
     static func pointerDiff(_ diff: String) -> LFSPointerDiff? {
+        // Every textual diff the app opens is offered to this parser, and
+        // it used to walk all of them line by line — allocating a String
+        // per line — to answer "no" about files that were never LFS. That
+        // is a main-thread pass proportional to the diff: small on the
+        // 22KB file this was measured on (0.77ms, more than the real diff
+        // parser next to it), a third of a second on a 10MB one.
+        //
+        // A pointer is three short lines, so a diff of two of them cannot
+        // be large: the headers repeat the path at most six times (`diff
+        // --git` twice, `---`/`+++`, and a rename's `from`/`to`), and a
+        // macOS path stops at 1024 bytes. Six of those plus the oid lines
+        // and the hunk header do not reach 8KB, and anything past it is
+        // some other file's diff being asked the question.
+        guard diff.utf8.count <= 8192 else { return nil }
         var old: [String: String] = [:]
         var new: [String: String] = [:]
         for line in diff.split(whereSeparator: \.isNewline) {

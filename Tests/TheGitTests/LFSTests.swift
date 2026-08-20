@@ -126,6 +126,51 @@ final class LFSParserTests: XCTestCase {
         XCTAssertNil(LFSParsers.pointerDiff(""))
     }
 
+    /// Every textual diff the app opens is offered to this parser, so a
+    /// large one must be refused before it is walked line by line rather
+    /// than after — that pass is main-thread work proportional to the
+    /// diff, spent to answer "no" about a file that was never LFS.
+    func testLargeDiffIsRefusedWithoutBeingWalked() {
+        let body = (1...5000).map { "+line \($0)" }.joined(separator: "\n")
+        let diff = """
+        diff --git a/big.txt b/big.txt
+        --- a/big.txt
+        +++ b/big.txt
+        @@ -0,0 +1,5000 @@
+        \(body)
+        """
+        XCTAssertGreaterThan(diff.utf8.count, 8192)
+        XCTAssertNil(LFSParsers.pointerDiff(diff))
+    }
+
+    /// The refusal must not reach a real pointer diff. A rename repeats
+    /// the path six times over the headers, and a path can run to 1024
+    /// bytes — the longest pointer diff that can exist still parses.
+    func testLongestPossiblePointerDiffStillParses() {
+        let deep = (1...30).map { _ in String(repeating: "d", count: 30) }
+            .joined(separator: "/")
+        let oldPath = deep + "/before.psd"
+        let newPath = deep + "/after.psd"
+        let diff = """
+        diff --git a/\(oldPath) b/\(newPath)
+        similarity index 88%
+        rename from \(oldPath)
+        rename to \(newPath)
+        index df915ff..721938f 100644
+        --- a/\(oldPath)
+        +++ b/\(newPath)
+        @@ -1,3 +1,3 @@
+         version https://git-lfs.github.com/spec/v1
+        -oid sha256:2bff8d825500aae74df372b167f4b025ac962b100cdd0229ce3245ae824d89fc
+        -size 200000
+        +oid sha256:812fa82227414e6cf4f2882a0b0387a2d2d09d033dc56c75012d5ab3b09288b7
+        +size 150000
+        """
+        XCTAssertGreaterThan(oldPath.utf8.count, 900)
+        XCTAssertEqual(LFSParsers.pointerDiff(diff)?.old?.size, 200_000)
+        XCTAssertEqual(LFSParsers.pointerDiff(diff)?.new?.size, 150_000)
+    }
+
     // MARK: - Presentation
 
     func testShortOIDAndSize() {
