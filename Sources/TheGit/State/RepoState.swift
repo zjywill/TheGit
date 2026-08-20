@@ -359,6 +359,13 @@ final class RepoState: ObservableObject, Identifiable {
     private var workingTreeSelectionAnchorID: FileChange.ID?
     @Published var selectedFile: FileChange?
     @Published var diffLines: [DiffLine] = []
+    /// True from the moment a file is picked until its diff has been read.
+    /// The three published results (`diffLines`, `imageDiff`, `lfsPointer`)
+    /// are all empty in that window, and empty is also what a file with no
+    /// textual change looks like — without this the panel answered "No
+    /// textual changes to show" for the tens of milliseconds before the
+    /// content it does have arrives.
+    @Published private(set) var diffLoading = false
     @Published var imageDiff: ImageDiff?
     /// Set when the open diff is an LFS pointer diff: the view shows what
     /// the object is instead of three lines of oid text.
@@ -3148,6 +3155,7 @@ final class RepoState: ObservableObject, Identifiable {
         diffLines = []
         imageDiff = nil
         lfsPointer = nil
+        diffLoading = true
         fileDiffTask?.cancel()
         fileDiffTask = Task {
             do {
@@ -3158,6 +3166,7 @@ final class RepoState: ObservableObject, Identifiable {
                         else { return }
                         imageDiff = image
                         parsedDiff = ParsedDiff()
+                        diffLoading = false
                         return
                     }
                 } catch is CancellationError {
@@ -3173,8 +3182,10 @@ final class RepoState: ObservableObject, Identifiable {
                 lfsPointer = LFSParsers.pointerDiff(text)
                 parsedDiff = parsed
                 diffLines = parsed.lines
+                diffLoading = false
             } catch {
                 guard !Task.isCancelled else { return }
+                diffLoading = false
                 report(error)
             }
         }
@@ -3304,6 +3315,7 @@ final class RepoState: ObservableObject, Identifiable {
         diffLines = []
         imageDiff = nil
         lfsPointer = nil
+        diffLoading = true
         fileDiffTask?.cancel()
         fileDiffTask = Task {
             do {
@@ -3314,6 +3326,7 @@ final class RepoState: ObservableObject, Identifiable {
                         else { return }
                         imageDiff = image
                         parsedDiff = ParsedDiff()
+                        diffLoading = false
                         return
                     }
                 } catch is CancellationError {
@@ -3329,8 +3342,10 @@ final class RepoState: ObservableObject, Identifiable {
                 lfsPointer = LFSParsers.pointerDiff(text)
                 parsedDiff = parsed
                 diffLines = parsed.lines
+                diffLoading = false
             } catch {
                 guard !Task.isCancelled else { return }
+                diffLoading = false
                 report(error)
             }
         }
@@ -3522,6 +3537,7 @@ final class RepoState: ObservableObject, Identifiable {
         diffLines = []
         imageDiff = nil
         lfsPointer = nil
+        diffLoading = true
         fileDiffTask?.cancel()
         fileDiffTask = Task {
             do {
@@ -3532,6 +3548,7 @@ final class RepoState: ObservableObject, Identifiable {
                         else { return }
                         imageDiff = image
                         parsedDiff = ParsedDiff()
+                        diffLoading = false
                         return
                     }
                 } catch is CancellationError {
@@ -3556,8 +3573,10 @@ final class RepoState: ObservableObject, Identifiable {
                 lfsPointer = pointer
                 parsedDiff = parsed
                 diffLines = parsed.lines
+                diffLoading = false
             } catch {
                 guard !Task.isCancelled else { return }
+                diffLoading = false
                 report(error)
             }
         }
@@ -3602,6 +3621,7 @@ final class RepoState: ObservableObject, Identifiable {
         diffLines = []
         imageDiff = nil
         lfsPointer = nil
+        diffLoading = false
         showRawPointer = false
         // Same overlay slot (see viewIssue): whatever clears the diff
         // clears the merge editor with it.

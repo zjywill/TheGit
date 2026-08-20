@@ -17,10 +17,20 @@ struct FileDiffView: View {
             } else if let image = repo.imageDiff {
                 ImageDiffView(diff: image)
             } else if repo.diffLines.isEmpty {
-                Text("No textual changes to show")
-                    .zoomFont(12)
-                    .foregroundStyle(.secondary)
+                // Nothing, not a spinner: the read is tens of milliseconds
+                // and the header above already names the file, so the pane
+                // reads as opening rather than as broken. A spinner that
+                // lives that long is a flash, which is the thing this
+                // branch exists to stop.
+                Color.clear
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .overlay {
+                        if !repo.diffLoading {
+                            Text("No textual changes to show")
+                                .zoomFont(12)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
             } else {
                 // Hunk staging only applies to working-tree diffs of
                 // tracked files (untracked = stage the whole file).
