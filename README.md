@@ -26,6 +26,12 @@ universal, under 10 MB, no toolchain needed. Open it, drag TheGit to
 Applications, launch. It's signed with an Apple Developer ID and notarised by
 Apple, so Gatekeeper lets it straight through.
 
+Prefer Homebrew? The same signed app is also available as a cask:
+
+```bash
+brew install --cask zjywill/tap/thegit
+```
+
 Needs **macOS 14 Sonoma or later**. [Details](#requirements) below.
 
 ---
@@ -174,20 +180,18 @@ key is an item in the login keychain — delete it in Keychain Access for a
 genuinely clean slate.
 
 <details>
-<summary><b>Homebrew (not recommended)</b></summary>
-
-A cask exists, but the DMG is the supported path: the cask trips over
-third-party tap trust in Homebrew 6, refuses to install over a copy you
-dragged into `/Applications` yourself, and fails outright on anything older
-than Sonoma with *"This cask does not run on macOS versions older than
-Sonoma"* — which is the same macOS 14 requirement the DMG has, just reported
-as an install error instead of a launch one. If you still want it:
+<summary><b>Homebrew (alternative)</b></summary>
 
 ```bash
 brew install --cask zjywill/tap/thegit
 ```
 
-It installs the same signed `.app` the DMG carries. `brew trust --cask
+It installs the same signed `.app` the DMG carries. Three things to know:
+Homebrew 6 asks you to trust third-party taps; the cask won't install over a
+copy you dragged into `/Applications` yourself; and on anything older than
+Sonoma it stops with *"This cask does not run on macOS versions older than
+Sonoma"* — the same macOS 14 requirement the DMG has, reported at install
+time instead of at launch. `brew trust --cask
 zjywill/tap/thegit` if Homebrew says the tap is untrusted; `--force` if it
 complains about an existing `/Applications/TheGit.app`; `brew update && brew
 upgrade --cask thegit` to upgrade (quit TheGit first); `brew uninstall --cask
