@@ -13,7 +13,9 @@ import SwiftUI
 final class CommitHoverController: ObservableObject {
     @Published private(set) var shown: GraphRow?
 
-    static let showDelay: Duration = .milliseconds(450)
+    /// Longer than a tooltip's: the card is a paragraph to read, not a
+    /// label, so a pointer merely passing along the rows shouldn't raise it.
+    static let showDelay: Duration = .milliseconds(700)
     static let switchDelay: Duration = .milliseconds(160)
     static let hideGrace: Duration = .milliseconds(220)
     /// How far into the show delay the fetch starts: early enough that the
@@ -21,9 +23,21 @@ final class CommitHoverController: ObservableObject {
     /// crossing the row spawns no git process.
     static let prefetchDelay: Duration = .milliseconds(120)
 
+    /// Where the card's corner goes: the pointer, as of the moment the
+    /// card opened. Frozen at open so the card doesn't chase the cursor.
+    private(set) var shownPoint: CGPoint = .zero
+
     private var pending: Task<Void, Never>?
     /// The pointer is on the card itself; rows under it don't count.
     private var overCard = false
+    /// The live pointer, in the graph pane's space. Not published:
+    /// every move would re-lay-out the graph.
+    private var pointer: CGPoint = .zero
+
+    /// The pointer moved over a row. Cheap by design — a plain store.
+    func pointerMoved(to point: CGPoint) {
+        pointer = point
+    }
 
     func rowEntered(_ row: GraphRow, in repo: RepoState) {
         guard !overCard else { return }
@@ -37,8 +51,9 @@ final class CommitHoverController: ObservableObject {
             guard !Task.isCancelled else { return }
             Task { _ = await repo.hoverDetails(for: hash) }
             try? await Task.sleep(for: delay - lead)
-            guard !Task.isCancelled else { return }
-            self?.shown = row
+            guard !Task.isCancelled, let self else { return }
+            self.shownPoint = self.pointer
+            self.shown = row
         }
     }
 
@@ -75,20 +90,13 @@ final class CommitHoverController: ObservableObject {
     }
 }
 
-/// The bounds of the row whose card is up, or nil while none is.
-struct CommitHoverAnchorKey: PreferenceKey {
-    static let defaultValue: Anchor<CGRect>? = nil
-    static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) {
-        value = nextValue() ?? value
-    }
-}
-
-/// Where the card goes relative to its row, in the graph pane's space.
+/// Where the card goes relative to the pointer, in the graph pane's space.
 ///
-/// Below the row by default, hanging off its bottom edge; above it only
-/// when the room below is less than a typical card needs and there is
-/// more of it above. Pure, so the corner cases — a row at the bottom of
-/// the pane, a narrow pane — are testable without a window.
+/// Down and to the right of the cursor, the way a pointer-anchored panel
+/// goes — so the card lands on what the pointer has already passed rather
+/// than over the rows being read. It flips above or slides left when that
+/// corner has no room. Pure, so the corner cases — a pointer at the
+/// bottom of the pane, a narrow pane — are testable without a window.
 struct CommitHoverPlacement: Equatable {
     /// Leading edge, from the pane's leading edge.
     let x: CGFloat
@@ -100,20 +108,26 @@ struct CommitHoverPlacement: Equatable {
     /// The most height the chosen side offers.
     let maxHeight: CGFloat
 
-    static let gap: CGFloat = 4
     static let margin: CGFloat = 8
     static let baseWidth: CGFloat = 400
+    /// Clear of the cursor itself, close enough to read as hanging off it.
+    static let pointerInset = CGPoint(x: 14, y: 16)
     /// What a card with a body and a handful of files comes to at zoom 1 —
     /// the threshold under which the side with more room wins.
     static let typicalHeight: CGFloat = 360
 
-    init(row: CGRect, pane: CGSize, messageX: CGFloat, zoom: CGFloat) {
+    init(pointer: CGPoint, pane: CGSize, zoom: CGFloat) {
         width = max(0, min(Self.baseWidth * zoom, pane.width - Self.margin * 2))
-        x = max(Self.margin, min(messageX, pane.width - width - Self.margin))
-        let roomBelow = pane.height - row.maxY - Self.gap - Self.margin
-        let roomAbove = row.minY - Self.gap - Self.margin
+        x = max(
+            Self.margin,
+            min(pointer.x + Self.pointerInset.x, pane.width - width - Self.margin)
+        )
+        let top = pointer.y + Self.pointerInset.y
+        let bottom = pointer.y - Self.pointerInset.y
+        let roomBelow = pane.height - top - Self.margin
+        let roomAbove = bottom - Self.margin
         below = roomBelow >= Self.typicalHeight * zoom || roomBelow >= roomAbove
-        inset = below ? row.maxY + Self.gap : pane.height - row.minY + Self.gap
+        inset = below ? top : pane.height - bottom
         maxHeight = max(0, below ? roomBelow : roomAbove)
     }
 }

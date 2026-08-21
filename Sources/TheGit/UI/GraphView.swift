@@ -20,6 +20,8 @@ struct GraphView: View {
     /// The rows' scroll offset is read in this space — see the dismiss
     /// on the stack below.
     private static let scrollSpace = "GraphScroll"
+    /// The pane the hover card is placed in; the pointer is reported in it.
+    static let paneSpace = "GraphPane"
 
     var body: some View {
         let allRows = repo.snapshot.graphRows
@@ -148,8 +150,7 @@ struct GraphView: View {
                                 repo: repo,
                                 scrollX: scrollX,
                                 tinted: tintRows,
-                                hover: hover,
-                                showsCard: hover.shown?.id == row.id
+                                hover: hover
                             )
                             // Infinite scroll: reaching the last row loads 500 more.
                             .onAppear { repo.loadMoreIfNeeded(row) }
@@ -215,33 +216,22 @@ struct GraphView: View {
                 .allowsHitTesting(false)
             }
         }
-        .overlayPreferenceValue(CommitHoverAnchorKey.self) { anchor in
-            hoverCardLayer(
-                anchor: anchor,
-                badgeWidth: badgeWidth,
-                graphWidth: graphWidth
-            )
-        }
+        .coordinateSpace(name: Self.paneSpace)
+        .overlay { hoverCardLayer() }
         }
         }
     }
 
     /// The hover card, floated over the rows rather than placed in one: a
     /// row's own overlay is drawn under the rows after it and clipped to
-    /// the list, and a lazy stack doesn't honour zIndex. The anchor is the
-    /// shown row's bounds, published by the row itself.
+    /// the list, and a lazy stack doesn't honour zIndex. It hangs off the
+    /// pointer, at the spot the pointer was when the card opened.
     @ViewBuilder
-    private func hoverCardLayer(
-        anchor: Anchor<CGRect>?, badgeWidth: CGFloat, graphWidth: CGFloat
-    ) -> some View {
+    private func hoverCardLayer() -> some View {
         GeometryReader { geo in
-            if let row = hover.shown, let anchor {
-                let rect = geo[anchor]
-                // Lined up with the message column: the card expands the
-                // text, so it starts where the text does.
-                let messageX = rect.minX + (badgeWidth > 0 ? badgeWidth + 8 : 0) + graphWidth + 8
+            if let row = hover.shown {
                 let place = CommitHoverPlacement(
-                    row: rect, pane: geo.size, messageX: messageX, zoom: zoom
+                    pointer: hover.shownPoint, pane: geo.size, zoom: zoom
                 )
                 CommitHoverCard(
                     repo: repo, row: row, width: place.width, maxHeight: place.maxHeight
@@ -252,7 +242,7 @@ struct GraphView: View {
                 // Per row, so moving the card to a neighbour fades the new
                 // one in rather than morphing the old one's text.
                 .id(row.id)
-                // In from the row's edge; out at once — by the time it
+                // In from the pointer's side; out at once — by the time it
                 // goes the pointer is elsewhere.
                 .transition(.asymmetric(
                     insertion: reduceMotion
@@ -268,6 +258,7 @@ struct GraphView: View {
                 .padding(place.below ? .top : .bottom, place.inset)
             }
         }
+        .allowsHitTesting(hover.shown != nil)
         .animation(
             reduceMotion ? .easeOut(duration: 0.12) : .easeOutStrong(0.18),
             value: hover.shown?.id
@@ -470,7 +461,6 @@ struct GraphRowView: View {
     var hover: CommitHoverController? = nil
     /// True while this row's card is up — it then publishes its bounds so
     /// the card can sit against it.
-    var showsCard = false
     @ObservedObject private var avatars = AvatarStore.shared
     @Environment(\.uiZoom) private var zoom
 
@@ -592,8 +582,11 @@ struct GraphRowView: View {
                 hover?.rowLeft(row)
             }
         }
-        .anchorPreference(key: CommitHoverAnchorKey.self, value: .bounds) {
-            showsCard ? $0 : nil
+        // The card hangs off the pointer, so the pointer's whereabouts
+        // are tracked while it's over a row. A plain store in the
+        // controller — nothing published, nothing re-laid-out.
+        .onContinuousHover(coordinateSpace: .named(GraphView.paneSpace)) { phase in
+            if case .active(let point) = phase { hover?.pointerMoved(to: point) }
         }
         .onTapGesture {
             hover?.dismiss()

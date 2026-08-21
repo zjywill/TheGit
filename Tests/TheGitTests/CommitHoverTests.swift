@@ -39,60 +39,49 @@ final class CommitHoverTests: XCTestCase {
     // MARK: - placement
 
     private let pane = CGSize(width: 900, height: 700)
+    private let inset = CommitHoverPlacement.pointerInset
 
-    func testRowWithRoomBelowGetsCardBelowAtMessageColumn() {
-        let row = CGRect(x: 8, y: 100, width: 884, height: 32)
-        let p = CommitHoverPlacement(row: row, pane: pane, messageX: 220, zoom: 1)
+    func testCardHangsOffThePointersBottomRight() {
+        let p = CommitHoverPlacement(pointer: CGPoint(x: 220, y: 100), pane: pane, zoom: 1)
         XCTAssertTrue(p.below)
-        XCTAssertEqual(p.x, 220)
+        XCTAssertEqual(p.x, 220 + inset.x)
         XCTAssertEqual(p.width, 400)
-        XCTAssertEqual(p.inset, 132 + CommitHoverPlacement.gap)
-        XCTAssertEqual(p.maxHeight, 700 - 132 - CommitHoverPlacement.gap - CommitHoverPlacement.margin)
+        XCTAssertEqual(p.inset, 100 + inset.y)
+        XCTAssertEqual(p.maxHeight, 700 - 100 - inset.y - CommitHoverPlacement.margin)
     }
 
-    func testRowNearTheBottomGetsCardAbove() {
-        let row = CGRect(x: 8, y: 600, width: 884, height: 32)
-        let p = CommitHoverPlacement(row: row, pane: pane, messageX: 220, zoom: 1)
+    func testPointerNearTheBottomGetsCardAbove() {
+        let p = CommitHoverPlacement(pointer: CGPoint(x: 220, y: 600), pane: pane, zoom: 1)
         XCTAssertFalse(p.below)
-        // Anchored by the bottom edge: the card's bottom sits a gap over the row.
-        XCTAssertEqual(p.inset, 700 - 600 + CommitHoverPlacement.gap)
-        XCTAssertEqual(p.maxHeight, 600 - CommitHoverPlacement.gap - CommitHoverPlacement.margin)
+        // Anchored by the bottom edge: the card's bottom sits above the pointer.
+        XCTAssertEqual(p.inset, 700 - (600 - inset.y))
+        XCTAssertEqual(p.maxHeight, 600 - inset.y - CommitHoverPlacement.margin)
     }
 
     /// A short pane has room for a full card on neither side; the one with
     /// more room wins rather than the default.
     func testShortPanePicksTheRoomierSide() {
         let short = CGSize(width: 900, height: 400)
-        let upper = CommitHoverPlacement(
-            row: CGRect(x: 0, y: 100, width: 900, height: 32), pane: short, messageX: 0, zoom: 1
-        )
-        let lower = CommitHoverPlacement(
-            row: CGRect(x: 0, y: 300, width: 900, height: 32), pane: short, messageX: 0, zoom: 1
-        )
+        let upper = CommitHoverPlacement(pointer: CGPoint(x: 0, y: 100), pane: short, zoom: 1)
+        let lower = CommitHoverPlacement(pointer: CGPoint(x: 0, y: 300), pane: short, zoom: 1)
         XCTAssertTrue(upper.below)
         XCTAssertFalse(lower.below)
     }
 
     func testCardStaysInsideANarrowPane() {
         let narrow = CGSize(width: 300, height: 700)
-        let p = CommitHoverPlacement(
-            row: CGRect(x: 0, y: 100, width: 300, height: 32), pane: narrow, messageX: 200, zoom: 1
-        )
+        let p = CommitHoverPlacement(pointer: CGPoint(x: 200, y: 100), pane: narrow, zoom: 1)
         XCTAssertEqual(p.width, 300 - CommitHoverPlacement.margin * 2)
         XCTAssertEqual(p.x, CommitHoverPlacement.margin)
     }
 
-    func testMessageColumnFarRightSlidesCardLeftToFit() {
-        let p = CommitHoverPlacement(
-            row: CGRect(x: 0, y: 100, width: 900, height: 32), pane: pane, messageX: 700, zoom: 1
-        )
+    func testPointerFarRightSlidesCardLeftToFit() {
+        let p = CommitHoverPlacement(pointer: CGPoint(x: 700, y: 100), pane: pane, zoom: 1)
         XCTAssertEqual(p.x, 900 - 400 - CommitHoverPlacement.margin)
     }
 
     func testZoomScalesWidthAndThreshold() {
-        let p = CommitHoverPlacement(
-            row: CGRect(x: 0, y: 100, width: 900, height: 32), pane: pane, messageX: 0, zoom: 1.5
-        )
+        let p = CommitHoverPlacement(pointer: CGPoint(x: 0, y: 100), pane: pane, zoom: 1.5)
         XCTAssertEqual(p.width, 600)
     }
 }
