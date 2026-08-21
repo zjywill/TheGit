@@ -6,7 +6,7 @@
 
 **A native Git client for macOS that doesn't ship a browser.**
 
-14 MB. One process. ~95 MB of RAM with a repository open.<br>
+29 MB. One process. ~160 MB of RAM with three repositories open.<br>
 No account, no telemetry, no sign-in wall.
 
 [![Release](https://img.shields.io/github/v/release/zjywill/TheGit?color=blue)](https://github.com/zjywill/TheGit/releases/latest)
@@ -21,17 +21,16 @@ No account, no telemetry, no sign-in wall.
 
 ## Get it
 
-```bash
-brew install --cask zjywill/tap/thegit
-```
+[**Download the DMG**](https://github.com/zjywill/TheGit/releases/latest) —
+universal, under 10 MB, no toolchain needed. Open it, drag TheGit to
+Applications, launch. It's signed with an Apple Developer ID and notarised by
+Apple, so Gatekeeper lets it straight through.
 
-Or [**download the DMG**](https://github.com/zjywill/TheGit/releases/latest) —
-universal, no toolchain needed. Signed with an Apple Developer ID and notarised
-by Apple, so it just opens. [Install details](#install) are below.
+Needs **macOS 14 Sonoma or later**. [Details](#requirements) below.
 
 ---
 
-## Why it's 45× smaller
+## Why it's 20× smaller
 
 The mainstream desktop clients ship a browser to draw a commit graph.
 GitKraken is an Electron app: Chromium, Node, and a fleet of helper processes,
@@ -42,15 +41,16 @@ whole architecture, and it's the whole performance story.
 
 | | TheGit | GitKraken |
 |---|---:|---:|
-| Application bundle | **14 MB** (universal) | 621 MB |
-| Release DMG | **4.9 MB** | — |
-| Processes at rest | **1** | 7+ |
-| Resident memory, repo open | **~95 MB** | ~1.6 GB |
+| Application bundle | **29 MB** (universal) | 626 MB |
+| Release DMG | **9.6 MB** | — |
+| Processes | **1** | 9 |
+| Resident memory | **~160 MB**, three repos open | ~1.3 GB, one repo open |
 | Chromium bundled | none | 261 MB |
 
 Where that shows up in use:
 
-- **Launch is instant** — no Chromium bootstrap, no splash screen.
+- **Launch is instant** — no Chromium bootstrap, no splash screen, and the
+  last session's state is drawn from a cache before `git` is asked anything.
 - **Nothing indexes in the background** — an FSEvents watcher decides when
   state actually changed, instead of a timer polling every repo you ever opened.
 - **The graph is laid out in Swift, not in a DOM** — one pass over the commit
@@ -66,9 +66,9 @@ exactly as they do in the terminal.
 The trade is deliberate — TheGit is macOS-only and does exactly what `git`
 does. It won't grow a cross-platform UI toolkit or a built-in issue tracker.
 
-> Measured on macOS 26.5 / Apple M4 Pro with one mid-size repository open;
-> GitKraken's figures are summed across all its processes. Measure your own
-> with Activity Monitor.
+> Measured on macOS 26.6 / Apple M4 Pro, TheGit 0.11.2 after two hours of use
+> against GitKraken 12.4 freshly launched; GitKraken's figures are summed
+> across all its processes. Measure your own with Activity Monitor.
 
 ---
 
@@ -77,41 +77,51 @@ does. It won't grow a cross-platform UI toolkit or a built-in issue tracker.
 🌳 **A commit graph you can read.** Branch lines carry their own color rather
 than inheriting a lane's, so a branch stays one color for its whole life even
 when lanes get reused. Uncommitted work shows up as a dashed WIP node at the
-top, connected to HEAD.
+top, connected to HEAD. Select a commit and its lineage lights up; hover a row
+and a card shows the full message, author and refs.
 
 🪟 **Three panes, one screen.** Branches left, graph middle, staging right.
 Click a file and the diff overlays the graph instead of shoving the panes
-around; <kbd>Esc</kbd> goes back.
+around; <kbd>Esc</kbd> goes back. Arrow keys step through files, and image
+diffs render side by side.
 
 📚 **Everything in the sidebar.** Local and remote branches in a foldable tree
-with the current branch pinned on top, plus Tags, Stashes, Worktrees,
-Submodules, Git LFS, and — if `gh` or `glab` is logged in — your open
-Pull/Merge Requests.
+with the current branch pinned on top, a commit-activity heatmap, plus Tags,
+Stashes, Worktrees, Submodules, Git LFS, and — if `gh` or `glab` is logged
+in — your open Pull Requests and Issues, readable in full without leaving the
+app: rendered description, timeline, and the PR's whole diff.
 
-✅ **Staging that matches how you work.** Stage or unstage per file or all at
-once, discard, ignore (repo-wide or `.git/info/exclude`), stash just the staged
-or just the unstaged, create a patch from a file's changes, amend.
+✅ **Staging that matches how you work.** Stage or unstage per file, in a
+multi-selection, or all at once; discard, ignore (repo-wide or
+`.git/info/exclude`, including files already tracked), stash just the staged
+or just the unstaged, create a patch from a file's changes, amend. When `git`
+refuses an operation over uncommitted changes, TheGit offers to stash and
+restore around it.
 
 🔀 **Branch operations without the man page.** Merge, rebase, cherry-pick,
 revert, reset, fast-forward, tag, push/pull/fetch, set upstream, create a
 worktree — from the context menus. When a merge or rebase stops on a conflict,
-you get Continue and Abort plus "take ours / take theirs" per file.
+you get Continue and Abort, "take ours / take theirs" per file, and a built-in
+conflict editor for the rest.
 
 🧹 **Cleanup.** Finds branches whose PR is merged, branches squash-merged into
-the default branch, branches whose upstream is gone, and stale worktrees —
-counts the commits that would be lost, and deletes nothing until you click.
+the default branch, branches whose upstream is gone, merged remote branches,
+and stale worktrees — counts the commits that would be lost, lets you filter
+by kind and by risk, and deletes nothing until you tick the rows and click.
 
-🤖 **AI commit messages** *(optional, off by default)*. Point it at any
-OpenAI- or Anthropic-compatible provider and **Generate** turns your staged
-diff into a commit message — Conventional Commits or a plain summary, in
-English, Chinese, or whatever the repo already uses. The API key goes in the
-login keychain, never UserDefaults.
+🤖 **AI commit messages and pull requests** *(optional, off by default)*.
+Point it at any OpenAI- or Anthropic-compatible provider and **Generate**
+turns your staged diff into a commit message — Conventional Commits or a plain
+summary, in English, Chinese, or whatever the repo already uses — or drafts
+the title and body of a pull request and submits it through `gh`/`glab`. The
+API key goes in the login keychain, never UserDefaults.
 
 👀 **It notices changes made elsewhere.** Commit, checkout or edit from a
 terminal and the view refreshes itself.
 
-🗂️ **Multiple repositories in tabs**, and five UI zoom levels
-(<kbd>⌘=</kbd> / <kbd>⌘-</kbd> / <kbd>⌘0</kbd>).
+🗂️ **Multiple repositories in tabs**, with a Dashboard tab that keeps a card
+per repository — open PRs, issues, a year of activity — and five UI zoom
+levels (<kbd>⌘=</kbd> / <kbd>⌘-</kbd> / <kbd>⌘0</kbd>).
 
 ---
 
@@ -122,63 +132,27 @@ filesystem. Three features can reach the network, and you control all three:
 
 | Feature | Reaches | Default |
 |---|---|---|
-| Author avatars | Gravatar, GitHub | **Off** — View menu |
-| AI commit messages | the provider you configured | **Off** — Settings |
+| Author avatars | Gravatar, GitHub, GitLab | **Off** — View menu |
+| AI commit messages / PRs | the provider you configured | **Off** — Settings |
 | Update check | `api.github.com`, once per launch | On — one request, no identifiers |
 
-Pull request listing uses the `gh` / `glab` CLI you already authenticated;
-TheGit never handles those tokens itself.
+Pull request and issue listing uses the `gh` / `glab` CLI you already
+authenticated; TheGit never handles those tokens itself.
 
 ---
 
 ## Install
 
-### Homebrew (recommended)
-
-```bash
-brew install --cask zjywill/tap/thegit
-```
-
-A cask, so it installs the same signed universal `.app` the DMG carries,
-straight into `/Applications` — no Xcode toolchain, no copying it there
-yourself.
-
-It used to be a formula that built from source, and that had a cost worth
-naming: Homebrew's build environment can't reach the login keychain, so the
-Developer ID certificate wasn't there and the bundle came out ad-hoc signed.
-An ad-hoc bundle gets a fresh identity on every rebuild, and macOS keys
-keychain items to the identity that stored them — so every upgrade asked for
-your AI API key again. The cask ships one stable signature, and the prompt
-happens once.
-
-Coming from the old formula, once:
-
-```bash
-brew uninstall thegit && brew install --cask zjywill/tap/thegit
-```
-
-Already dragged TheGit into `/Applications` from a DMG? A cask won't install
-over a copy Homebrew didn't put there — it stops with *"It seems there is
-already an App at '/Applications/TheGit.app'"*. Hand that copy over:
-
-```bash
-brew install --cask --force zjywill/tap/thegit
-```
-
-(`--adopt` is the gentler flag, but it only accepts a copy that's already the
-same version; `--force` replaces whatever is sitting there.)
-
 ### DMG
 
 Every release ships a universal `.dmg` on the
-[Releases page](https://github.com/zjywill/TheGit/releases/latest) — no
-toolchain, no Homebrew.
+[Releases page](https://github.com/zjywill/TheGit/releases/latest). Open it,
+drag TheGit to Applications, launch it.
 
-Signed with an Apple Developer ID and notarised by Apple, with the ticket
-stapled to both the image and the app inside it. Open it, drag TheGit to
-Applications, launch it. No Gatekeeper detour, and none even on a Mac that's
-offline — the stapled ticket is what makes that true, which is why it's
-checked before a release is tagged.
+The image and the app inside it are signed with an Apple Developer ID and
+notarised by Apple, with the ticket stapled to both — so there's no Gatekeeper
+detour, not even on a Mac that's offline. That's checked before every release
+is tagged.
 
 ### Upgrade
 
@@ -188,70 +162,37 @@ never downloads or installs anything by itself — the banner links to the
 release page, and dismissing it silences that version for good.
 **Check for Updates…** in the TheGit menu asks on demand.
 
-```bash
-brew update && brew upgrade --cask thegit
-```
+To upgrade, quit TheGit, open the new DMG and drag it over the old copy. Your
+settings and the API key in the keychain carry over; the signature is stable
+across releases, so nothing asks for the key again.
 
-Quit TheGit first — a running app keeps its old bundle. `brew update` must
-report "Updated 1 tap"; "Already up-to-date" means the tap never moved.
+### Uninstall
 
-<details>
-<summary><b>Let an AI agent install it for you</b></summary>
-
-Using Claude Code, Codex, or any agent with a terminal? Paste this:
-
-```text
-Install TheGit (https://github.com/zjywill/TheGit), a native macOS Git
-client, on this Mac via Homebrew:
-
-1. brew install --cask zjywill/tap/thegit
-   — a cask, so it puts the signed .app straight into /Applications; if
-   Homebrew says the tap is untrusted, run: brew trust --cask zjywill/tap/thegit
-   — if it stops with "there is already an App at /Applications/TheGit.app",
-   that's an older copy dragged from a DMG: rerun with --cask --force
-2. Verify: brew list --cask --versions thegit, then open /Applications/TheGit.app
-
-If it's already installed, upgrade instead: quit TheGit, then run
-brew update && brew upgrade --cask thegit
-If it was installed with the old build-from-source formula, migrate once:
-brew uninstall thegit && brew install --cask zjywill/tap/thegit
-```
-
-</details>
+Drag `/Applications/TheGit.app` to the Trash. Settings live in the
+`com.zjywill.TheGit` `defaults` domain and the saved window state; the AI API
+key is an item in the login keychain — delete it in Keychain Access for a
+genuinely clean slate.
 
 <details>
-<summary><b>Homebrew tap trust, versions, uninstall</b></summary>
+<summary><b>Homebrew (not recommended)</b></summary>
 
-Homebrew 6 asks you to trust third-party taps. Installing by full name records
-that trust; if a later command says the tap is being ignored:
-
-```bash
-brew trust --cask zjywill/tap/thegit
-```
-
-Which version you're on:
+A cask exists, but the DMG is the supported path: the cask trips over
+third-party tap trust in Homebrew 6, refuses to install over a copy you
+dragged into `/Applications` yourself, and fails outright on anything older
+than Sonoma with *"This cask does not run on macOS versions older than
+Sonoma"* — which is the same macOS 14 requirement the DMG has, just reported
+as an install error instead of a launch one. If you still want it:
 
 ```bash
-brew list --cask --versions thegit
+brew install --cask zjywill/tap/thegit
 ```
 
-Uninstall:
-
-```bash
-brew uninstall --cask thegit && brew untap zjywill/tap
-```
-
-The app in `/Applications` goes with it — it's the cask's only artifact, so
-there's nothing left to `rm` by hand. Your settings survive an upgrade and an
-uninstall alike; to take those too:
-
-```bash
-brew uninstall --zap --cask thegit
-```
-
-`--zap` adds the `com.zjywill.TheGit` `defaults` domain and the saved window
-state. The API key in the login keychain outlives both — delete it in
-Keychain Access for a genuinely clean slate.
+It installs the same signed `.app` the DMG carries. `brew trust --cask
+zjywill/tap/thegit` if Homebrew says the tap is untrusted; `--force` if it
+complains about an existing `/Applications/TheGit.app`; `brew update && brew
+upgrade --cask thegit` to upgrade (quit TheGit first); `brew uninstall --cask
+thegit && brew untap zjywill/tap` to remove it. Coming from the very old
+build-from-source formula: `brew uninstall thegit` first.
 
 </details>
 
@@ -259,10 +200,12 @@ Keychain Access for a genuinely clean slate.
 
 ## Requirements
 
-- macOS 14 (Sonoma) or later
+- **macOS 14 (Sonoma) or later.** TheGit is built on SwiftUI APIs that
+  shipped with Sonoma, so it doesn't run on Ventura or earlier — neither the
+  DMG nor the cask. Apple supports Sonoma on every Mac from 2018 on.
 - `git` on your `PATH`
+- Optional: `git-lfs`, and `gh` or `glab` for pull requests and issues
 - Xcode 15+ / Swift 5.9 toolchain **to build** (not needed for the DMG)
-- Optional: `git-lfs`, and `gh` or `glab` for pull requests
 
 <details>
 <summary><b>Build it yourself</b></summary>
