@@ -186,17 +186,21 @@ genuinely clean slate.
 brew install --cask zjywill/tap/thegit
 ```
 
-It installs the same signed `.app` the DMG carries. Three things to know:
-Homebrew 6 asks you to trust third-party taps; the cask won't install over a
-copy you dragged into `/Applications` yourself; and on anything older than
-Sonoma it stops with *"This cask does not run on macOS versions older than
-Sonoma"* — the same macOS 14 requirement the DMG has, reported at install
-time instead of at launch. `brew trust --cask
-zjywill/tap/thegit` if Homebrew says the tap is untrusted; `--force` if it
-complains about an existing `/Applications/TheGit.app`; `brew update && brew
-upgrade --cask thegit` to upgrade (quit TheGit first); `brew uninstall --cask
-thegit && brew untap zjywill/tap` to remove it. Coming from the very old
-build-from-source formula: `brew uninstall thegit` first.
+Installs the same signed `.app` the DMG carries into `/Applications`.
+Requires macOS 14 Sonoma or later and Homebrew 4.0+.
+
+Upgrade (quit TheGit first):
+
+```bash
+brew update && brew upgrade --cask thegit
+```
+
+If an install or upgrade fails, uninstall and install again:
+
+```bash
+brew uninstall --cask thegit; brew untap zjywill/tap
+brew install --cask --force zjywill/tap/thegit
+```
 
 </details>
 
