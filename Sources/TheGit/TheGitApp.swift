@@ -50,6 +50,15 @@ struct TheGitApp: App {
     }
 
     init() {
+        // AppKit waits 1.5 s of a perfectly still pointer before it shows a
+        // tooltip, and every `.help` in the app goes through that one
+        // timer. On 28pt toolbar buttons that reads as "the hint never
+        // comes". This is the public NSUserDefaults knob for it (in ms),
+        // read once when the tooltip manager is first created — so it has
+        // to be registered here, before anything can be hovered. A
+        // registered default, not a write: a user's own `defaults write`
+        // still wins, and nothing lands in their plist.
+        UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 400])
         // Needed when launched via `swift run` (no app bundle).
         NSApplication.shared.setActivationPolicy(.regular)
         NSApplication.shared.activate(ignoringOtherApps: true)
