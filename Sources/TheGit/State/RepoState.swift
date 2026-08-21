@@ -2627,16 +2627,37 @@ final class RepoState: ObservableObject, Identifiable {
     /// A delete is running. A batch is many git calls, and clicking the
     /// button twice while it works would ask git to delete gone branches.
     @Published var cleaning = false
+    /// Which tags are picked in the sheet. Narrows what the list shows and
+    /// what "Select all" ticks; rows already ticked stay ticked when they
+    /// scroll out of the filter, so the Delete count is always the truth.
+    @Published var cleanupFilter = CleanupFilter()
 
     var selectedCleanupCandidates: [CleanupCandidate] {
         cleanupCandidates.filter { cleanupSelection.contains($0.id) }
+    }
+
+    var visibleCleanupCandidates: [CleanupCandidate] {
+        cleanupCandidates.filter(cleanupFilter.matches)
     }
 
     func openCleanup() {
         showCleanup = true
         cleanupUndo = []
         cleanupSelection = []
+        // Fresh scan, fresh view: a tag left over from last time would hide
+        // rows behind a sheet that claims to show what the scan found.
+        cleanupFilter = CleanupFilter()
         Task { await scanCleanup() }
+    }
+
+    /// A second click on the picked tag clears it — the tag is the only
+    /// place that state is shown, so it has to be the place it is undone.
+    func toggleCleanupKind(_ kind: CleanupFilter.Kind) {
+        cleanupFilter.kind = cleanupFilter.kind == kind ? nil : kind
+    }
+
+    func toggleCleanupSafety(_ safety: CleanupFilter.Safety) {
+        cleanupFilter.safety = cleanupFilter.safety == safety ? nil : safety
     }
 
     func scanCleanup() async {
@@ -2663,8 +2684,16 @@ final class RepoState: ObservableObject, Identifiable {
         }
     }
 
+    /// "All" means the rows on screen. Ticks on rows a tag has hidden are
+    /// left alone either way: the user put them there under a different
+    /// tag, and a checkbox they can't see shouldn't be what removes them.
     func selectAllCleanup(_ selected: Bool) {
-        cleanupSelection = selected ? Set(cleanupCandidates.map(\.id)) : []
+        let visible = visibleCleanupCandidates.map(\.id)
+        if selected {
+            cleanupSelection.formUnion(visible)
+        } else {
+            cleanupSelection.subtract(visible)
+        }
     }
 
     /// A tracking ref can outlive the branch on the server indefinitely.

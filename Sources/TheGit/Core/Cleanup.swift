@@ -2,6 +2,59 @@ import Foundation
 
 /// Something the repo has finished with, plus the evidence for saying so.
 /// Nothing here is ever acted on without the user clicking it.
+/// The tag row in the Clean sheet. A long-lived repo's scan mixes local
+/// branches, remote branches and worktrees in one list, and "which of
+/// these can I one-click?" cuts across all three — so there is a tag per
+/// kind and a tag per answer, at most one of each. Nothing picked means
+/// everything, which is also what the sheet opens with.
+struct CleanupFilter: Equatable {
+    enum Kind: CaseIterable, Hashable {
+        case local, remote, worktree
+
+        var title: String {
+            switch self {
+            case .local: return "Local"
+            case .remote: return "Remote"
+            case .worktree: return "Worktrees"
+            }
+        }
+
+        func matches(_ candidate: CleanupCandidate) -> Bool {
+            switch self {
+            case .local: return candidate.isLocalBranch
+            case .remote: return candidate.isRemoteBranch
+            case .worktree: return candidate.isWorktree
+            }
+        }
+    }
+
+    enum Safety: CaseIterable, Hashable {
+        case safe, risky
+
+        /// Same words as the subtitle, so the tag and the count it narrows
+        /// read as one thing.
+        var title: String {
+            switch self {
+            case .safe: return "Safe"
+            case .risky: return "Needs a look"
+            }
+        }
+
+        func matches(_ candidate: CleanupCandidate) -> Bool {
+            candidate.isSafe == (self == .safe)
+        }
+    }
+
+    var kind: Kind?
+    var safety: Safety?
+
+    var isEmpty: Bool { kind == nil && safety == nil }
+
+    func matches(_ candidate: CleanupCandidate) -> Bool {
+        (kind?.matches(candidate) ?? true) && (safety?.matches(candidate) ?? true)
+    }
+}
+
 struct CleanupCandidate: Identifiable, Hashable {
     enum Target: Hashable {
         /// `tip` is kept so a delete can be undone: `git branch <name> <tip>`

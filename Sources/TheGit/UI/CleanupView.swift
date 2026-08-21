@@ -14,6 +14,10 @@ struct CleanupView: View {
             header
             Divider()
             if !repo.cleanupCandidates.isEmpty {
+                if showsFilterBar {
+                    filterBar
+                    Divider()
+                }
                 selectionBar
                 Divider()
             }
@@ -182,6 +186,72 @@ struct CleanupView: View {
         .padding(.vertical, 12)
     }
 
+    // MARK: - Filter bar
+
+    /// The row earns its place only when it can narrow something: a scan
+    /// that found nothing but merged local branches has one tag per group
+    /// lit and nothing to switch to, and a row of one is just a label.
+    /// A picked tag stays even when its count has dropped to zero, so the
+    /// user can always un-pick it.
+    private var showsFilterBar: Bool {
+        let kinds = CleanupFilter.Kind.allCases.filter { count(of: $0) > 0 }
+        let safeties = CleanupFilter.Safety.allCases.filter { count(of: $0) > 0 }
+        return kinds.count > 1 || safeties.count > 1 || !repo.cleanupFilter.isEmpty
+    }
+
+    /// Counts are per tag, not per intersection: "Remote 60" stays 60 with
+    /// Safe picked, because it answers "how many remotes are there", and a
+    /// number that shifted as you clicked around would not answer anything.
+    private func count(of kind: CleanupFilter.Kind) -> Int {
+        repo.cleanupCandidates.filter(kind.matches).count
+    }
+
+    private func count(of safety: CleanupFilter.Safety) -> Int {
+        repo.cleanupCandidates.filter(safety.matches).count
+    }
+
+    private var filterBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                CleanupFilterChip(
+                    title: "All",
+                    count: repo.cleanupCandidates.count,
+                    isOn: repo.cleanupFilter.isEmpty
+                ) {
+                    repo.cleanupFilter = CleanupFilter()
+                }
+                chipDivider
+                ForEach(CleanupFilter.Kind.allCases, id: \.self) { kind in
+                    let on = repo.cleanupFilter.kind == kind
+                    if on || count(of: kind) > 0 {
+                        CleanupFilterChip(title: kind.title, count: count(of: kind), isOn: on) {
+                            repo.toggleCleanupKind(kind)
+                        }
+                    }
+                }
+                chipDivider
+                ForEach(CleanupFilter.Safety.allCases, id: \.self) { safety in
+                    let on = repo.cleanupFilter.safety == safety
+                    if on || count(of: safety) > 0 {
+                        CleanupFilterChip(title: safety.title, count: count(of: safety), isOn: on) {
+                            repo.toggleCleanupSafety(safety)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 7)
+        }
+        .animation(.easeOut(duration: 0.12), value: repo.cleanupFilter)
+    }
+
+    private var chipDivider: some View {
+        Rectangle()
+            .fill(Color.primary.opacity(0.12))
+            .frame(width: 1, height: 12)
+            .padding(.horizontal, 2)
+    }
+
     // MARK: - Selection bar
 
     /// Selecting all is a checkbox rather than a button so it sits in the
@@ -190,8 +260,9 @@ struct CleanupView: View {
     private var selectAll: Binding<Bool> {
         Binding(
             get: {
-                !repo.cleanupCandidates.isEmpty
-                    && repo.cleanupSelection.count == repo.cleanupCandidates.count
+                let visible = repo.visibleCleanupCandidates
+                return !visible.isEmpty
+                    && visible.allSatisfy { repo.cleanupSelection.contains($0.id) }
             },
             set: { repo.selectAllCleanup($0) }
         )
@@ -252,10 +323,12 @@ struct CleanupView: View {
             }
         } else if repo.cleanupCandidates.isEmpty {
             centered { allClear }
+        } else if repo.visibleCleanupCandidates.isEmpty {
+            centered { nothingMatches }
         } else {
             ScrollView {
                 VStack(spacing: 0) {
-                    ForEach(Array(repo.cleanupCandidates.enumerated()), id: \.element.id) { index, candidate in
+                    ForEach(Array(repo.visibleCleanupCandidates.enumerated()), id: \.element.id) { index, candidate in
                         CleanupRow(
                             candidate: candidate,
                             index: index,
@@ -295,6 +368,24 @@ struct CleanupView: View {
                 .foregroundStyle(.secondary)
         }
         .transition(.opacity.combined(with: .scale(scale: 0.96)))
+    }
+
+    /// Not the green tick: the repo still has things to clean, just none
+    /// behind these tags. A way out sits right there so the sheet never
+    /// looks empty for a reason the user has to work out.
+    private var nothingMatches: some View {
+        VStack(spacing: 6) {
+            Text("Nothing matches these tags")
+                .zoomFont(12, weight: .medium)
+                .foregroundStyle(.secondary)
+            Button {
+                repo.cleanupFilter = CleanupFilter()
+            } label: {
+                Text("Show all").zoomFont(11)
+            }
+            .controlSize(.small)
+        }
+        .transition(.opacity)
     }
 
     private func centered<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
@@ -345,6 +436,37 @@ struct CleanupView: View {
         .padding(.vertical, 10)
         .animation(.easeOut(duration: 0.16), value: repo.cleanupUndo.count)
         .animation(.easeOut(duration: 0.16), value: repo.cleanupError)
+    }
+}
+
+/// One tag. Filled in the accent colour when picked, a quiet grey when not;
+/// the count rides along in the same capsule so the tag says what it will
+/// show before it is clicked.
+private struct CleanupFilterChip: View {
+    let title: String
+    let count: Int
+    let isOn: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Text(title)
+                Text("\(count)")
+                    .monospacedDigit()
+                    .opacity(0.65)
+            }
+            .zoomFont(10, weight: .medium)
+            .foregroundStyle(isOn ? Color.white : Color.secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+                Capsule().fill(isOn ? Color.accentColor : Color.primary.opacity(0.07))
+            )
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.pressEffect)
+        .animation(.easeOut(duration: 0.12), value: isOn)
     }
 }
 
