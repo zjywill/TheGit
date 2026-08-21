@@ -3137,6 +3137,42 @@ final class RepoState: ObservableObject, Identifiable {
         }
     }
 
+    // MARK: - Commit hover card
+
+    /// What the graph's hover card has shown so far, by hash. A commit's
+    /// message and file list never change under its hash, so nothing here
+    /// ever goes stale; the cap only bounds a long session's memory. Not
+    /// published on purpose — the card reads it, and nothing else on
+    /// screen should re-lay-out because a tooltip loaded.
+    private var hoverDetailCache: [String: CommitHoverDetails] = [:]
+    private var hoverDetailTasks: [String: Task<CommitHoverDetails?, Never>] = [:]
+    private static let hoverDetailCap = 400
+
+    /// Already-fetched details, for a card that wants to open complete
+    /// rather than grow a frame later.
+    func cachedHoverDetails(for hash: String) -> CommitHoverDetails? {
+        hoverDetailCache[hash]
+    }
+
+    /// Details for the hover card, fetched at most once per hash however
+    /// many rows ask. Failure is nil, not a toast: a tooltip that doesn't
+    /// appear is not an event.
+    func hoverDetails(for hash: String) async -> CommitHoverDetails? {
+        if let cached = hoverDetailCache[hash] { return cached }
+        if let running = hoverDetailTasks[hash] { return await running.value }
+        let task = Task<CommitHoverDetails?, Never> { [git] in
+            try? await git.commitHoverDetails(hash)
+        }
+        hoverDetailTasks[hash] = task
+        let details = await task.value
+        hoverDetailTasks[hash] = nil
+        if let details {
+            if hoverDetailCache.count >= Self.hoverDetailCap { hoverDetailCache.removeAll() }
+            hoverDetailCache[hash] = details
+        }
+        return details
+    }
+
     func selectCommitFile(_ file: FileChange) {
         requestLeavingMergeEditor { [weak self] in
             self?.selectCommitFileImmediately(file)

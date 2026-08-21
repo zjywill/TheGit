@@ -211,9 +211,17 @@ actor GitClient {
     }
 
     /// Files touched by a commit, with their status letters.
+    ///
+    /// `-m --first-parent` is what makes a merge answer at all: plain `git
+    /// show` prints a merge as a combined diff, which lists only the files
+    /// that differ from *every* parent — nothing, for a clean merge. Against
+    /// the first parent it lists what the merge brought onto its branch,
+    /// which is what the graph row means by "this commit". For a commit
+    /// with one parent the two spellings are identical.
     func commitFiles(_ hash: String) async throws -> [FileChange] {
         let out = try await run([
-            "show", "--name-status", "--format=", "--find-renames", "-z", hash,
+            "show", "--name-status", "--format=", "--find-renames", "-z",
+            "-m", "--first-parent", hash,
         ])
         var fields = out.components(separatedBy: "\0")
         while fields.last?.isEmpty == true { fields.removeLast() }
@@ -241,8 +249,29 @@ actor GitClient {
     }
 
     /// One file's diff within a commit (works for root commits too).
+    /// Against the first parent for the same reason as `commitFiles`.
     func commitFileDiff(_ hash: String, path: String) async throws -> String {
-        try await run(["show", "--format=", hash, "--", path])
+        try await run(["show", "--format=", "-m", "--first-parent", hash, "--", path])
+    }
+
+    /// The graph hover card's view of a commit: its whole message, and its
+    /// files against the first parent with line counts. The file list is
+    /// the review-diff shape because that parser already knows numstat —
+    /// one `show` per listing, both `-z`, see `reviewFiles`.
+    func commitHoverDetails(_ hash: String) async throws -> CommitHoverDetails {
+        async let message = commitMessage(hash)
+        async let numstat = run([
+            "show", "--numstat", "--format=", "--find-renames", "-z", "--no-ext-diff",
+            "-m", "--first-parent", hash,
+        ])
+        async let nameStatus = run([
+            "show", "--name-status", "--format=", "--find-renames", "-z",
+            "-m", "--first-parent", hash,
+        ])
+        return try await CommitHoverDetails(
+            message: message,
+            files: GitParsers.reviewFiles(numstat: numstat, nameStatus: nameStatus)
+        )
     }
 
     func diff(path: String, staged: Bool) async throws -> String {

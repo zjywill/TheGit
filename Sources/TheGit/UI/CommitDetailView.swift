@@ -100,8 +100,12 @@ struct CommitFileRow: View {
     @State private var hovering = false
     @Environment(\.uiZoom) private var zoom
 
-    var statusColor: Color {
-        switch file.status {
+    var statusColor: Color { Self.color(for: file.status) }
+
+    /// git's letter in the colour the whole app uses for it; the hover
+    /// card's rows borrow it so a file reads the same on both.
+    static func color(for status: Character) -> Color {
+        switch status {
         case "A": return .green
         case "M": return .yellow
         case "D": return .red

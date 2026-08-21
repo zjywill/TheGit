@@ -14,6 +14,12 @@ struct GraphView: View {
 
     /// The pane's current width, for the row-tint gate below.
     @State private var paneWidth: CGFloat = 0
+    /// The commit hover card: which row's is up, and the timers around it.
+    @StateObject private var hover = CommitHoverController()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The rows' scroll offset is read in this space — see the dismiss
+    /// on the stack below.
+    private static let scrollSpace = "GraphScroll"
 
     var body: some View {
         let allRows = repo.snapshot.graphRows
@@ -141,7 +147,9 @@ struct GraphView: View {
                                 searchMode: searching,
                                 repo: repo,
                                 scrollX: scrollX,
-                                tinted: tintRows
+                                tinted: tintRows,
+                                hover: hover,
+                                showsCard: hover.shown?.id == row.id
                             )
                             // Infinite scroll: reaching the last row loads 500 more.
                             .onAppear { repo.loadMoreIfNeeded(row) }
@@ -168,7 +176,16 @@ struct GraphView: View {
                     .id(row.id)
                 }
             }
+            // Scrolling closes the card: its row is moving out from under
+            // it, and a pointer on the wheel has stopped reading. One
+            // observer on the stack, not one per row.
+            .onGeometryChange(for: CGFloat.self) {
+                $0.frame(in: .named(Self.scrollSpace)).minY
+            } action: { _ in
+                hover.dismiss()
+            }
         }
+        .coordinateSpace(name: Self.scrollSpace)
         // Sidebar tag/branch clicks land here: jump the graph to the commit.
         .onChange(of: repo.scrollTarget) { _, target in
             if let target {
@@ -198,8 +215,63 @@ struct GraphView: View {
                 .allowsHitTesting(false)
             }
         }
+        .overlayPreferenceValue(CommitHoverAnchorKey.self) { anchor in
+            hoverCardLayer(
+                anchor: anchor,
+                badgeWidth: badgeWidth,
+                graphWidth: graphWidth
+            )
         }
         }
+        }
+    }
+
+    /// The hover card, floated over the rows rather than placed in one: a
+    /// row's own overlay is drawn under the rows after it and clipped to
+    /// the list, and a lazy stack doesn't honour zIndex. The anchor is the
+    /// shown row's bounds, published by the row itself.
+    @ViewBuilder
+    private func hoverCardLayer(
+        anchor: Anchor<CGRect>?, badgeWidth: CGFloat, graphWidth: CGFloat
+    ) -> some View {
+        GeometryReader { geo in
+            if let row = hover.shown, let anchor {
+                let rect = geo[anchor]
+                // Lined up with the message column: the card expands the
+                // text, so it starts where the text does.
+                let messageX = rect.minX + (badgeWidth > 0 ? badgeWidth + 8 : 0) + graphWidth + 8
+                let place = CommitHoverPlacement(
+                    row: rect, pane: geo.size, messageX: messageX, zoom: zoom
+                )
+                CommitHoverCard(
+                    repo: repo, row: row, width: place.width, maxHeight: place.maxHeight
+                ) {
+                    hover.dismiss()
+                }
+                .onHover { hover.cardHovered($0) }
+                // Per row, so moving the card to a neighbour fades the new
+                // one in rather than morphing the old one's text.
+                .id(row.id)
+                // In from the row's edge; out at once — by the time it
+                // goes the pointer is elsewhere.
+                .transition(.asymmetric(
+                    insertion: reduceMotion
+                        ? .opacity
+                        : .opacity.combined(with: .offset(y: place.below ? -4 : 4)),
+                    removal: .identity
+                ))
+                .frame(
+                    maxWidth: .infinity, maxHeight: .infinity,
+                    alignment: place.below ? .topLeading : .bottomLeading
+                )
+                .padding(.leading, place.x)
+                .padding(place.below ? .top : .bottom, place.inset)
+            }
+        }
+        .animation(
+            reduceMotion ? .easeOut(duration: 0.12) : .easeOutStrong(0.18),
+            value: hover.shown?.id
+        )
     }
 }
 
@@ -394,6 +466,11 @@ struct GraphRowView: View {
     var scrollX: CGFloat = 0
     /// Off in narrow panes — see the gate in GraphView.
     var tinted = true
+    /// The graph's hover-card controller; nil where rows have no card.
+    var hover: CommitHoverController? = nil
+    /// True while this row's card is up — it then publishes its bounds so
+    /// the card can sit against it.
+    var showsCard = false
     @ObservedObject private var avatars = AvatarStore.shared
     @Environment(\.uiZoom) private var zoom
 
@@ -505,7 +582,23 @@ struct GraphRowView: View {
                 : tinted ? LaneCanvas.color(row.columnColor).opacity(0.055) : .clear
         )
         .contentShape(Rectangle())
-        .onTapGesture { repo.selectedCommit = row.commit.hash }
+        // A pause over the row raises the commit's card; see the controller
+        // for the timings. The click that follows selects the commit, and
+        // the panel that opens says everything the card did.
+        .onHover { inside in
+            if inside {
+                hover?.rowEntered(row, in: repo)
+            } else {
+                hover?.rowLeft(row)
+            }
+        }
+        .anchorPreference(key: CommitHoverAnchorKey.self, value: .bounds) {
+            showsCard ? $0 : nil
+        }
+        .onTapGesture {
+            hover?.dismiss()
+            repo.selectedCommit = row.commit.hash
+        }
         .contextTarget(row.commit.hash, repo)
         .contextMenu { menuItems }
         // Drag a commit onto a branch to cherry-pick it there. The WIP row

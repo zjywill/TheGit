@@ -1783,4 +1783,59 @@ final class RepoIntegrationTests: XCTestCase {
         await repo.scanCleanup()
         XCTAssertEqual(repo.cleanupSelection, ["branch:feat-b"])
     }
+
+    // MARK: - commit details
+
+    /// A merge commit's files are what it brought onto its branch. Plain
+    /// `git show` prints a combined diff for a merge, which is empty for a
+    /// clean one — the detail panel listed nothing, and the hover card
+    /// would have too.
+    func testMergeCommitListsFilesAgainstFirstParent() async throws {
+        let path = try await makeRepo("merge-files")
+        try await git(path, ["checkout", "-qb", "feature"])
+        try write("one\ntwo\n", to: path + "/feature.txt")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "add feature"])
+        try await git(path, ["checkout", "-q", "main"])
+        try await git(path, ["merge", "--no-ff", "-q", "-m", "merge feature", "feature"])
+        let merge = try await git(path, ["rev-parse", "HEAD"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let client = GitClient(repoPath: path)
+        let files = try await client.commitFiles(merge)
+        XCTAssertEqual(files.map(\.path), ["feature.txt"])
+        XCTAssertEqual(files.map(\.status), ["A"])
+        let diff = try await client.commitFileDiff(merge, path: "feature.txt")
+        XCTAssertTrue(diff.contains("+two"))
+
+        let details = try await client.commitHoverDetails(merge)
+        XCTAssertEqual(details.message, "merge feature")
+        XCTAssertEqual(details.files.map(\.path), ["feature.txt"])
+        XCTAssertEqual(details.additions, 2)
+        XCTAssertEqual(details.deletions, 0)
+    }
+
+    func testHoverDetailsCarryBodyAndCountsAndAreCached() async throws {
+        let path = try await makeRepo("hover-details")
+        try write("seed\nmore\n", to: path + "/seed.txt")
+        try write("x\n", to: path + "/new.txt")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "subject line\n\nthe body\nsecond line"])
+        let head = try await git(path, ["rev-parse", "HEAD"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let repo = RepoState(path: path)
+        XCTAssertNil(repo.cachedHoverDetails(for: head))
+        let fetched = await repo.hoverDetails(for: head)
+        let details = try XCTUnwrap(fetched)
+        XCTAssertEqual(details.body, "the body\nsecond line")
+        XCTAssertEqual(details.files.map(\.path).sorted(), ["new.txt", "seed.txt"])
+        XCTAssertEqual(details.additions, 2)
+        XCTAssertEqual(details.deletions, 0)
+        XCTAssertEqual(repo.cachedHoverDetails(for: head), details)
+        // Garbage in gives nil out, never a thrown error or a toast.
+        let missing = await repo.hoverDetails(for: "0000000000000000000000000000000000000000")
+        XCTAssertNil(missing)
+        XCTAssertNil(repo.errorNotice)
+    }
 }

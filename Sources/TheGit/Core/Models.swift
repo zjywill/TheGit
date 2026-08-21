@@ -30,6 +30,27 @@ struct Commit: Identifiable, Hashable, Codable {
     }
 }
 
+/// What the graph's hover card fetches for a commit: the part of it that
+/// the log row doesn't already carry. Immutable under its hash, so a repo
+/// keeps these for as long as it is open.
+struct CommitHoverDetails: Hashable {
+    /// The full message, subject line included.
+    let message: String
+    /// Against the first parent, with per-file line counts.
+    let files: [ReviewFile]
+
+    /// The paragraphs under the subject — everything after the first blank
+    /// line — or nothing for a one-line commit. git's own split: `%s` is
+    /// the first paragraph with its newlines folded, `%b` is the rest.
+    var body: String {
+        guard let gap = message.range(of: "\n\n") else { return "" }
+        return message[gap.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var additions: Int { files.reduce(0) { $0 + $1.additions } }
+    var deletions: Int { files.reduce(0) { $0 + $1.deletions } }
+}
+
 enum BranchKind: Hashable, Codable {
     case local
     case remote(String) // remote name, e.g. "origin"
