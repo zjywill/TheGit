@@ -539,11 +539,34 @@ struct GraphRowView: View {
                 .frame(width: 3, height: 16 * zoom)
                 .opacity(bright ? 1 : 0.45)
 
+            // The card is raised by the message text alone, not by the
+            // whole row: it hangs off the pointer, so a pause out over the
+            // empty middle of a row would pop it up nowhere near anything
+            // that explains it.
             Text(row.commit.subject)
                 .zoomFont(12)
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .opacity(bright ? 1 : 0.55)
+                .contentShape(Rectangle())
+                // A pause over the message raises the commit's card; see the
+                // controller for the timings. The click that follows selects
+                // the commit, and the panel that opens says everything the
+                // card did.
+                .onHover { inside in
+                    if inside {
+                        hover?.rowEntered(row, in: repo)
+                    } else {
+                        hover?.rowLeft(row)
+                    }
+                }
+                // The card hangs off the pointer, so the pointer's
+                // whereabouts are tracked while it's over the message. A
+                // plain store in the controller — nothing published,
+                // nothing re-laid-out.
+                .onContinuousHover(coordinateSpace: .named(GraphView.paneSpace)) { phase in
+                    if case .active(let point) = phase { hover?.pointerMoved(to: point) }
+                }
 
             Spacer(minLength: 12)
 
@@ -572,22 +595,6 @@ struct GraphRowView: View {
                 : tinted ? LaneCanvas.color(row.columnColor).opacity(0.055) : .clear
         )
         .contentShape(Rectangle())
-        // A pause over the row raises the commit's card; see the controller
-        // for the timings. The click that follows selects the commit, and
-        // the panel that opens says everything the card did.
-        .onHover { inside in
-            if inside {
-                hover?.rowEntered(row, in: repo)
-            } else {
-                hover?.rowLeft(row)
-            }
-        }
-        // The card hangs off the pointer, so the pointer's whereabouts
-        // are tracked while it's over a row. A plain store in the
-        // controller — nothing published, nothing re-laid-out.
-        .onContinuousHover(coordinateSpace: .named(GraphView.paneSpace)) { phase in
-            if case .active(let point) = phase { hover?.pointerMoved(to: point) }
-        }
         .onTapGesture {
             hover?.dismiss()
             repo.selectedCommit = row.commit.hash
