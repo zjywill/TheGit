@@ -533,18 +533,25 @@ private struct SearchablePicker: View {
                             onSelect(row.id)
                             isPresented = false
                         } label: {
-                            VStack(alignment: .leading, spacing: 1) {
-                                HStack(spacing: 4 * zoom) {
-                                    if row.id == selection {
-                                        Image(systemName: "checkmark").zoomFont(10)
-                                    }
+                            HStack(alignment: .firstTextBaseline, spacing: 4 * zoom) {
+                                // The tick sits in a gutter that is there
+                                // whether or not it is filled, so titles line
+                                // up down the list instead of the selected one
+                                // stepping to the right.
+                                Image(systemName: "checkmark")
+                                    .zoomFont(10)
+                                    .frame(width: 10 * zoom, alignment: .leading)
+                                    .opacity(row.id == selection ? 1 : 0)
+                                    // Decorative: the trait below says it.
+                                    .accessibilityHidden(true)
+                                VStack(alignment: .leading, spacing: 1) {
                                     Text(row.title).zoomFont(12)
-                                }
-                                if let detail = row.detail {
-                                    Text(detail)
-                                        .zoomFont(10)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
+                                    if let detail = row.detail {
+                                        Text(detail)
+                                            .zoomFont(10)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
                                 }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -553,6 +560,7 @@ private struct SearchablePicker: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .accessibilityAddTraits(row.id == selection ? .isSelected : [])
                     }
                     if matches.isEmpty {
                         Text(allowsFreeText ? "No match — press ⏎ to use what you typed." : "No match")
