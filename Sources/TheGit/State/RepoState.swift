@@ -1430,7 +1430,7 @@ final class RepoState: ObservableObject, Identifiable {
 
                 commitMessage = ""
                 var answer = ""
-                for try await delta in AIClient.stream(request, endpoint: endpoint) {
+                for try await delta in AIGateway.stream(request, endpoint: endpoint) {
                     answer += delta
                     guard !discardGeneration else { return }
                     commitMessage = CommitMessageGenerator.clean(answer)
@@ -2520,7 +2520,7 @@ final class RepoState: ObservableObject, Identifiable {
 
                 prError = nil
                 var answer = ""
-                for try await delta in AIClient.stream(request, endpoint: endpoint) {
+                for try await delta in AIGateway.stream(request, endpoint: endpoint) {
                     answer += delta
                     (prTitle, prBody) = PullRequestGenerator.parse(answer)
                 }

@@ -1,275 +1,154 @@
+import AIKit
 import XCTest
 @testable import TheGit
 
-/// Everything here is offline: request building and response parsing are
-/// pure functions on strings, which is the whole reason they are separate
-/// from AIClient.
+/// The wire protocols themselves live in AIKit, which replays recorded
+/// traffic from every vendor against them. What is left here is TheGit's
+/// own half of the seam: which catalog entries it offers, how it asks, and
+/// what it says when a provider says no. All offline.
 final class AIProviderCatalogTests: XCTestCase {
 
     func testBundledCatalogDecodes() {
         let all = AIProviderCatalog.all
-        XCTAssertGreaterThan(all.count, 10, "providers.json didn't make it into the bundle")
-        XCTAssertEqual(all.first?.id, "custom", "the bring-your-own entry leads the list")
-        XCTAssertNotNil(AIProviderCatalog.provider(id: "anthropic"))
+        XCTAssertTrue(AIProviderCatalog.isLoaded, ProviderCatalog.diagnostics)
+        XCTAssertGreaterThan(all.count, 10, "AIKit's catalog bundle didn't make it into the build")
+        XCTAssertEqual(all.first?.id, "custom-provider", "the bring-your-own entry leads the list")
+        // The chooser's front page compactMaps these, so a renamed id
+        // upstream would quietly leave a hole in it.
+        for id in ["openai", "anthropic", "google", "deepseek", "openrouter", "ollama"] {
+            XCTAssertNotNil(AIProviderCatalog.provider(id: id), "\(id) is missing from the catalog")
+        }
+    }
+
+    /// Only one entry per id, and the bring-your-own one isn't listed twice.
+    func testCatalogHasNoDuplicates() {
+        let ids = AIProviderCatalog.all.map(\.id)
+        XCTAssertEqual(ids.count, Set(ids).count)
+    }
+
+    /// A settings pane with one API Key field can't drive a browser login,
+    /// so the OAuth-only entries stay out of the list.
+    func testOAuthOnlyProvidersAreHidden() {
+        XCTAssertNil(AIProviderCatalog.provider(id: "dimcode-api-oauth"))
+        XCTAssertFalse(AIProviderCatalog.all.contains { $0.id == "dimcode-api-oauth" })
+    }
+
+    /// Settings written before the catalog moved into AIKit still name the
+    /// hand-configured endpoint "custom".
+    func testLegacyCustomIDStillResolves() {
+        XCTAssertEqual(
+            AIProviderCatalog.provider(id: AIProviderCatalog.legacyCustomID)?.id,
+            AIProviderCatalog.custom.id
+        )
     }
 
     /// Every entry has to be usable: an endpoint, and either models or a
     /// runtime lookup.
     func testEveryProviderIsUsable() {
-        for provider in AIProviderCatalog.all where provider.id != "custom" {
+        for provider in AIProviderCatalog.all where provider.id != AIProviderCatalog.custom.id {
             XCTAssertFalse(provider.baseUrl.isEmpty, "\(provider.id) has no endpoint")
             XCTAssertNotNil(URL(string: provider.baseUrl), "\(provider.id) has a bad endpoint")
+            XCTAssertNotNil(provider.wireProtocol, "\(provider.id) speaks a protocol AIKit can't")
             XCTAssertTrue(
-                !provider.models.isEmpty || provider.needsModelLookup,
+                !provider.modelList.isEmpty || provider.needsModelLookup,
                 "\(provider.id) offers no models and no way to find any"
             )
         }
     }
 
-    func testUnknownAdapterFallsBackToOpenAI() throws {
-        let json = """
-        {"id":"x","name":"X","adapter":"openai-responses","auth":{"header":"Authorization","prefix":"Bearer "},"baseUrl":"https://x.test","models":[]}
-        """
-        let provider = try JSONDecoder().decode(AIProvider.self, from: Data(json.utf8))
-        XCTAssertEqual(provider.adapter, .openai)
+    /// The endpoints that decide their own model list — the "fetch models"
+    /// button exists for these.
+    func testLocalRuntimesAskTheEndpointForModels() throws {
+        for id in ["ollama", "lm-studio", AIProviderCatalog.custom.id] {
+            let provider = try XCTUnwrap(AIProviderCatalog.provider(id: id))
+            XCTAssertTrue(provider.needsModelLookup, "\(id) should look its models up at runtime")
+        }
+    }
+
+    func testChoosingAProviderLandsOnAModel() throws {
+        let anthropic = try XCTUnwrap(AIProviderCatalog.provider(id: "anthropic"))
+        XCTAssertFalse(anthropic.startingModelID.isEmpty)
+        XCTAssertTrue(anthropic.modelList.contains { $0.id == anthropic.startingModelID })
+        // Nothing to land on for an endpoint whose models aren't known yet.
+        XCTAssertEqual(AIProviderCatalog.custom.startingModelID, "")
     }
 }
 
-final class AIWireTests: XCTestCase {
+final class AIGatewayTests: XCTestCase {
 
-    private func endpoint(
-        _ adapter: AIAdapterKind,
-        base: String,
-        model: String = "m",
-        header: String = "Authorization",
-        prefix: String = "Bearer ",
-        noThink: AIThinkingOff? = nil
-    ) -> AIEndpoint {
-        let provider = AIProvider(
-            id: "p", name: "P", adapter: adapter,
-            auth: .init(header: header, prefix: prefix),
-            baseUrl: base, defaultModelId: nil, customModels: nil, models: []
-        )
-        return AIEndpoint(
-            provider: provider, baseURL: URL(string: base)!, apiKey: "k",
-            model: model, noThink: noThink
-        )
-    }
-
-    private func body(_ wire: AIWireAdapter, _ endpoint: AIEndpoint) throws -> [String: Any] {
-        let data = try wire.body(AIRequest(system: "s", user: "u"), endpoint)
-        return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-    }
-
-    // MARK: - URLs
-
-    func testOpenAIChatURL() {
-        XCTAssertEqual(
-            OpenAIWire().chatURL(endpoint(.openai, base: "https://api.openai.com/v1")).absoluteString,
-            "https://api.openai.com/v1/chat/completions"
-        )
-        // DeepSeek's endpoint carries no version segment and serves the
-        // unversioned path too.
-        XCTAssertEqual(
-            OpenAIWire().chatURL(endpoint(.openai, base: "https://api.deepseek.com")).absoluteString,
-            "https://api.deepseek.com/chat/completions"
-        )
-    }
-
-    /// MiniMax's Anthropic endpoint already ends in /v1; "v1/messages" on
-    /// top of it would be /v1/v1/messages.
-    func testAnthropicURLDoesNotDoubleTheVersion() {
-        XCTAssertEqual(
-            AnthropicWire().chatURL(endpoint(.anthropic, base: "https://api.anthropic.com")).absoluteString,
-            "https://api.anthropic.com/v1/messages"
-        )
-        XCTAssertEqual(
-            AnthropicWire().chatURL(endpoint(.anthropic, base: "https://api.minimax.io/anthropic/v1")).absoluteString,
-            "https://api.minimax.io/anthropic/v1/messages"
-        )
-    }
-
-    func testGeminiChatURLKeepsTheActionSuffix() {
-        let url = GeminiWire().chatURL(
-            endpoint(.gemini, base: "https://generativelanguage.googleapis.com/v1beta",
-                     model: "gemini-3-flash")
-        )
-        XCTAssertEqual(
-            url.absoluteString,
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash:streamGenerateContent?alt=sse"
+    private func endpoint(_ id: String = "openai", model: String = "m", key: String = "k") -> AIEndpoint {
+        AIEndpoint(
+            provider: AIProviderCatalog.provider(id: id)
+                ?? ProviderInfo(id: id, name: "P", api: "https://x.test", speaking: .openAICompletions),
+            baseURL: URL(string: "https://x.test")!,
+            apiKey: key,
+            model: model
         )
     }
 
     // MARK: - Requests
 
-    func testOpenAIBodyOmitsTemperatureAndMaxTokens() throws {
-        // gpt-5 and the o-series reject both outright.
-        let data = try OpenAIWire().body(
-            AIRequest(system: "s", user: "u"), endpoint(.openai, base: "https://x.test")
-        )
-        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        XCTAssertNil(body["temperature"])
-        XCTAssertNil(body["max_tokens"])
-        XCTAssertEqual(body["stream"] as? Bool, true)
-        let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
-        XCTAssertEqual(messages.map { $0["role"] }, ["system", "user"])
+    /// Writing a commit message is not a reasoning problem. AIKit turns the
+    /// request into whichever dialect the provider speaks; asking for it at
+    /// all is TheGit's decision, and this is the one that proves it.
+    func testThinkingIsAlwaysOff() {
+        let options = AIGateway.callOptions(AIRequest(system: "s", user: "u"), endpoint())
+        XCTAssertEqual(options.thinking, .off)
     }
 
-    func testAnthropicBodyCarriesMaxTokensAndTopLevelSystem() throws {
-        let data = try AnthropicWire().body(
-            AIRequest(system: "s", user: "u", maxOutputTokens: 512),
-            endpoint(.anthropic, base: "https://x.test")
-        )
-        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        XCTAssertEqual(body["max_tokens"] as? Int, 512)
-        XCTAssertEqual(body["system"] as? String, "s")
+    func testPromptIsOneSystemAndOneUserTurn() {
+        let options = AIGateway.callOptions(AIRequest(system: "s", user: "u"), endpoint(model: "gpt-5"))
+        XCTAssertEqual(options.model, "gpt-5")
+        XCTAssertEqual(options.prompt.map(\.role), [.system, .user])
+        XCTAssertEqual(options.prompt.map(\.text), ["s", "u"])
     }
 
-    // MARK: - Thinking
-
-    /// Writing a commit message is not a reasoning problem, so a model that
-    /// thinks by default gets told not to — in its own provider's dialect.
-    func testThinkingIsSwitchedOffInTheProvidersOwnDialect() throws {
-        // deepseek-v4-flash and friends.
-        let disabled = try body(
-            OpenAIWire(),
-            endpoint(.openai, base: "https://x.test", noThink: .init(off: "thinking_type", effort: "high"))
-        )
-        XCTAssertEqual(disabled["thinking"] as? [String: String], ["type": "disabled"])
-        XCTAssertNil(disabled["reasoning_effort"], "the off switch wins over turning it down")
-
-        let qwen = try body(
-            OpenAIWire(),
-            endpoint(.openai, base: "https://x.test", noThink: .init(off: "enable_thinking"))
-        )
-        XCTAssertEqual(qwen["enable_thinking"] as? Bool, false)
-
-        // gpt-5: can't be off, so it goes as low as it goes.
-        let effort = try body(
-            OpenAIWire(),
-            endpoint(.openai, base: "https://x.test", noThink: .init(effort: "minimal"))
-        )
-        XCTAssertEqual(effort["reasoning_effort"] as? String, "minimal")
-    }
-
-    /// A model the endpoint reported at runtime has no catalog entry, and a
-    /// knob a server doesn't recognise is a 400.
-    func testUnknownModelGetsNoThinkingKnobs() throws {
-        let plain = try body(OpenAIWire(), endpoint(.openai, base: "https://x.test"))
-        XCTAssertNil(plain["thinking"])
-        XCTAssertNil(plain["reasoning_effort"])
-        XCTAssertNil(plain["enable_thinking"])
-    }
-
-    func testGeminiOnlyZeroesTheBudgetWhenTheModelOffersAMinimalTier() throws {
-        let minimal = try body(
-            GeminiWire(),
-            endpoint(.gemini, base: "https://g.test", noThink: .init(effort: "minimal"))
-        )
-        let config = try XCTUnwrap(minimal["generationConfig"] as? [String: Any])
-        XCTAssertEqual(config["thinkingConfig"] as? [String: Int], ["thinkingBudget": 0])
-
-        // Pro tiers clamp to a floor and reject 0.
-        let medium = try body(
-            GeminiWire(),
-            endpoint(.gemini, base: "https://g.test", noThink: .init(effort: "medium"))
-        )
-        XCTAssertNil((medium["generationConfig"] as? [String: Any])?["thinkingConfig"])
-    }
-
-    /// Extended thinking is opt-in on this API — the fix is to send nothing.
-    func testAnthropicBodyHasNoThinkingBlock() throws {
-        let body = try body(AnthropicWire(), endpoint(.anthropic, base: "https://x.test"))
-        XCTAssertNil(body["thinking"])
-    }
-
-    func testCatalogCarriesTheThinkingSwitch() throws {
-        let deepseek = try XCTUnwrap(AIProviderCatalog.provider(id: "deepseek"))
-        let flash = try XCTUnwrap(deepseek.models.first { $0.id == "deepseek-v4-flash" })
-        XCTAssertEqual(flash.noThink?.off, "thinking_type")
-    }
-
-    func testAuthHeaderFollowsTheProvider() {
+    /// gpt-5 and the o-series reject a cap they weren't asked for, so an
+    /// unset budget has to stay unset all the way down.
+    func testNoOutputCapUnlessOneWasAskedFor() {
+        XCTAssertNil(AIGateway.callOptions(AIRequest(system: "s", user: "u"), endpoint()).maxOutputTokens)
         XCTAssertEqual(
-            OpenAIWire().headers(endpoint(.openai, base: "https://x.test"))["Authorization"],
-            "Bearer k"
+            AIGateway.callOptions(AIRequest(system: "s", user: "u", maxOutputTokens: 16), endpoint())
+                .maxOutputTokens,
+            16
         )
-        let anthropic = AnthropicWire().headers(
-            endpoint(.anthropic, base: "https://x.test", header: "x-api-key", prefix: "")
-        )
-        XCTAssertEqual(anthropic["x-api-key"], "k")
-        XCTAssertEqual(anthropic["anthropic-version"], "2023-06-01")
     }
 
-    /// A local endpoint has no key, and sending an empty Bearer header
-    /// makes some servers reject the request outright.
-    func testNoKeyMeansNoAuthHeader() {
-        var local = endpoint(.openai, base: "http://localhost:11434/v1")
-        local.apiKey = ""
-        XCTAssertNil(OpenAIWire().headers(local)["Authorization"])
+    // MARK: - Errors
+
+    private func message(_ error: Error) -> String {
+        (error as? AIError)?.message ?? error.localizedDescription
     }
 
-    // MARK: - Streams
+    /// A status code alone tells the user nothing about which of the four
+    /// settings fields is wrong. Each one names the thing to go fix.
+    func testHTTPFailuresNameTheProviderAndTheFix() {
+        let target = endpoint("anthropic", model: "claude-x")
+        // AIKit's own error type can't be built from outside the package,
+        // so the translation is exercised where it lives.
+        func said(_ status: Int, _ body: String) -> String {
+            message(AIGateway.statusError(status, body: AIErrorBody.message(Data(body.utf8)), endpoint: target))
+        }
 
-    func testSSEPayloadExtraction() {
-        XCTAssertEqual(AIClient.ssePayload("data: {\"a\":1}"), "{\"a\":1}")
-        XCTAssertEqual(AIClient.ssePayload("data:{\"a\":1}"), "{\"a\":1}")
-        XCTAssertNil(AIClient.ssePayload("event: content_block_delta"))
-        XCTAssertNil(AIClient.ssePayload(""))
-        XCTAssertNil(AIClient.ssePayload(": keep-alive"))
+        let rejected = said(401, #"{"error":{"message":"invalid x-api-key"}}"#)
+        XCTAssertTrue(rejected.contains("rejected the API key"))
+        XCTAssertTrue(rejected.contains("invalid x-api-key"), "the provider's own words survive")
+
+        XCTAssertTrue(said(404, "").contains("claude-x"))
+        XCTAssertTrue(said(429, "").contains("rate limiting"))
+        XCTAssertTrue(said(503, "").contains("HTTP 503"))
     }
 
-    func testOpenAIStreamFrames() {
-        let wire = OpenAIWire()
+    func testNetworkFailuresReadAsSentences() {
+        let target = endpoint("ollama")
         XCTAssertEqual(
-            wire.event(from: #"{"choices":[{"delta":{"content":"fix"}}]}"#),
-            .delta("fix")
+            message(AIGateway.friendly(URLError(.timedOut), endpoint: target)),
+            "The request timed out."
         )
-        // The opening frame carries a role and no text.
-        XCTAssertNil(wire.event(from: #"{"choices":[{"delta":{"role":"assistant"}}]}"#))
-        XCTAssertEqual(wire.event(from: "[DONE]"), .done)
-        XCTAssertEqual(
-            wire.event(from: #"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#),
-            .done
+        XCTAssertTrue(
+            message(AIGateway.friendly(URLError(.cannotConnectToHost), endpoint: target))
+                .contains("local server is running")
         )
-        XCTAssertNil(wire.event(from: "not json"))
-    }
-
-    func testAnthropicStreamFrames() {
-        let wire = AnthropicWire()
-        XCTAssertEqual(
-            wire.event(from: #"{"type":"content_block_delta","delta":{"type":"text_delta","text":"fix"}}"#),
-            .delta("fix")
-        )
-        XCTAssertNil(wire.event(from: #"{"type":"message_start","message":{}}"#))
-        XCTAssertEqual(wire.event(from: #"{"type":"message_stop"}"#), .done)
-    }
-
-    func testGeminiStreamFrames() {
-        let wire = GeminiWire()
-        XCTAssertEqual(
-            wire.event(from: #"{"candidates":[{"content":{"parts":[{"text":"fix"}]}}]}"#),
-            .delta("fix")
-        )
-        XCTAssertEqual(
-            wire.event(from: #"{"candidates":[{"finishReason":"STOP","content":{"parts":[]}}]}"#),
-            .done
-        )
-    }
-
-    // MARK: - Model lists
-
-    func testModelListShapes() throws {
-        let openai = try OpenAIWire().models(
-            from: Data(#"{"data":[{"id":"gpt-5"},{"id":"o3"}]}"#.utf8)
-        )
-        XCTAssertEqual(openai.map(\.id), ["gpt-5", "o3"])
-
-        let gemini = try GeminiWire().models(
-            from: Data(#"{"models":[{"name":"models/gemini-3-flash","displayName":"Gemini 3 Flash"}]}"#.utf8)
-        )
-        XCTAssertEqual(gemini.first?.id, "gemini-3-flash")
-        XCTAssertEqual(gemini.first?.name, "Gemini 3 Flash")
     }
 
     func testErrorBodyReadsTheProviderMessage() {

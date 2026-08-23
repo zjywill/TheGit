@@ -6,18 +6,19 @@ let package = Package(
     platforms: [.macOS(.v14)],
     dependencies: [
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.4.0"),
+        // The AI provider layer: 5 wire protocols, ~50 providers, one
+        // normalized event stream. Pinned by revision in Package.resolved —
+        // the package carries no tags yet.
+        .package(url: "https://github.com/zjywill/aikitswift", branch: "main"),
     ],
     targets: [
         .executableTarget(
             name: "TheGit",
             dependencies: [
                 .product(name: "MarkdownUI", package: "swift-markdown-ui"),
+                .product(name: "AIKit", package: "aikitswift"),
             ],
-            path: "Sources/TheGit",
-            // Reachable through Bundle.module. scripts/bundle.sh has to copy
-            // the generated TheGit_TheGit.bundle into the .app alongside the
-            // binary, or the packaged build finds no catalog.
-            resources: [.copy("Resources/providers.json")]
+            path: "Sources/TheGit"
         ),
         .testTarget(
             name: "TheGitTests",

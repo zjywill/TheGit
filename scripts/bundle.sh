@@ -74,7 +74,8 @@ fi
 
 swift build "${BUILD_ARGS[@]}"
 
-BIN="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)/$APP_NAME"
+BIN_DIR="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)"
+BIN="$BIN_DIR/$APP_NAME"
 [ -f "$BIN" ] || { echo "no binary at $BIN"; exit 1; }
 
 echo "==> Assembling $APP_NAME.app"
@@ -82,10 +83,13 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/$APP_NAME"
 
-# The AI provider catalog. SwiftPM also emits it as a sibling .bundle, but
-# that only belongs next to a bare binary — inside an .app the resource
-# goes in Contents/Resources, which is where AIProviderCatalog looks first.
-cp "$ROOT/Sources/TheGit/Resources/providers.json" "$APP/Contents/Resources/"
+# The AI provider catalog, which ships inside AIKit. SwiftPM emits it as a
+# bundle beside the binary, which is where it belongs next to a bare
+# executable; inside an .app it goes in Contents/Resources, the first place
+# AIKit's loader looks. Without this the app has an empty provider list.
+AI_BUNDLE="AIKitSwift_AIKit.bundle"
+[ -d "$BIN_DIR/$AI_BUNDLE" ] || { echo "no $AI_BUNDLE in $BIN_DIR"; exit 1; }
+cp -R "$BIN_DIR/$AI_BUNDLE" "$APP/Contents/Resources/"
 
 if [ -f "$ROOT/Resources/AppIcon.icns" ]; then
     cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"

@@ -179,7 +179,7 @@ glab mr merge <n> [--squash] [--remove-source-branch]
 
 ## P3 —— AI 辅助 review
 
-复用 commit message 和 PR 描述生成器已经在用的那一套：`AIClient.stream`、`AISettings`，
+复用 commit message 和 PR 描述生成器已经在用的那一套：`AIGateway.stream`、`AISettings`，
 外加一个与 `PullRequestGenerator` 并列的 prompt 模块。
 
 - 输入：请求的 diff（经过 `CommitMessageGenerator.summarize` 的预算逻辑，它已经能处理

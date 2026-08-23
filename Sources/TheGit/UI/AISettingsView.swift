@@ -1,3 +1,4 @@
+import AIKit
 import SwiftUI
 
 /// The Settings window (⌘,). One screen: which model to talk to, and how
@@ -8,7 +9,7 @@ struct AISettingsView: View {
 
     @State private var keyDraft = ""
     /// Models the endpoint reported, merged over the catalog's list.
-    @State private var fetched: [AIModel] = []
+    @State private var fetched: [ModelInfo] = []
     @State private var status: Status?
     @State private var probe: Task<Void, Never>?
     /// The chooser is a mode, not a popover: picking who to talk to is the
@@ -73,7 +74,7 @@ struct AISettingsView: View {
                 : nil
         ) {
             SettingsRow(
-                title: ai.provider?.name ?? "No provider",
+                title: ai.provider?.displayName ?? "No provider",
                 subtitle: (ai.provider?.baseUrl.isEmpty ?? true)
                     ? "Your own endpoint" : ai.provider?.baseUrl
             ) {
@@ -215,34 +216,34 @@ struct AISettingsView: View {
         "deepseek": "DeepSeek models, with a DeepSeek API key.",
         "openrouter": "One key that routes to many models.",
         "ollama": "Local models on this Mac — no key, nothing leaves it.",
-        "custom": "Any OpenAI-compatible endpoint you point it at.",
+        "custom-provider": "Any OpenAI-compatible endpoint you point it at.",
     ]
 
-    private var featured: [AIProvider] {
+    private var featured: [ProviderInfo] {
         Self.featuredIDs.compactMap { AIProviderCatalog.provider(id: $0) }
     }
 
     /// The long tail: everything not already a card, filtered by the
     /// search field.
-    private var others: [AIProvider] {
-        let shown = Set(Self.featuredIDs + ["custom"])
+    private var others: [ProviderInfo] {
+        let shown = Set(Self.featuredIDs + [AIProviderCatalog.custom.id])
         let needle = providerFilter.trimmingCharacters(in: .whitespaces).lowercased()
         return AIProviderCatalog.all
             .filter { needle.isEmpty ? !shown.contains($0.id) : true }
             .filter {
                 needle.isEmpty
-                    || $0.name.lowercased().contains(needle)
+                    || $0.displayName.lowercased().contains(needle)
                     || $0.id.lowercased().contains(needle)
             }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
     }
 
-    private func detail(for provider: AIProvider) -> String {
+    private func detail(for provider: ProviderInfo) -> String {
         Self.taglines[provider.id]
             ?? (provider.baseUrl.isEmpty ? "Your own endpoint." : provider.baseUrl)
     }
 
-    private func choose(_ provider: AIProvider) {
+    private func choose(_ provider: ProviderInfo) {
         ai.selectProvider(provider)
         keyDraft = ai.apiKey
         fetched = []
@@ -266,7 +267,7 @@ struct AISettingsView: View {
             ForEach(Array(featured.enumerated()), id: \.element.id) { index, provider in
                 if index > 0 { SettingsDivider() }
                 ProviderChoiceRow(
-                    title: provider.name,
+                    title: provider.displayName,
                     detail: detail(for: provider),
                     selected: provider.id == ai.providerID
                 ) { choose(provider) }
@@ -274,7 +275,7 @@ struct AISettingsView: View {
             SettingsDivider()
             ProviderChoiceRow(
                 title: "Use another API key…",
-                detail: Self.taglines["custom"] ?? "",
+                detail: Self.taglines[AIProviderCatalog.custom.id] ?? "",
                 selected: ai.providerID == AIProviderCatalog.custom.id
             ) { choose(AIProviderCatalog.custom) }
         }
@@ -285,10 +286,10 @@ struct AISettingsView: View {
                 .accessibilityLabel("Filter providers")
                 .padding(.horizontal, 12 * zoom)
                 .padding(.vertical, 8 * zoom)
-            ForEach(others) { provider in
+            ForEach(others, id: \.id) { provider in
                 SettingsDivider()
                 ProviderChoiceRow(
-                    title: provider.name,
+                    title: provider.displayName,
                     detail: detail(for: provider),
                     selected: provider.id == ai.providerID
                 ) { choose(provider) }
@@ -330,9 +331,9 @@ struct AISettingsView: View {
     private var modelRows: [PickerRow] {
         var seen = Set<String>()
         var rows: [PickerRow] = []
-        for model in fetched + (ai.provider?.models ?? []) where seen.insert(model.id).inserted {
-            let context = model.ctx.map { "\($0 / 1000)k context" }
-            rows.append(PickerRow(id: model.id, title: model.name, detail: context))
+        for model in fetched + (ai.provider?.modelList ?? []) where seen.insert(model.id).inserted {
+            let context = model.contextWindow.map { "\($0 / 1000)k context" }
+            rows.append(PickerRow(id: model.id, title: model.displayName, detail: context))
         }
         return rows
     }
@@ -355,10 +356,10 @@ struct AISettingsView: View {
             provider: provider, baseURL: baseURL, apiKey: ai.apiKey, model: ai.modelID
         )
         probe?.cancel()
-        status = .working("Asking \(provider.name) for its models…")
+        status = .working("Asking \(provider.displayName) for its models…")
         probe = Task {
             do {
-                let models = try await AIClient.models(endpoint: endpoint)
+                let models = try await AIGateway.models(endpoint: endpoint)
                 fetched = models
                 status = .ok("\(models.count) models available.")
                 announce("\(models.count) models available.")
@@ -376,7 +377,7 @@ struct AISettingsView: View {
         status = .working("Sending a test prompt…")
         probe = Task {
             do {
-                let reply = try await AIClient.complete(
+                let reply = try await AIGateway.complete(
                     AIRequest(system: "Reply with exactly: ok", user: "ping", maxOutputTokens: 16),
                     endpoint: endpoint
                 )

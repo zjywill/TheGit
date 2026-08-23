@@ -1,3 +1,4 @@
+import AIKit
 import Foundation
 
 /// AI configuration, persisted to UserDefaults — everything except the API
@@ -65,7 +66,10 @@ final class AISettings: ObservableObject {
 
     private init() {
         let read = { (key: String) in UserDefaults.standard.object(forKey: Self.prefix + key) }
-        let provider = read("provider") as? String ?? "openai"
+        // An older build wrote "custom" for the hand-configured endpoint;
+        // the catalog AIKit ships spells it "custom-provider".
+        var provider = read("provider") as? String ?? "openai"
+        if provider == AIProviderCatalog.legacyCustomID { provider = AIProviderCatalog.custom.id }
         isEnabled = read("enabled") as? Bool ?? false
         providerID = provider
         modelID = read("model") as? String ?? ""
@@ -76,7 +80,18 @@ final class AISettings: ObservableObject {
         extraInstructions = read("instructions") as? String ?? ""
         budget = Budget(rawValue: read("budget") as? Int ?? 0) ?? .medium
         didConfirmSending = read("confirmedSending") as? Bool ?? false
+        // The key was filed under the old id too, and it is the one thing
+        // here the user cannot simply retype from memory.
+        if provider == AIProviderCatalog.custom.id, AICredentials.key(for: provider) == nil,
+           let legacy = AICredentials.key(for: AIProviderCatalog.legacyCustomID) {
+            AICredentials.setKey(legacy, for: provider)
+            AICredentials.setKey(nil, for: AIProviderCatalog.legacyCustomID)
+        }
         apiKey = AICredentials.key(for: provider) ?? ""
+
+        // didSet doesn't fire during init, so the renamed id has to be
+        // written through by hand or the migration runs again next launch.
+        if provider != read("provider") as? String { write(provider, "provider") }
     }
 
     private func write(_ value: Any, _ key: String) {
@@ -85,7 +100,7 @@ final class AISettings: ObservableObject {
 
     // MARK: - Derived state
 
-    var provider: AIProvider? { AIProviderCatalog.provider(id: providerID) }
+    var provider: ProviderInfo? { AIProviderCatalog.provider(id: providerID) }
 
     func setAPIKey(_ key: String) {
         let key = key.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -107,13 +122,7 @@ final class AISettings: ObservableObject {
     var endpoint: AIEndpoint? {
         guard let provider, let baseURL, !modelID.isEmpty else { return nil }
         guard !apiKey.isEmpty || isLocalEndpoint else { return nil }
-        return AIEndpoint(
-            provider: provider,
-            baseURL: baseURL,
-            apiKey: apiKey,
-            model: modelID,
-            noThink: provider.models.first { $0.id == modelID }?.noThink
-        )
+        return AIEndpoint(provider: provider, baseURL: baseURL, apiKey: apiKey, model: modelID)
     }
 
     /// Local servers don't authenticate, and demanding a key for one would
@@ -137,10 +146,10 @@ final class AISettings: ObservableObject {
     /// Switching providers keeps nothing from the old one — not the model,
     /// not the endpoint override, and not the key, which belongs to the
     /// provider it was issued by.
-    func selectProvider(_ provider: AIProvider) {
+    func selectProvider(_ provider: ProviderInfo) {
         providerID = provider.id
         baseURLOverride = ""
-        modelID = provider.defaultModelId ?? provider.models.first?.id ?? ""
+        modelID = provider.startingModelID
         apiKey = AICredentials.key(for: provider.id) ?? ""
     }
 }

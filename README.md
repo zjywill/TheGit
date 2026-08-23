@@ -239,12 +239,13 @@ Sources/TheGit/
   UI/          sidebar, graph, diffs, commit panel, settings
 Tests/         parser, graph, cleanup and repo integration tests
 scripts/       bundle.sh (app + DMG), release.sh (tag + release + tap),
-               make-icon.py, sync-providers.py
+               make-icon.py
 ```
 
-The AI provider catalog in `Sources/TheGit/Resources/providers.json` is
-generated and committed; `scripts/sync-providers.py` regenerates it and is only
-run to refresh the list.
+The AI provider layer is [AIKitSwift](https://github.com/zjywill/aikitswift) —
+five wire protocols, ~50 providers, one normalized event stream. It ships the
+provider catalog as a resource bundle, which `scripts/bundle.sh` copies into
+`Contents/Resources`. `Core/AI` is the thin seam on top: prompts in, text out.
 
 </details>
 
