@@ -120,7 +120,7 @@ Point it at any OpenAI- or Anthropic-compatible provider and **Generate**
 turns your staged diff into a commit message — Conventional Commits or a plain
 summary, in English, Chinese, or whatever the repo already uses — or drafts
 the title and body of a pull request and submits it through `gh`/`glab`. The
-API key goes in the login keychain, never UserDefaults.
+API key goes in a file only your account can read, never UserDefaults.
 
 👀 **It notices changes made elsewhere.** Commit, checkout or edit from a
 terminal and the view refreshes itself.
@@ -169,15 +169,14 @@ release page, and dismissing it silences that version for good.
 **Check for Updates…** in the TheGit menu asks on demand.
 
 To upgrade, quit TheGit, open the new DMG and drag it over the old copy. Your
-settings and the API key in the keychain carry over; the signature is stable
-across releases, so nothing asks for the key again.
+settings and the API key carry over — nothing asks for the key again.
 
 ### Uninstall
 
 Drag `/Applications/TheGit.app` to the Trash. Settings live in the
 `com.zjywill.TheGit` `defaults` domain and the saved window state; the AI API
-key is an item in the login keychain — delete it in Keychain Access for a
-genuinely clean slate.
+key is `~/Library/Application Support/TheGit/ai-keys.json` — delete that
+directory for a genuinely clean slate.
 
 <details>
 <summary><b>Homebrew (alternative)</b></summary>

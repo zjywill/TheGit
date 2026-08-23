@@ -2,7 +2,7 @@ import AIKit
 import Foundation
 
 /// AI configuration, persisted to UserDefaults — everything except the API
-/// key, which lives in the keychain (`AICredentials`).
+/// key, which lives in its own file (`AICredentials`).
 ///
 /// Off by default, and for the same reason avatars are: a git client should
 /// not send anything anywhere the user didn't ask it to, and a diff is a lot
@@ -56,15 +56,19 @@ final class AISettings: ObservableObject {
     /// The "your diff leaves this machine" alert is shown once.
     @Published var didConfirmSending: Bool { didSet { write(didConfirmSending, "confirmedSending") } }
 
-    /// Cached, not read through to the keychain: `isReady` is evaluated in
-    /// a view body on every keystroke in the commit box, and that is no
-    /// place for a SecItemCopyMatching.
+    /// Cached, not read through to disk: `isReady` is evaluated in a view
+    /// body on every keystroke in the commit box, and that is no place for a
+    /// file read.
     @Published private(set) var apiKey: String
 
     private static let prefix = "TheGit.ai."
     private let defaults = UserDefaults.standard
 
     private init() {
+        // Before the first key is read: anything an older build left in the
+        // keychain moves into the file store and out of the keychain.
+        AICredentials.adoptKeychainItems()
+
         let read = { (key: String) in UserDefaults.standard.object(forKey: Self.prefix + key) }
         // An older build wrote "custom" for the hand-configured endpoint;
         // the catalog AIKit ships spells it "custom-provider".

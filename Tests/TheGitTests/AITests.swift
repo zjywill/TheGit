@@ -74,6 +74,83 @@ final class AIProviderCatalogTests: XCTestCase {
     }
 }
 
+final class AICredentialsTests: XCTestCase {
+
+    private var sandbox: URL!
+    private var realDirectory: URL!
+
+    override func setUpWithError() throws {
+        // Never the real one: a stray write here would clobber the key the
+        // user actually pasted into Settings.
+        realDirectory = AICredentials.directory
+        sandbox = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appending(path: "TheGitCredentials-\(UUID().uuidString)")
+        AICredentials.directory = sandbox
+    }
+
+    override func tearDownWithError() throws {
+        AICredentials.directory = realDirectory
+        try? FileManager.default.removeItem(at: sandbox)
+    }
+
+    func testKeysRoundTripPerProvider() {
+        XCTAssertNil(AICredentials.key(for: "openai"))
+        XCTAssertFalse(AICredentials.hasKey(for: "openai"))
+
+        AICredentials.setKey("sk-one", for: "openai")
+        AICredentials.setKey("sk-two", for: "anthropic")
+
+        // Switching providers must not lose the other one's key.
+        XCTAssertEqual(AICredentials.key(for: "openai"), "sk-one")
+        XCTAssertEqual(AICredentials.key(for: "anthropic"), "sk-two")
+        XCTAssertTrue(AICredentials.hasKey(for: "anthropic"))
+    }
+
+    /// Clearing the field is how a key is removed; an empty string is not a
+    /// credential.
+    func testEmptyOrNilClearsTheEntry() {
+        AICredentials.setKey("sk-one", for: "openai")
+        AICredentials.setKey("", for: "openai")
+        XCTAssertNil(AICredentials.key(for: "openai"))
+
+        AICredentials.setKey("sk-one", for: "openai")
+        AICredentials.setKey(nil, for: "openai")
+        XCTAssertNil(AICredentials.key(for: "openai"))
+    }
+
+    func testOverwritingReplacesRatherThanAppends() {
+        AICredentials.setKey("sk-old", for: "openai")
+        AICredentials.setKey("sk-new", for: "openai")
+        XCTAssertEqual(AICredentials.key(for: "openai"), "sk-new")
+    }
+
+    /// The whole reason this is a file and not the keychain is that it never
+    /// prompts — which only works out if the file itself is not readable by
+    /// anyone else on the machine.
+    func testFileIsPrivateToThisAccount() throws {
+        AICredentials.setKey("sk-one", for: "openai")
+
+        let manager = FileManager.default
+        let file = try XCTUnwrap(manager.attributesOfItem(atPath: AICredentials.file.path)[.posixPermissions] as? NSNumber)
+        XCTAssertEqual(file.int16Value, 0o600)
+
+        let dir = try XCTUnwrap(manager.attributesOfItem(atPath: sandbox.path)[.posixPermissions] as? NSNumber)
+        XCTAssertEqual(dir.int16Value, 0o700)
+    }
+
+    func testAMissingOrCorruptFileReadsAsNoKeys() throws {
+        XCTAssertNil(AICredentials.key(for: "openai"))
+
+        try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
+        try Data("not json".utf8).write(to: AICredentials.file)
+        XCTAssertNil(AICredentials.key(for: "openai"))
+
+        // And it recovers: a bad file is replaced, not appended to.
+        AICredentials.setKey("sk-one", for: "openai")
+        XCTAssertEqual(AICredentials.key(for: "openai"), "sk-one")
+    }
+}
+
 final class AIGatewayTests: XCTestCase {
 
     private func endpoint(_ id: String = "openai", model: String = "m", key: String = "k") -> AIEndpoint {

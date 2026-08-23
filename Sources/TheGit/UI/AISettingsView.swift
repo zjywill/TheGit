@@ -96,7 +96,7 @@ struct AISettingsView: View {
                 SettingsDivider()
                 SettingsRow(
                     title: "API Key",
-                    subtitle: "Stored in your login keychain, never in preferences."
+                    subtitle: "Stored in a file only your account can read, never in preferences."
                 ) {
                     SecureField("sk-…", text: $keyDraft)
                         .textFieldStyle(.roundedBorder)
@@ -262,7 +262,7 @@ struct AISettingsView: View {
                 .controlSize(.small)
         }
         SettingsSection(
-            footer: "API keys are stored in your login keychain, never in preferences."
+            footer: "API keys are stored in a file only your account can read, never in preferences."
         ) {
             ForEach(Array(featured.enumerated()), id: \.element.id) { index, provider in
                 if index > 0 { SettingsDivider() }
