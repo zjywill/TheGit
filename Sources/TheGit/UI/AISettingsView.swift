@@ -204,7 +204,7 @@ struct AISettingsView: View {
     /// The ids worth a card of their own, in showing order. Everything
     /// else is one filter away below.
     private static let featuredIDs = [
-        "openai", "anthropic", "google", "deepseek", "openrouter", "ollama",
+        "openai", "anthropic", "google", "deepseek", "openrouter",
     ]
 
     /// One human sentence per famous provider — what the catalog's URL
@@ -215,8 +215,7 @@ struct AISettingsView: View {
         "google": "Gemini models, with a Google AI key.",
         "deepseek": "DeepSeek models, with a DeepSeek API key.",
         "openrouter": "One key that routes to many models.",
-        "ollama": "Local models on this Mac — no key, nothing leaves it.",
-        "custom-provider": "Any OpenAI-compatible endpoint you point it at.",
+        "custom-provider": "Any OpenAI-compatible endpoint — Ollama, LM Studio, your own gateway.",
     ]
 
     private var featured: [ProviderInfo] {

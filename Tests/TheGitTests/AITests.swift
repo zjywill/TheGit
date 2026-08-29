@@ -15,7 +15,7 @@ final class AIProviderCatalogTests: XCTestCase {
         XCTAssertEqual(all.first?.id, "custom-provider", "the bring-your-own entry leads the list")
         // The chooser's front page compactMaps these, so a renamed id
         // upstream would quietly leave a hole in it.
-        for id in ["openai", "anthropic", "google", "deepseek", "openrouter", "ollama"] {
+        for id in ["openai", "anthropic", "google", "deepseek", "openrouter"] {
             XCTAssertNotNil(AIProviderCatalog.provider(id: id), "\(id) is missing from the catalog")
         }
     }
@@ -56,11 +56,13 @@ final class AIProviderCatalogTests: XCTestCase {
         }
     }
 
-    /// The endpoints that decide their own model list — the "fetch models"
-    /// button exists for these.
-    func testLocalRuntimesAskTheEndpointForModels() throws {
-        for id in ["ollama", "lm-studio", AIProviderCatalog.custom.id] {
+    /// Local runtimes are not catalog entries — the user's machine is the
+    /// only authority on their endpoint and models — so their old ids land
+    /// on the bring-your-own entry, which asks the endpoint for models.
+    func testLocalRuntimesAreTheCustomEntry() throws {
+        for id in ["ollama", "lm-studio", "lmstudio", AIProviderCatalog.custom.id] {
             let provider = try XCTUnwrap(AIProviderCatalog.provider(id: id))
+            XCTAssertEqual(provider.id, AIProviderCatalog.custom.id)
             XCTAssertTrue(provider.needsModelLookup, "\(id) should look its models up at runtime")
         }
     }

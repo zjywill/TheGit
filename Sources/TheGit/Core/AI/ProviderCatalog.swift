@@ -21,12 +21,21 @@ enum AIProviderCatalog {
     /// AIKit. Settings written by an older build still name it.
     static let legacyCustomID = "custom"
 
-    /// Endpoints for catalog entries that ship without one. Google's is
-    /// the only gap today, and a provider on the chooser's front page has
-    /// to work without the user pasting a URL in first. Drop an entry from
-    /// here once AIKit's catalog carries it.
+    /// Ids older builds offered that are now spellings of "point Custom at
+    /// it yourself": the local runtimes, whose endpoint and model list only
+    /// the user's own machine knows.
+    private static let legacyIDs: [String: String] = [
+        legacyCustomID: "custom-provider",
+        "ollama": "custom-provider",
+        "lm-studio": "custom-provider",
+        "lmstudio": "custom-provider",
+    ]
+
+    /// Endpoints for catalog entries that ship without one. A provider in
+    /// the chooser has to work without the user pasting a URL in first.
+    /// Drop an entry from here once AIKit's catalog carries it.
     private static let fallbackEndpoints: [String: String] = [
-        "google": "https://generativelanguage.googleapis.com/v1beta",
+        "xai": "https://api.x.ai/v1",
     ]
 
     static let all: [ProviderInfo] = [custom] + ProviderCatalog.all
@@ -37,9 +46,17 @@ enum AIProviderCatalog {
             patched.api = url
             return patched
         }
+        // models.dev leaves the endpoint blank — or a `${WORKSPACE}`
+        // template — where it's per-account (Vertex, Databricks, Snowflake).
+        // A key field and a URL field can't fill those in, so they're out.
+        .filter { provider in
+            guard let api = provider.api, !api.isEmpty else { return false }
+            return !api.contains("${")
+        }
 
     static func provider(id: String) -> ProviderInfo? {
-        all.first { $0.id == (id == legacyCustomID ? custom.id : id) }
+        let id = legacyIDs[id] ?? id
+        return all.first { $0.id == id }
     }
 
     /// Whether the catalog actually loaded. `false` is a packaging problem
