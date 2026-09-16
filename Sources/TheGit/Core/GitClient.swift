@@ -64,20 +64,70 @@ actor GitClient {
     // separated, subject last (it's the only field that can contain tabs).
     private static let logFormat = "%H%x09%P%x09%an%x09%ae%x09%at%x09%D%x09%s"
 
+    /// Row order of the commit graph. Every flag keeps children before
+    /// parents, so the layout is indifferent to the choice — they differ
+    /// only in where a commit with rewritten parents (a rebase or
+    /// cherry-pick) lands.
+    enum SortOrder: String, CaseIterable {
+        /// Committer date: when the commit was last written. A rebase
+        /// rewrites it, so a rebased branch piles up at the top as one
+        /// block. The default — the same interleave `--date-order` has
+        /// always given the graph.
+        case committerDate = "committer"
+        /// Author date: when the work was actually done. Survives a
+        /// rebase — and matches the date the rows display (`%at`) and
+        /// the activity heatmap already commits to.
+        case authorDate = "author"
+        /// Topology: parallel branches stay contiguous instead of
+        /// interleaving by date.
+        case topology = "topology"
+
+        var flag: String {
+            switch self {
+            case .committerDate: return "--date-order"
+            case .authorDate: return "--author-date-order"
+            case .topology: return "--topo-order"
+            }
+        }
+
+        var title: String {
+            switch self {
+            case .committerDate: return "Commit time"
+            case .authorDate: return "Author time"
+            case .topology: return "Branch order"
+            }
+        }
+
+        var help: String {
+            switch self {
+            case .committerDate:
+                return "When each commit was last written. A rebased branch piles up at the top."
+            case .authorDate:
+                return "When the work was done. Survives a rebase, so rebased branches spread out in the order they were written."
+            case .topology:
+                return "Branches stay in one contiguous block each instead of interleaving by date."
+            }
+        }
+    }
+
     /// - solo: show only history reachable from this rev (GitKraken Solo).
     /// - hiddenPatterns: full ref paths to exclude (GitKraken Hide).
     /// - extraRevs: additional start points — stash base commits, whose
     ///   history may be unreachable from any ref after a rebase, and would
     ///   otherwise have no row for the stash node to anchor to.
+    /// - sortOrder: which of the three git order flags walks the history —
+    ///   see `SortOrder`.
     func log(
         limit: Int = 500,
         solo: String? = nil,
         hiddenPatterns: [String] = [],
-        extraRevs: [String] = []
+        extraRevs: [String] = [],
+        sortOrder: SortOrder = .committerDate
     ) async throws -> [Commit] {
-        // --date-order interleaves parallel branches chronologically
-        // (GitKraken-style) while still keeping children before parents.
-        var args = ["log", "--date-order"]
+        // All three order flags interleave (or deliberately don't interleave)
+        // parallel branches while still keeping children before parents —
+        // see SortOrder for which one and why.
+        var args = ["log", sortOrder.flag]
         // A freshly initialized repository has a symbolic HEAD but no
         // commit behind it yet. Passing that unborn HEAD as a revision makes
         // git log fail with "ambiguous argument 'HEAD'"; the named ref sets

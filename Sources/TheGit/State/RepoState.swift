@@ -387,6 +387,13 @@ final class RepoState: ObservableObject, Identifiable {
     /// Graph visibility filters (GitKraken Solo / Hide). Session-only.
     @Published var soloRev: String?
     @Published var hiddenRefs: Set<String> = []
+    /// Row order of the commit graph. Persisted, unlike solo/hide above:
+    /// those are a this-investigation filter, this is a reading preference
+    /// you set once. Straight UserDefaults rather than @AppStorage so the
+    /// toolbar button doesn't republish the whole window mid-refresh.
+    @Published var graphSortOrder: GitClient.SortOrder = UserDefaults.standard
+        .string(forKey: "graphSortOrder")
+        .flatMap(GitClient.SortOrder.init(rawValue:)) ?? .committerDate
     /// Expanded sidebar folders, by node id. Lives here rather than in the
     /// row's @State because the sidebar is a LazyVStack: rows that scroll
     /// out of view are destroyed, and with them any state they owned — a
@@ -1046,7 +1053,8 @@ final class RepoState: ObservableObject, Identifiable {
                 limit: logLimit,
                 solo: soloRev,
                 hiddenPatterns: Array(hiddenRefs),
-                extraRevs: stashList.map(\.baseHash).filter { !$0.isEmpty }
+                extraRevs: stashList.map(\.baseHash).filter { !$0.isEmpty },
+                sortOrder: graphSortOrder
             )
             async let branches = git.branches()
             async let worktrees = git.worktrees()
@@ -3330,6 +3338,15 @@ final class RepoState: ObservableObject, Identifiable {
         } else {
             hiddenRefs.insert(branch.refPath)
         }
+        Task { await refresh(quiet: true) }
+    }
+
+    /// The graph's rows come out of `git log` already ordered — switching
+    /// is a quiet refresh, exactly like toggling a visibility filter.
+    func setGraphSortOrder(_ order: GitClient.SortOrder) {
+        guard order != graphSortOrder else { return }
+        graphSortOrder = order
+        UserDefaults.standard.set(order.rawValue, forKey: "graphSortOrder")
         Task { await refresh(quiet: true) }
     }
 

@@ -32,12 +32,36 @@ final class RepoIntegrationTests: XCTestCase {
     // MARK: - Helpers
 
     @discardableResult
-    private func git(_ dir: String, _ args: [String]) async throws -> String {
-        try await Shell.run(
+    private func git(
+        _ dir: String,
+        _ args: [String],
+        extraEnv: [String: String] = [:]
+    ) async throws -> String {
+        var env = ["GIT_TERMINAL_PROMPT": "0"]
+        env.merge(extraEnv) { _, new in new }
+        return try await Shell.run(
             "/usr/bin/env",
             ["git", "-C", dir, "-c", "user.email=t@t", "-c", "user.name=Test"] + args,
-            env: ["GIT_TERMINAL_PROMPT": "0"]
+            env: env
         )
+    }
+
+    /// One commit whose author and committer timestamps are both pinned —
+    /// the graph's row order is decided by git from these, and a sleep
+    /// would only make the test flaky, not more realistic.
+    @discardableResult
+    private func commit(
+        _ dir: String,
+        _ message: String,
+        at isoDate: String,
+        file: String
+    ) async throws -> String {
+        try write("\(message)\n", to: dir + "/" + file)
+        try await git(dir, ["add", "-A"])
+        return try await git(dir, ["commit", "-qm", message], extraEnv: [
+            "GIT_AUTHOR_DATE": isoDate,
+            "GIT_COMMITTER_DATE": isoDate,
+        ])
     }
 
     /// A repo with one commit in it.
@@ -1837,5 +1861,106 @@ final class RepoIntegrationTests: XCTestCase {
         let missing = await repo.hoverDetails(for: "0000000000000000000000000000000000000000")
         XCTAssertNil(missing)
         XCTAssertNil(repo.errorNotice)
+    }
+
+    // MARK: - Graph sort order (issue #46)
+
+    /// The #46 shape, at six commits. All three order flags are topological
+    /// sorts — a parent only becomes eligible once every child has been
+    /// emitted — so the date only picks among the *eligible* rows. That
+    /// means the rebased block itself can never be split by a flag: what
+    /// moves is everything else around it.
+    ///
+    ///     init ─ A(a T1) ─ D(a T3) ─ E(a T3.5, c T6)   main
+    ///                     └ B'(a T2, c T5) ─ C'(a T4, c T5)  feature,
+    ///                                                            rebased at T5
+    ///
+    /// E was authored *between* B and C (T3.5, while the feature was being
+    /// written) but landed on main *after* the rebase (c T6). Committer
+    /// order reads the rebased block (c T5) whole, directly under E's
+    /// newer commit timestamp. Author order slots E between C (a T4) and
+    /// B (a T2) — where the work actually happened.
+    func testLogSortOrderMovesRebasedCommitsBetweenFlags() async throws {
+        let path = try await makeRepo("sort-order")
+
+        // A on main, then branch off for the feature work.
+        try await commit(path, "A", at: "2026-01-01T10:00:00", file: "a.txt")
+        try await git(path, ["checkout", "-q", "-b", "feature"])
+        try await commit(path, "B", at: "2026-01-02T10:00:00", file: "feature.txt")
+        try await commit(path, "C", at: "2026-01-04T10:00:00", file: "feature.txt")
+
+        // D lands on main while the feature sits un-merged — authored
+        // inside the feature's own author window.
+        try await git(path, ["checkout", "-q", "main"])
+        try await commit(path, "D", at: "2026-01-03T10:00:00", file: "d.txt")
+
+        // The rebase rewrites B and C at T5: committer dates become T5,
+        // author dates stay T2/T4.
+        try await git(path, ["checkout", "-q", "feature"])
+        try await git(path, ["rebase", "-q", "main"], extraEnv: [
+            "GIT_COMMITTER_DATE": "2026-01-05T10:00:00",
+        ])
+
+        // E on main, after the rebase — authored while the feature was
+        // being written (between B and C), committed after everything.
+        try await git(path, ["checkout", "-q", "main"])
+        try write("E\n", to: path + "/e.txt")
+        try await git(path, ["add", "-A"])
+        try await git(path, ["commit", "-qm", "E"], extraEnv: [
+            "GIT_AUTHOR_DATE": "2026-01-03T12:00:00",
+            "GIT_COMMITTER_DATE": "2026-01-06T10:00:00",
+        ])
+
+        let client = GitClient(repoPath: path)
+
+        func subjects(_ order: GitClient.SortOrder) async throws -> [String] {
+            try await client.log(sortOrder: order).map(\.subject)
+        }
+
+        // All three flags walk the same six commits ("init" is makeRepo's).
+        for order in GitClient.SortOrder.allCases {
+            let rows = try await subjects(order)
+            XCTAssertEqual(
+                Set(rows), ["A", "B", "C", "D", "E", "init"],
+                "\(order.flag) lost a commit"
+            )
+        }
+
+        // Committer order: E (c T6) on top, the rebased block (c T5) whole
+        // under it, above D — the pile-up #46 reports.
+        let committerRows = try await subjects(.committerDate)
+        XCTAssertEqual(committerRows, ["E", "C", "B", "D", "A", "init"])
+
+        // Author order: E slots between C (a T4) and B (a T2) — the block
+        // no longer reads as one undated blob above everything else.
+        let authorRows = try await subjects(.authorDate)
+        XCTAssertEqual(authorRows, ["C", "E", "B", "D", "A", "init"])
+
+        // Topology order: in THIS shape it walks exactly like commit time.
+        // The rebased block hangs off main's tip, so D stays ineligible
+        // until B is emitted and no flag can split the block — topo's
+        // no-interleaving property only shows when parallel branches
+        // could interleave, which this graph cannot produce. Verified
+        // against git itself, not against our idea of what git does.
+        let topoRows = try await subjects(.topology)
+        XCTAssertEqual(topoRows, committerRows)
+
+        // Children above parents under every flag — the invariant
+        // GraphLayout leans on.
+        for order in GitClient.SortOrder.allCases {
+            let commits = try await client.log(sortOrder: order)
+            var position: [String: Int] = [:]
+            for (i, c) in commits.enumerated() { position[c.hash] = i }
+            for c in commits where !c.parents.isEmpty {
+                for parent in c.parents {
+                    if let p = position[parent] {
+                        XCTAssertLessThan(
+                            position[c.hash]!, p,
+                            "\(order.flag): \(c.subject) must sit above \(parent)"
+                        )
+                    }
+                }
+            }
+        }
     }
 }

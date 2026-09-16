@@ -545,6 +545,7 @@ struct RepoCommandCluster: View {
     @Environment(\.uiZoom) private var zoom
     @AppStorage("pullMode") private var pullModeRaw = RepoState.PullMode.ff.rawValue
     @State private var showingPullOptions = false
+    @State private var showingSortOptions = false
 
     private var pullMode: RepoState.PullMode {
         RepoState.PullMode(rawValue: pullModeRaw) ?? .ff
@@ -657,6 +658,27 @@ struct RepoCommandCluster: View {
                     Task { await repo.refreshAll() }
                 }
                 .keyboardShortcut("r")
+
+                RepoCommandDivider(horizontalPadding: metrics.dividerPadding)
+
+                // A view option riding at the row's end, not a command: the
+                // graph's row order has nothing to do with the
+                // fetch/push/stash cluster this row is for.
+                RepoCommandButton(
+                    title: "Graph sort order",
+                    systemImage: "arrow.up.arrow.down",
+                    help: "Row order of the commit graph: \(repo.graphSortOrder.title)",
+                    width: metrics.buttonWidth,
+                    iconSize: metrics.iconSize
+                ) {
+                    showingSortOptions.toggle()
+                }
+                .popover(isPresented: $showingSortOptions, arrowEdge: .bottom) {
+                    SortOptionsPopover(current: repo.graphSortOrder) { order in
+                        repo.setGraphSortOrder(order)
+                        showingSortOptions = false
+                    }
+                }
             }
             // No capsule of its own: the toolbar it sits in is already a
             // surface, and glass on glass read as two stacked layers. Each
@@ -1040,6 +1062,72 @@ private struct PullOptionRow: View {
             .buttonStyle(.plain)
             .help("Run \(mode.title.lowercased()) now")
         }
+        .padding(.horizontal, 6 * zoom)
+        .padding(.vertical, 5 * zoom)
+        .background(
+            RoundedRectangle(cornerRadius: 5)
+                .fill(Color.primary.opacity(hovering ? 0.08 : 0))
+        )
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
+/// The graph sort picker — the pull options popover's simpler sibling: one
+/// interaction per row (click = adopt and apply), so it dismisses on
+/// selection and the graph re-sorting underneath it is the confirmation.
+private struct SortOptionsPopover: View {
+    let current: GitClient.SortOrder
+    let choose: (GitClient.SortOrder) -> Void
+
+    @Environment(\.uiZoom) private var zoom
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2 * zoom) {
+            Text("Row order of the commit graph")
+                .zoomFont(11)
+                .foregroundStyle(.secondary)
+            Text("Children always stay above their parents")
+                .zoomFont(10)
+                .foregroundStyle(.tertiary)
+                .padding(.bottom, 4 * zoom)
+            ForEach(GitClient.SortOrder.allCases, id: \.rawValue) { order in
+                SortOptionRow(order: order, isCurrent: order == current) {
+                    choose(order)
+                }
+            }
+        }
+        .padding(12 * zoom)
+        .frame(minWidth: 240 * zoom, alignment: .leading)
+    }
+}
+
+private struct SortOptionRow: View {
+    let order: GitClient.SortOrder
+    let isCurrent: Bool
+    let choose: () -> Void
+
+    @Environment(\.uiZoom) private var zoom
+    @State private var hovering = false
+
+    var body: some View {
+        // One target, the whole row: unlike the pull options there is no
+        // "do it now" vs "make it the default" split — picking an order is
+        // both at once.
+        Button(action: choose) {
+            HStack(spacing: 8 * zoom) {
+                Image(systemName: isCurrent ? "largecircle.fill.circle" : "circle")
+                    .zoomFont(13)
+                    .foregroundStyle(isCurrent ? Color.accentColor : .secondary)
+                Text(order.title)
+                    .zoomFont(12)
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(order.help)
         .padding(.horizontal, 6 * zoom)
         .padding(.vertical, 5 * zoom)
         .background(
