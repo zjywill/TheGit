@@ -72,6 +72,15 @@ else
     echo "==> Building release binary (this Mac only)"
 fi
 
+# AIKit is a branch dependency pinned by revision in Package.resolved, so a
+# plain `swift build` keeps building the pinned commit forever — and its
+# provider catalog syncs from models.dev near-daily. Move the pin before
+# every bundle or the shipped app carries a stale provider list. Deliberately
+# not `|| true`: a bundle that couldn't check the catalog should fail loudly,
+# not ship quietly behind.
+echo "==> Refreshing the AIKit pin (provider catalog)"
+swift package update aikitswift >/dev/null
+
 swift build "${BUILD_ARGS[@]}"
 
 BIN_DIR="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)"
