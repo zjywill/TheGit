@@ -77,6 +77,13 @@ struct TheGitApp: App {
                 // The frame alone is not enough — see WindowFloor.
                 .background(WindowFloor(size: Self.minContent))
         }
+        // .automatic under the macOS 27 SDK draws a compact toolbar
+        // (38 pt); everything built with the 26.x SDK — including the
+        // installed 0.12.1 — got the 52 pt one. Pin the unified style so
+        // the command row keeps its height under new toolchains. (#34
+        // removed this once for a first-layout glitch on macOS 26; that
+        // was the old SDK's .automatic, not this.)
+        .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
             // Directly under "About TheGit", where every Mac app puts it.
             CommandGroup(after: .appInfo) {
@@ -253,6 +260,11 @@ struct RootView: View {
         // stack's change, so this is the transaction its transition rides on.
         .animation(.easeOut(duration: reduceMotion ? 0 : 0.2), value: updates.update)
         .toolbar { toolbarCommands }
+        // The tab strip below paints itself `.bar`; the toolbar band must
+        // be the same material or the window reads as two stacked surfaces.
+        // Under the macOS 27 SDK, .unified's own default came out lighter —
+        // pin the material to match instead of trusting the default.
+        .toolbarBackground(.bar, for: .windowToolbar)
         // Inside RootView, not on the WindowGroup root: SwiftUI quietly
         // reasserts title-bar properties when the screen below changes, and
         // only a view that re-renders on that change re-applies the chrome.
