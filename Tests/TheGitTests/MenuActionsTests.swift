@@ -64,6 +64,23 @@ final class MenuActionsTests: XCTestCase {
         XCTAssertEqual(state.upstreamChoices(for: main).map(\.name), ["origin/main"])
     }
 
+    /// The choices are read from a per-snapshot cache, so a refresh that
+    /// brings or drops a remote branch has to reach the very next call — a
+    /// menu offering a branch the fetch just pruned would set a dead upstream.
+    func testUpstreamChoicesFollowTheSnapshotAfterARefresh() {
+        let state = repo(remote: [remoteBranch("origin/main")])
+        let main = Branch(name: "main", kind: .local, isCurrent: true)
+        XCTAssertEqual(state.upstreamChoices(for: main).map(\.name), ["origin/main"])
+
+        state.snapshot.remoteBranches = [
+            remoteBranch("origin/main"), remoteBranch("origin/new"),
+        ]
+        XCTAssertEqual(state.upstreamChoices(for: main).map(\.name), ["origin/main", "origin/new"])
+
+        state.snapshot.remoteBranches = [remoteBranch("origin/new")]
+        XCTAssertEqual(state.upstreamChoices(for: main).map(\.name), ["origin/new"])
+    }
+
     // MARK: - Which remote a branch belongs to
 
     func testRemoteForBranchComesFromItsUpstream() {

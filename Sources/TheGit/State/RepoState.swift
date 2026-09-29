@@ -218,7 +218,10 @@ final class RepoState: ObservableObject, Identifiable {
     }
 
     @Published var snapshot = RepoSnapshot() {
-        didSet { scheduleSnapshotSave() }
+        didSet {
+            upstreamPool = nil
+            scheduleSnapshotSave()
+        }
     }
     @Published var commitMessage = ""
     /// The merge draft last prefilled into `commitMessage`, so it can be
@@ -1713,17 +1716,35 @@ final class RepoState: ObservableObject, Identifiable {
         branchPrompt = .renameRemote(name)
     }
 
+    /// The remote-tracking branches that can be an upstream, in name order.
+    /// Read once per snapshot: every branch row in the sidebar builds its own
+    /// "Set Upstream" menu inside `body`, so sorting here per row was
+    /// branches × remotes × log(remotes) work on every redraw of the sidebar.
+    /// Dropped by `snapshot`'s `didSet`.
+    private var upstreamPool: [Branch]?
+
     /// Remote-tracking branches offered as upstreams for `branch`, with the
     /// same-named ones first — that's the pick in almost every case.
     func upstreamChoices(for branch: Branch) -> [Branch] {
-        snapshot.remoteBranches
-            .filter { !$0.name.hasSuffix("/HEAD") }
-            .sorted { a, b in
-                let aMatch = a.shortName == branch.name
-                let bMatch = b.shortName == branch.name
-                if aMatch != bMatch { return aMatch }
-                return a.name < b.name
+        let pool: [Branch]
+        if let cached = upstreamPool {
+            pool = cached
+        } else {
+            pool = snapshot.remoteBranches
+                .filter { !$0.name.hasSuffix("/HEAD") }
+                .sorted { $0.name < $1.name }
+            upstreamPool = pool
+        }
+        var same: [Branch] = []
+        var rest: [Branch] = []
+        for candidate in pool {
+            if candidate.shortName == branch.name {
+                same.append(candidate)
+            } else {
+                rest.append(candidate)
             }
+        }
+        return same + rest
     }
 
     func updateSubmodules() {
