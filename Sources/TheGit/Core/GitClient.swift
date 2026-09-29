@@ -927,6 +927,17 @@ actor GitClient {
         try await run(["fetch", "--all", "--prune"])
     }
 
+    /// What the five-minute background fetch runs. The same fetch, minus the
+    /// one write git makes even when there is nothing to fetch: it rewrites
+    /// `.git/FETCH_HEAD` every time, and the FS watcher sees that as a change
+    /// and re-reads the whole repo — so an idle tick used to cost a full
+    /// refresh per repo for no news. Nothing here reads FETCH_HEAD; a fetch
+    /// that does bring something writes refs, and that still reaches the
+    /// watcher.
+    func autoFetch() async throws {
+        try await run(["fetch", "--all", "--prune", "--no-write-fetch-head"])
+    }
+
     /// Substrings git prints when refusing to *start* an operation over
     /// uncommitted changes. Matched loosely because the wording varies per
     /// command: "cannot rebase: You have unstaged changes", "Your local

@@ -1863,6 +1863,56 @@ final class RepoIntegrationTests: XCTestCase {
         XCTAssertNil(repo.errorNotice)
     }
 
+    // MARK: - Background fetch
+
+    /// The point of `autoFetch()`: git rewrites FETCH_HEAD on every fetch,
+    /// news or not, and the FS watcher takes that write for a change to the
+    /// repo and re-reads all of it. A tick with nothing to fetch has to leave
+    /// no trace, while a tick that does bring something still has to bring it.
+    func testAutoFetchWritesNoFetchHeadButStillFetches() async throws {
+        let origin = try await makeRepo("bg-origin")
+        let clonePath = root.appendingPathComponent("bg-clone").path
+        try await Shell.run(
+            "/usr/bin/env", ["git", "clone", "-q", origin, clonePath],
+            env: ["GIT_TERMINAL_PROMPT": "0"]
+        )
+        let client = GitClient(repoPath: clonePath)
+        let fetchHead = clonePath + "/.git/FETCH_HEAD"
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fetchHead))
+
+        try await client.autoFetch()
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fetchHead),
+            "an idle background fetch must not touch .git"
+        )
+
+        try await commit(origin, "news", at: "2026-01-01T00:00:00", file: "news.txt")
+        let tip = try await git(origin, ["rev-parse", "HEAD"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        try await client.autoFetch()
+        let seen = try await git(clonePath, ["rev-parse", "origin/main"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(seen, tip, "the fetch itself still has to happen")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fetchHead))
+
+        // The control: the manual fetch is the one that writes it, so the
+        // assertions above are about the flag and not about the fixture.
+        try await client.fetch()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fetchHead))
+    }
+
+    /// Never sooner than the interval — a first fetch at one minute would be
+    /// new behaviour, not jitter — and spread across the whole window.
+    func testAutoFetchDelayIsSpreadAcrossTheJitterWindow() {
+        let delays = (0..<400).map { _ in RepoState.nextAutoFetchDelay() }
+        let low = RepoState.autoFetchInterval
+        let high = low + RepoState.autoFetchJitter
+        XCTAssertTrue(delays.allSatisfy { $0 >= low && $0 < high })
+        XCTAssertGreaterThan(Set(delays).count, 300, "a constant delay would keep tabs in lockstep")
+        XCTAssertLessThan(delays.min()!, low + RepoState.autoFetchJitter * 0.1)
+        XCTAssertGreaterThan(delays.max()!, high - RepoState.autoFetchJitter * 0.1)
+    }
+
     // MARK: - Graph sort order (issue #46)
 
     /// The #46 shape, at six commits. All three order flags are topological

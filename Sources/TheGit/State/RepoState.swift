@@ -918,16 +918,35 @@ final class RepoState: ObservableObject, Identifiable {
         }
     }
 
+    /// Five minutes, like GitKraken's Auto-Fetch Interval.
+    static let autoFetchInterval: TimeInterval = 300
+    /// Added on top of the interval, freshly drawn each round. Tabs that were
+    /// opened together — a relaunch restores them all in the same second —
+    /// would otherwise fetch, re-read and re-lay-out together every five
+    /// minutes for ever; a random walk pulls them apart within a few rounds.
+    static let autoFetchJitter: TimeInterval = 60
+
+    static func nextAutoFetchDelay() -> TimeInterval {
+        autoFetchInterval + .random(in: 0..<autoFetchJitter)
+    }
+
     /// Built-in sensible default (no settings UI): quiet auto-fetch with
-    /// prune every 5 minutes, like GitKraken's Auto-Fetch Interval.
+    /// prune every 5 minutes.
+    ///
+    /// No refresh of its own afterwards. The watcher is already running on
+    /// this repo and hears every ref a fetch moves, so the refresh that used
+    /// to follow was a second read of the same news — and on a fetch that
+    /// found nothing, a read of no news at all. Only a repo whose watcher
+    /// failed to start keeps the explicit refresh, since for it the fetch
+    /// would otherwise land unseen.
     private func startAutoFetch() {
         guard autoFetchTask == nil else { return }
         autoFetchTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(300))
+                try? await Task.sleep(for: .seconds(Self.nextAutoFetchDelay()))
                 guard let self, !Task.isCancelled else { return }
-                try? await self.git.fetch()
-                await self.refresh(quiet: true)
+                try? await self.git.autoFetch()
+                if self.watcher == nil { await self.refresh(quiet: true) }
             }
         }
     }
