@@ -84,7 +84,13 @@ does. It won't grow a cross-platform UI toolkit or a built-in issue tracker.
 than inheriting a lane's, so a branch stays one color for its whole life even
 when lanes get reused. Uncommitted work shows up as a dashed WIP node at the
 top, connected to HEAD. Select a commit and its lineage lights up; hover a row
-and a card shows the full message, author and refs.
+and a card shows the full message, author and refs. The search box looks
+through the whole history, not just what is loaded — message, author, or a
+commit's sha — and a hit from years back opens like any other.
+
+📥 **Clone, or start one.** <kbd>⇧⌘O</kbd> clones from a URL with git's own
+progress — paste-ready if the address is already on your clipboard. Open a
+folder that isn't a repository yet and TheGit offers to initialize it.
 
 🪟 **Three panes, one screen.** Branches left, graph middle, staging right.
 Click a file and the diff overlays the graph instead of shoving the panes
