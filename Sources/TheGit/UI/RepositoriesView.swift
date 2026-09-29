@@ -364,6 +364,7 @@ struct RepositoriesView: View {
                 Button("Scan a Folder…") { appState.scanFolderPanel() }
                     .disabled(appState.scanning)
                 Button("Open Repository…") { appState.openRepoPanel() }
+                Button("Clone Repository…") { appState.beginClone() }
             }
             .padding(.top, 2 * zoom)
         }

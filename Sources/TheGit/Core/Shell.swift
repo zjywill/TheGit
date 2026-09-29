@@ -100,6 +100,11 @@ enum Shell {
     /// `timeout` is for the commands that talk to a network. Local git is
     /// bounded by the disk and gets none, but a fetch against a host that
     /// accepts the connection and then says nothing has no end of its own.
+    ///
+    /// `onStderr` sees stderr as it arrives, in whatever pieces the pipe
+    /// delivers — for a command whose progress is only ever written there.
+    /// It is called from a background thread, and stderr is still collected
+    /// whole for the error message.
     @discardableResult
     static func run(
         _ executable: String,
@@ -107,10 +112,12 @@ enum Shell {
         cwd: String? = nil,
         env: [String: String] = [:],
         label: String? = nil,
-        timeout: TimeInterval? = nil
+        timeout: TimeInterval? = nil,
+        onStderr: (@Sendable (String) -> Void)? = nil
     ) async throws -> String {
         let data = try await runData(
-            executable, args, cwd: cwd, env: env, label: label, timeout: timeout
+            executable, args, cwd: cwd, env: env, label: label, timeout: timeout,
+            onStderr: onStderr
         )
         return String(data: data, encoding: .utf8) ?? ""
     }
@@ -124,7 +131,8 @@ enum Shell {
         cwd: String? = nil,
         env: [String: String] = [:],
         label: String? = nil,
-        timeout: TimeInterval? = nil
+        timeout: TimeInterval? = nil,
+        onStderr: (@Sendable (String) -> Void)? = nil
     ) async throws -> Data {
         let child = ChildProcess()
         return try await withTaskCancellationHandler {
@@ -160,8 +168,26 @@ enum Shell {
                         }
                     }
 
-                    let outData = stdout.fileHandleForReading.readDataToEndOfFile()
-                    let errData = stderr.fileHandleForReading.readDataToEndOfFile()
+                    let outData: Data
+                    let errData: Data
+                    if let onStderr {
+                        // stderr first: the caller wants it live, and the
+                        // commands that ask for that write nothing to stdout
+                        // worth blocking behind.
+                        var collected = Data()
+                        let handle = stderr.fileHandleForReading
+                        while true {
+                            let chunk = handle.availableData
+                            if chunk.isEmpty { break }
+                            collected.append(chunk)
+                            onStderr(String(decoding: chunk, as: UTF8.self))
+                        }
+                        errData = collected
+                        outData = stdout.fileHandleForReading.readDataToEndOfFile()
+                    } else {
+                        outData = stdout.fileHandleForReading.readDataToEndOfFile()
+                        errData = stderr.fileHandleForReading.readDataToEndOfFile()
+                    }
                     process.waitUntilExit()
                     // Past this point the child is gone, so a late timeout
                     // has nothing to kill and no verdict to give.

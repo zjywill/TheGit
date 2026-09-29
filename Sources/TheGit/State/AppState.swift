@@ -27,6 +27,10 @@ final class AppState: ObservableObject {
     }
     /// A folder the user tried to open that isn't a git repository.
     @Published var nonGitPath: String?
+    /// The Clone sheet, while it is up.
+    @Published var clone: CloneModel?
+    /// Why a `git init` the user asked for didn't happen.
+    @Published var initFailure: String?
     /// No usable git on the box (fresh Mac, no Command Line Tools). The
     /// empty state swaps its "open a repo" pitch for an install card while
     /// this is true; a background poll flips it back the moment the
@@ -732,12 +736,37 @@ final class AppState: ObservableObject {
         Task { await Toolchain.installCommandLineTools() }
     }
 
+    /// Opens the Clone sheet, with the address on the pasteboard already in it
+    /// when there is one — the usual way here is a URL copied off a web page.
+    func beginClone() {
+        clone = CloneModel(url: CloneModel.addressOnPasteboard() ?? "")
+    }
+
+    /// Called from the "Not a Git repository" alert, so the folder was picked
+    /// on purpose and named back to the user before this ran — which is what
+    /// keeps `open(path:)` from ever initializing on its own.
+    func initializeRepository(at path: String) {
+        nonGitPath = nil
+        guard Clone.canInitialize(path) else { return }
+        Task {
+            do {
+                try await Clone.initialize(at: path)
+                open(path: path)
+            } catch {
+                initFailure = error.localizedDescription
+            }
+        }
+    }
+
     func openRepoPanel() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        panel.message = "Choose a Git repository"
+        // A folder made here is how a new project starts: the next thing
+        // this asks is whether to make it a repository.
+        panel.canCreateDirectories = true
+        panel.message = "Choose a Git repository, or a folder to start one in"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         open(path: url.path)
     }

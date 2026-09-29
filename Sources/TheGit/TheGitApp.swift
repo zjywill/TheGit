@@ -93,6 +93,8 @@ struct TheGitApp: App {
             CommandGroup(after: .newItem) {
                 Button("Open Repository…") { appState.openRepoPanel() }
                     .keyboardShortcut("o")
+                Button("Clone Repository…") { appState.beginClone() }
+                    .keyboardShortcut("o", modifiers: [.command, .shift])
             }
             CommandGroup(after: .toolbar) {
                 // Off by default and opt-in from here: avatars are the one
@@ -276,20 +278,55 @@ struct RootView: View {
                 set: { if !$0 { appState.nonGitPath = nil } }
             )
         ) {
+            // Offered only for a folder that is safe to make into one, and
+            // only from here: the picker names it, this dialog says what will
+            // happen to it, and nothing initializes on a bare click.
+            if let path = appState.nonGitPath, Clone.canInitialize(path) {
+                Button("Initialize Repository") { appState.initializeRepository(at: path) }
+            }
             Button("Copy Command") {
                 if let path = appState.nonGitPath {
                     RepoState.copyToPasteboard("cd \"\(path)\" && git init")
                 }
             }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            if let path = appState.nonGitPath, Clone.canInitialize(path) {
+                Text("""
+                "\((path as NSString).lastPathComponent)" has no .git directory.
+
+                Initialize a new repository in it?
+                """)
+            } else {
+                Text("""
+                "\((appState.nonGitPath as NSString?)?.lastPathComponent ?? "")" has no .git directory.
+
+                To turn it into a repository, run this in Terminal, then open the folder again:
+
+                cd "\(appState.nonGitPath ?? "")" && git init
+                """)
+            }
+        }
+        .alert(
+            "Couldn’t initialize the repository",
+            isPresented: Binding(
+                get: { appState.initFailure != nil },
+                set: { if !$0 { appState.initFailure = nil } }
+            )
+        ) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text("""
-            "\((appState.nonGitPath as NSString?)?.lastPathComponent ?? "")" has no .git directory.
-
-            To turn it into a repository, run this in Terminal, then open the folder again:
-
-            cd "\(appState.nonGitPath ?? "")" && git init
-            """)
+            Text(appState.initFailure ?? "")
+        }
+        .sheet(item: $appState.clone) { model in
+            CloneSheet(
+                model: model,
+                onFinished: { path in
+                    appState.clone = nil
+                    appState.open(path: path)
+                },
+                onCancel: { appState.clone = nil }
+            )
         }
         // Only the result of a check the *user* asked for gets a dialog.
         .alert(
@@ -492,9 +529,12 @@ struct EmptyStateView: View {
                 Text("No repository open")
                     .font(.title3)
                     .foregroundStyle(.secondary)
-                Button("Open Repository…") { appState.openRepoPanel() }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
+                HStack(spacing: 8) {
+                    Button("Open Repository…") { appState.openRepoPanel() }
+                        .buttonStyle(.borderedProminent)
+                    Button("Clone Repository…") { appState.beginClone() }
+                }
+                .controlSize(.large)
                 // An empty wall with a full catalog is the common case once
                 // the user has scanned a folder: the repos exist, none of them
                 // is on the Dashboard yet, and a file picker is the long way
