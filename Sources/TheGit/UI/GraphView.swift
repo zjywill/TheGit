@@ -28,15 +28,9 @@ struct GraphView: View {
         let query = repo.searchText.trimmingCharacters(in: .whitespaces)
         let searching = !query.isEmpty
         // Search filters to a flat list — lane lines are meaningless across
-        // filtered gaps, so rows collapse to a single node column.
-        let rows = searching
-            ? allRows.filter {
-                !$0.commit.isWip && !$0.commit.isStash
-                    && ($0.commit.subject.localizedCaseInsensitiveContains(query)
-                        || $0.commit.author.localizedCaseInsensitiveContains(query)
-                        || $0.commit.hash.hasPrefix(query.lowercased()))
-            }
-            : allRows
+        // filtered gaps, so rows collapse to a single node column. The list
+        // is the repo's: the loaded rows first, then all of history.
+        let rows = searching ? repo.searchRows : allRows
         let totalLanes = GraphLayout.maxLanes(of: rows)
         let laneW = Self.laneWidth * zoom
         let rowH = Self.rowHeight * zoom
@@ -487,7 +481,9 @@ struct GraphRowView: View {
     /// Full brightness for the checked-out branch's history; everything
     /// else is dimmed so "what's on my branch" reads at a glance.
     private var onCurrentBranch: Bool {
-        row.commit.isWip || repo.snapshot.reachableFromHead.contains(row.commit.hash)
+        row.commit.isWip
+            || repo.snapshot.reachableFromHead.contains(row.commit.hash)
+            || repo.searchOnHead.contains(row.commit.hash)
     }
 
     /// With a commit selected, its lineage takes over the spotlight:

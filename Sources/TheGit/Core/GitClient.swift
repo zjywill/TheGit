@@ -128,6 +128,21 @@ actor GitClient {
         // parallel branches while still keeping children before parents —
         // see SortOrder for which one and why.
         var args = ["log", sortOrder.flag]
+        args += await historyStarts(solo: solo, hiddenPatterns: hiddenPatterns, extraRevs: extraRevs)
+        args += ["--format=\(Self.logFormat)", "-n", String(limit)]
+        let out = try await run(args)
+        return GitParsers.parseLog(out)
+    }
+
+    /// The revisions the graph walks from — what the log and the search both
+    /// ask git about, so a commit the search finds is a commit the graph can
+    /// show.
+    private func historyStarts(
+        solo: String?,
+        hiddenPatterns: [String],
+        extraRevs: [String] = []
+    ) async -> [String] {
+        var args: [String] = []
         // A freshly initialized repository has a symbolic HEAD but no
         // commit behind it yet. Passing that unborn HEAD as a revision makes
         // git log fail with "ambiguous argument 'HEAD'"; the named ref sets
@@ -144,9 +159,82 @@ actor GitClient {
             if hasHead { args.append("HEAD") }
             args += extraRevs
         }
-        args += ["--format=\(Self.logFormat)", "-n", String(limit)]
-        let out = try await run(args)
-        return GitParsers.parseLog(out)
+        return args
+    }
+
+    /// What a search found in the whole history.
+    struct SearchHits {
+        /// Newest first, capped at the limit asked for.
+        var commits: [Commit]
+        /// The subset of `commits` reachable from HEAD. The graph keeps that
+        /// history bright, and for a hit past the loaded window that answer
+        /// isn't in the snapshot.
+        var onHead: Set<String>
+    }
+
+    /// Commits anywhere in history whose message or author contains `query`,
+    /// case-insensitively — or, when it reads as the start of a sha, that
+    /// commit. Asked of git rather than of the rows already loaded, so a
+    /// commit two years back is as findable as yesterday's.
+    ///
+    /// `-F`: the box takes what was typed, not a pattern. `fix(api)` and
+    /// `[WIP]` are regexes that either mean something else or don't compile.
+    /// Message and author are two queries because git ANDs `--grep` with
+    /// `--author`; the union is what a search box means.
+    func search(
+        _ query: String,
+        limit: Int = 1000,
+        solo: String? = nil,
+        hiddenPatterns: [String] = [],
+        sortOrder: SortOrder = .committerDate
+    ) async throws -> SearchHits {
+        let starts = await historyStarts(solo: solo, hiddenPatterns: hiddenPatterns)
+        let filters = ["-i", "-F"]
+        let n = ["-n", String(limit)]
+        let format = ["--format=\(Self.logFormat)"]
+        let byMessage = "--grep=\(query)"
+        let byAuthor = "--author=\(query)"
+        let head = ["HEAD", "--format=%H"]
+
+        async let message = run(["log", sortOrder.flag] + filters + [byMessage] + starts + format + n)
+        async let author = run(["log", sortOrder.flag] + filters + [byAuthor] + starts + format + n)
+        // `try?`: an unborn HEAD has no history to be on, and that is an
+        // answer, not a failure of the search.
+        async let headMessage = try? run(["log"] + filters + [byMessage] + head + n)
+        async let headAuthor = try? run(["log"] + filters + [byAuthor] + head + n)
+        async let named = commitNamed(query)
+
+        var merged: [String: Commit] = [:]
+        for commit in try await GitParsers.parseLog(message) + GitParsers.parseLog(author) {
+            merged[commit.hash] = commit
+        }
+        var commits = merged.values.sorted { ($0.date, $0.hash) > ($1.date, $1.hash) }
+        if commits.count > limit { commits.removeLast(commits.count - limit) }
+        // A sha is a jump, not a filter: the commit it names goes first,
+        // wherever it sits and whether or not any ref reaches it.
+        if let hit = await named {
+            commits.removeAll { $0.hash == hit.hash }
+            commits.insert(hit, at: 0)
+        }
+
+        var onHead: Set<String> = []
+        for out in [await headMessage, await headAuthor] {
+            for line in (out ?? "").split(separator: "\n") { onHead.insert(String(line)) }
+        }
+        return SearchHits(commits: commits, onHead: onHead.intersection(commits.map(\.hash)))
+    }
+
+    /// The commit a sha prefix names, if what was typed looks like one and
+    /// git agrees. Four hex digits is where an abbreviation stops being a
+    /// word: "beef" or "add" in a message is a search, not an address.
+    private func commitNamed(_ query: String) async -> Commit? {
+        guard query.count >= 4, query.count <= 40, query.allSatisfy(\.isHexDigit),
+              let full = try? await run(["rev-parse", "--verify", "--quiet", "\(query)^{commit}"])
+        else { return nil }
+        let hash = full.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let out = try? await run(["log", "-1", "--format=\(Self.logFormat)", hash])
+        else { return nil }
+        return GitParsers.parseLog(out).first
     }
 
     /// Commits per day over the last `weeks` weeks, across every ref — the

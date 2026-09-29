@@ -228,7 +228,20 @@ final class RepoState: ObservableObject, Identifiable {
     /// taken back out when the merge ends without it being committed.
     private var mergeDraft: String?
     @Published var panelMode: PanelMode = .commit
-    @Published var searchText = ""
+    @Published var searchText = "" {
+        didSet { if searchText != oldValue { searchTextChanged() } }
+    }
+    /// What the graph lists while a search is on. First the loaded rows that
+    /// match, at once, so typing answers as fast as it always did; then what
+    /// git finds across the whole history, once it has looked.
+    @Published private(set) var searchRows: [GraphRow] = []
+    /// Which of the hits past the loaded window are on HEAD's history —
+    /// `snapshot.reachableFromHead` only knows the window. Read together with
+    /// `searchRows` and set in the same turn, so it isn't published itself.
+    private(set) var searchOnHead: Set<String> = []
+    private var searchTask: Task<Void, Never>?
+    /// Set while `locate` clears the box itself — see `searchTextChanged`.
+    private var clearingForLocate = false
     @Published var amend = false
     @Published var isBusy = false
     /// Separate from `isBusy`: a generation runs for seconds and must not
@@ -1125,7 +1138,12 @@ final class RepoState: ObservableObject, Identifiable {
             // Publish only real changes: replacing an identical snapshot
             // still makes List re-diff and visibly nudges the scroll
             // position right after scrolling stops.
-            if snap != snapshot { snapshot = snap }
+            if snap != snapshot {
+                snapshot = snap
+                // A commit made, or a branch moved, while a search is open:
+                // what it lists may have changed under it.
+                if !searchQuery.isEmpty { startSearch(after: .zero) }
+            }
             lastRefreshedAt = Date()
             updateLineage()
             revealCurrentBranch()
@@ -3195,7 +3213,12 @@ final class RepoState: ObservableObject, Identifiable {
     // MARK: - Commit details
 
     var selectedCommitObject: Commit? {
-        selectedCommit.flatMap { hash in snapshot.commits.first { $0.hash == hash } }
+        selectedCommit.flatMap { hash in
+            snapshot.commits.first { $0.hash == hash }
+                // Picked from a search, from further back than the graph has
+                // loaded: it has no row there, but it still has details.
+                ?? searchRows.first { $0.commit.hash == hash }?.commit
+        }
     }
 
     /// Called when the graph selection changes.
@@ -3304,6 +3327,87 @@ final class RepoState: ObservableObject, Identifiable {
         }
     }
 
+    // MARK: - Search
+
+    private var searchQuery: String {
+        searchText.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// The loaded rows a query matches — the same three tests the graph has
+    /// always applied, kept as the instant first answer.
+    static func loadedMatches(_ query: String, in rows: [GraphRow]) -> [GraphRow] {
+        rows.filter {
+            !$0.commit.isWip && !$0.commit.isStash
+                && ($0.commit.subject.localizedCaseInsensitiveContains(query)
+                    || $0.commit.author.localizedCaseInsensitiveContains(query)
+                    || $0.commit.hash.hasPrefix(query.lowercased()))
+        }
+    }
+
+    /// A search hit as a graph row. Search lists are flat — lane lines mean
+    /// nothing across gaps — so it is a lone node; the colour is the branch
+    /// colour the row already had if the loaded graph knows this commit.
+    private static func searchRow(_ commit: Commit, colorIds: [String: Int]) -> GraphRow {
+        GraphRow(
+            commit: commit,
+            column: 0,
+            columnColor: colorIds[commit.hash] ?? 0,
+            passThrough: [],
+            mergeSources: [],
+            parentLanes: [],
+            laneCount: 1
+        )
+    }
+
+    private func searchTextChanged() {
+        searchTask?.cancel()
+        let query = searchQuery
+        guard !query.isEmpty else {
+            searchRows = []
+            searchOnHead = []
+            // A commit picked out of a search can be past the loaded window.
+            // Clearing the box would leave it selected with no row under it —
+            // its details would vanish from the panel — so land on it in the
+            // graph instead, the way a click on a parent's sha does.
+            if !clearingForLocate, let picked = selectedCommit,
+               !snapshot.commits.contains(where: { $0.hash == picked }) {
+                locate(picked)
+            }
+            return
+        }
+        searchOnHead = []
+        searchRows = Self.loadedMatches(query, in: snapshot.graphRows)
+        startSearch(after: .milliseconds(250))
+    }
+
+    /// The pause is a debounce: a word being typed is one question, not six.
+    private func startSearch(after delay: Duration) {
+        searchTask?.cancel()
+        let query = searchQuery
+        searchTask = Task { [weak self] in
+            if delay > .zero { try? await Task.sleep(for: delay) }
+            guard !Task.isCancelled, let self else { return }
+            await self.runSearch(query)
+        }
+    }
+
+    private func runSearch(_ query: String) async {
+        // A failed search leaves the loaded matches on screen: a toast for
+        // every keystroke that git didn't like would be worse than the gap.
+        guard let hits = try? await git.search(
+            query,
+            solo: soloRev,
+            hiddenPatterns: Array(hiddenRefs),
+            sortOrder: graphSortOrder
+        ), !Task.isCancelled, searchQuery == query else { return }
+        let colorIds = Dictionary(
+            snapshot.graphRows.map { ($0.commit.hash, $0.columnColor) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        searchOnHead = hits.onHead
+        searchRows = hits.commits.map { Self.searchRow($0, colorIds: colorIds) }
+    }
+
     /// Graph scroll request (commit hash); consumed by GraphView.
     @Published var scrollTarget: String?
 
@@ -3319,8 +3423,12 @@ final class RepoState: ObservableObject, Identifiable {
         guard !hash.isEmpty else { return }
         // A search filters the graph to a flat list, and the commit asked
         // for is usually not in it — the jump would silently do nothing.
-        // Asking to go somewhere outranks the filter that hides it.
+        // Asking to go somewhere outranks the filter that hides it. Not the
+        // landing on a picked commit that clearing the box otherwise does:
+        // the commit still selected is the one being left.
+        clearingForLocate = true
         searchText = ""
+        clearingForLocate = false
         if snapshot.commits.contains(where: { $0.hash == hash }) {
             selectedCommit = hash
             scrollTarget = hash

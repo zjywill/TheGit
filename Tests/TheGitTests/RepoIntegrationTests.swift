@@ -1913,6 +1913,146 @@ final class RepoIntegrationTests: XCTestCase {
         XCTAssertGreaterThan(delays.max()!, high - RepoState.autoFetchJitter * 0.1)
     }
 
+    // MARK: - Search across the whole history (issue #12)
+
+    private func commitAs(_ dir: String, _ message: String, author: String? = nil) async throws {
+        var args = ["commit", "-q", "--allow-empty", "-m", message]
+        if let author { args.append("--author=\(author)") }
+        try await git(dir, args)
+    }
+
+    /// `count` empty commits in one line, built with fast-import — a window
+    /// worth of history in milliseconds. `needleAt` counts from the oldest.
+    private func makeLongRepo(_ name: String, count: Int, needleAt: Int) async throws -> (path: String, needle: String) {
+        let path = root.appendingPathComponent(name).path
+        try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
+        try await git(path, ["init", "-q", "-b", "main", "."])
+        var stream = ""
+        for i in 0..<count {
+            let message = (i == needleAt ? "needle in the old history" : "filler \(i)") + "\n"
+            stream += "commit refs/heads/main\nmark :\(i + 1)\n"
+            stream += "author A <a@a> \(1_700_000_000 + i * 60) +0000\n"
+            stream += "committer A <a@a> \(1_700_000_000 + i * 60) +0000\n"
+            stream += "data \(message.utf8.count)\n\(message)"
+            if i > 0 { stream += "from :\(i)\n" }
+            stream += "\n"
+        }
+        let streamFile = root.appendingPathComponent(name + ".stream").path
+        try write(stream, to: streamFile)
+        _ = try await Shell.run("/bin/sh", ["-c", "git -C '\(path)' fast-import --quiet < '\(streamFile)'"], env: [:])
+        try await git(path, ["reset", "-q", "--hard", "main"])
+        let needle = try await git(path, ["rev-parse", "main~\(count - 1 - needleAt)"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (path, needle)
+    }
+
+    /// What the box is: a substring, not a pattern. `fix(api)` is a regex
+    /// group and `[wip]` a character class — both would search for something
+    /// other than what was typed.
+    func testSearchTakesTheBoxLiterally() async throws {
+        let path = try await makeRepo("search-literal")
+        try await commitAs(path, "fix(api) [WIP] handle a.b")
+        try await commitAs(path, "unrelated axb")
+        let client = GitClient(repoPath: path)
+
+        for query in ["fix(api)", "[wip]", "a.b", "HANDLE"] {
+            let hits = try await client.search(query).commits.map(\.subject)
+            XCTAssertEqual(hits, ["fix(api) [WIP] handle a.b"], "query \(query)")
+        }
+        let none = try await client.search("nothing like this").commits
+        XCTAssertTrue(none.isEmpty)
+    }
+
+    /// git ANDs `--grep` with `--author`; a search box means either.
+    func testSearchFindsByAuthorAndByMessage() async throws {
+        let path = try await makeRepo("search-author")
+        try await commitAs(path, "zebra crossing", author: "Ann Ant <ann@example.com>")
+        try await commitAs(path, "plain", author: "Zed Zebra <zed@example.com>")
+        try await commitAs(path, "other", author: "Bob Bee <bob@example.com>")
+        let client = GitClient(repoPath: path)
+
+        let hits = try await client.search("zebra").commits.map(\.subject)
+        XCTAssertEqual(Set(hits), ["zebra crossing", "plain"])
+        let byEmail = try await client.search("bob@example").commits.map(\.subject)
+        XCTAssertEqual(byEmail, ["other"])
+    }
+
+    /// Newest first, and the HEAD subset is exactly the hits HEAD can reach.
+    func testSearchReportsWhichHitsAreOnHead() async throws {
+        let path = try await makeRepo("search-head")
+        try await git(path, ["checkout", "-q", "-b", "side"])
+        try await commitAs(path, "needle on side")
+        try await git(path, ["checkout", "-q", "main"])
+        try await commitAs(path, "needle on main")
+        let client = GitClient(repoPath: path)
+
+        let hits = try await client.search("needle")
+        XCTAssertEqual(Set(hits.commits.map(\.subject)), ["needle on side", "needle on main"])
+        let onHead = Set(hits.commits.filter { hits.onHead.contains($0.hash) }.map(\.subject))
+        XCTAssertEqual(onHead, ["needle on main"])
+    }
+
+    /// A sha is a jump: it finds the commit even when no ref reaches it, and
+    /// a short hex word in a message is not mistaken for one.
+    func testSearchTreatsAShaAsAnAddress() async throws {
+        let path = try await makeRepo("search-sha")
+        try await commitAs(path, "mentions beef in passing")
+        let tree = try await git(path, ["rev-parse", "HEAD^{tree}"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let orphan = try await git(path, ["commit-tree", tree, "-m", "dangling"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let client = GitClient(repoPath: path)
+
+        let hits = try await client.search(String(orphan.prefix(8))).commits
+        XCTAssertEqual(hits.first?.hash, orphan)
+        // "beef" has four hex digits but names no commit: it stays a search.
+        let word = try await client.search("beef").commits.map(\.subject)
+        XCTAssertEqual(word, ["mentions beef in passing"])
+    }
+
+    /// The point of the issue: 500 commits are all the graph has loaded, and
+    /// a commit older than that used to be unfindable. It has to be findable,
+    /// show its details, and — once the box is cleared — be found in the graph.
+    func testSearchReachesPastTheLoadedWindow() async throws {
+        let (path, needle) = try await makeLongRepo("search-window", count: 560, needleAt: 5)
+        let repo = RepoState(path: path)
+        await repo.refresh()
+        XCTAssertFalse(
+            repo.snapshot.commits.contains { $0.hash == needle },
+            "fixture: the needle must lie beyond the loaded window"
+        )
+
+        repo.searchText = "needle"
+        try await waitUntil("the search reaches the old commit") {
+            repo.searchRows.contains { $0.commit.hash == needle }
+        }
+        XCTAssertEqual(repo.searchRows.count, 1)
+        XCTAssertTrue(repo.searchOnHead.contains(needle), "it is on main, which is HEAD's line")
+
+        repo.selectedCommit = needle
+        XCTAssertEqual(repo.selectedCommitObject?.subject, "needle in the old history")
+
+        repo.searchText = ""
+        try await waitUntil("the graph loads far enough to hold the pick") {
+            repo.snapshot.commits.contains { $0.hash == needle }
+        }
+        XCTAssertEqual(repo.selectedCommit, needle)
+        XCTAssertEqual(repo.selectedCommitObject?.hash, needle)
+        XCTAssertTrue(repo.searchRows.isEmpty)
+    }
+
+    /// Typing answers at once from what is loaded, before git has looked.
+    func testLoadedMatchesAnswerBeforeGitDoes() async throws {
+        let path = try await makeRepo("search-instant")
+        try await commitAs(path, "instant answer")
+        let repo = RepoState(path: path)
+        await repo.refresh()
+
+        let rows = RepoState.loadedMatches("INSTANT", in: repo.snapshot.graphRows)
+        XCTAssertEqual(rows.map(\.commit.subject), ["instant answer"])
+        XCTAssertTrue(RepoState.loadedMatches("absent", in: repo.snapshot.graphRows).isEmpty)
+    }
+
     // MARK: - Graph sort order (issue #46)
 
     /// The #46 shape, at six commits. All three order flags are topological
